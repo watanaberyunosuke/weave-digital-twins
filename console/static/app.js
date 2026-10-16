@@ -161,7 +161,11 @@ function renderContainers(st) {
   }
   $('#containers').replaceChildren(...rows.map((c) => el(
     'li', { title: c.status },
-    el('i', { class: `dot ${c.state === 'running' ? 'ok' : c.state === 'exited' ? 'bad' : 'warn'}` }),
+    // One-shot services (elk-setup) exit 0 by design; only a failure is red.
+    el('i', {
+      class: `dot ${c.state === 'running' ? 'ok'
+        : c.state === 'exited' ? (c.status.startsWith('Exited (0)') ? '' : 'bad') : 'warn'}`,
+    }),
     c.name,
   )));
 }
