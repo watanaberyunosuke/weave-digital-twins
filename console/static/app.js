@@ -64,9 +64,33 @@ function showTab(name) {
   if (name === 'telemetry') loadTelemetry();
   if (name === 'anomalies') loadAnomalies();
   if (name === 'jobs') loadJobs();
+  if (name === 'gis') loadGisLayers();
 }
 
 // ----------------------------------------------------------------- header
+// Auto follows the OS; Light and Dark pin it for this browser.
+const THEMES = ['auto', 'light', 'dark'];
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+const readTheme = () => { try { return localStorage.getItem('weave-theme') || 'auto'; } catch { return 'auto'; } };
+const isDark = () => document.documentElement.dataset.theme === 'dark'
+  || (!document.documentElement.dataset.theme && darkQuery.matches);
+
+function applyTheme(theme) {
+  if (theme === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('weave-theme', theme); } catch { /* storage blocked: still applies */ }
+  $('#theme-btn').textContent = `Theme: ${theme[0].toUpperCase()}${theme.slice(1)}`;
+  $('#theme-btn').dataset.theme = theme;
+}
+
+$('#theme-btn').addEventListener('click', () => {
+  const next = THEMES[(THEMES.indexOf($('#theme-btn').dataset.theme) + 1) % THEMES.length];
+  applyTheme(next);
+  onThemeChange();
+});
+darkQuery.addEventListener('change', () => onThemeChange());
+applyTheme(readTheme());
+
 function renderHeader() {
   const { config } = state;
   $('#region').textContent = config.region_config || 'GIS_REGION_CONFIG not set';
@@ -614,13 +638,170 @@ async function loadAnomalies() {
   );
 }
 
-// A dark basemap is the light tiles inverted in CSS rather than a second
-// tile provider, so turning it on sends the area in view nowhere new.
-const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
-function applyMapStyle() {
+// ---------------------------------------------------------------- basemaps
+// The list comes from the server (Google only appears when .env has a key).
+// The choice is per browser. In dark mode a light basemap switches to its
+// dark variant where one exists, or is inverted in CSS, which sends the area
+// in view to no extra provider. Imagery and Google are never altered.
+let baseLayer = null;
+let googleTimer = null;
+const readBasemap = () => { try { return localStorage.getItem('weave-basemap'); } catch { return null; } };
+
+function currentBasemap() {
+  const all = state.config.basemaps || [];
+  const chosen = $('#basemap').value || state.config.basemap_default;
+  return all.find((b) => b.id === chosen) || all[0];
+}
+
+function applyBasemap() {
+  const all = state.config.basemaps || [];
+  let b = currentBasemap();
   const style = state.config.tile_style || 'auto';
-  const dark = style === 'dark' || (style === 'auto' && darkQuery.matches);
-  $('#map').classList.toggle('map-dark', dark);
+  const wantDark = style === 'dark' || (style === 'auto' && isDark());
+  if (wantDark && b.dark_variant) b = all.find((x) => x.id === b.dark_variant) || b;
+  const invert = wantDark && b.kind === 'light';
+  $('#map').classList.toggle('map-invert', invert);
+  // Overlay colours follow what the map looks like, not the page theme.
+  $('#map').classList.toggle('map-dark', invert || b.kind === 'dark' || b.kind === 'imagery');
+
+  if (baseLayer) map.removeLayer(baseLayer);
+  baseLayer = null;
+  clearTimeout(googleTimer);
+  map.off('moveend', googleAttribution);
+  if (b.url) {
+    baseLayer = L.tileLayer(b.url, {
+      attribution: b.attribution, maxZoom: b.max_zoom || 19, subdomains: b.subdomains || 'abc',
+    }).addTo(map);
+    baseLayer.bringToBack();
+    if (b.google) {
+      map.on('moveend', googleAttribution);
+      googleAttribution();
+    }
+  }
+}
+
+// Google's terms require the copyright for the area in view.
+async function googleAttribution() {
+  const b = currentBasemap();
+  if (!b.google || !baseLayer) return;
+  clearTimeout(googleTimer);
+  googleTimer = setTimeout(async () => {
+    const bounds = map.getBounds();
+    const q = new URLSearchParams({
+      map_id: b.id, zoom: map.getZoom(), north: bounds.getNorth(), south: bounds.getSouth(),
+      east: bounds.getEast(), west: bounds.getWest(),
+    });
+    const res = await api(`/api/basemaps/google-attribution?${q}`).catch(() => null);
+    if (res && baseLayer) {
+      map.attributionControl.removeAttribution(baseLayer.getAttribution());
+      baseLayer.options.attribution = `Google ${res.copyright}`.trim();
+      map.attributionControl.addAttribution(baseLayer.options.attribution);
+    }
+  }, 300);
+}
+
+function renderBasemapPicker() {
+  const all = state.config.basemaps || [];
+  const saved = readBasemap();
+  const value = all.some((b) => b.id === saved) ? saved : state.config.basemap_default;
+  $('#basemap').replaceChildren(...all.map((b) => el('option', { value: b.id, selected: b.id === value }, b.label)));
+  $('#basemap').addEventListener('change', () => {
+    try { localStorage.setItem('weave-basemap', $('#basemap').value); } catch { /* per-visit only */ }
+    applyBasemap();
+    loadMap();
+  });
+}
+
+function onThemeChange() {
+  if (!state.config) return;
+  applyBasemap();
+  loadMap();
+}
+
+// -------------------------------------------------------------- GIS clients
+function copyable(value, secret = false) {
+  const code = el('code', { class: 'val' }, secret ? '••••••••' : value);
+  const btn = el('button', {
+    type: 'button', class: 'btn ghost',
+    onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        btn.textContent = 'Copied';
+      } catch {
+        code.textContent = value;
+        btn.textContent = 'Select and copy';
+      }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    },
+  }, 'Copy');
+  return el('span', { class: 'copy' }, code, btn);
+}
+
+function steps(...items) {
+  return el('ol', { class: 'steps-list' }, ...items.map((t) => el('li', {}, t)));
+}
+
+function renderGis() {
+  const g = state.config.gis;
+  const pgUri = `postgresql://${g.db_user}@${g.db_host}:${g.db_port}/${g.db_name}`;
+  $('#gis-cards').replaceChildren(
+    el('div', { class: 'card gis' },
+      el('h3', {}, 'PostGIS (direct)', el('span', { class: 'tag real' }, 'full SQL')),
+      el('p', { class: 'muted small' }, 'Fastest for large layers, and the only route for SQL queries or the raw GIS attributes.'),
+      el('dl', { class: 'kv' },
+        el('dt', {}, 'Host'), el('dd', {}, copyable(g.db_host)),
+        el('dt', {}, 'Port'), el('dd', {}, copyable(g.db_port)),
+        el('dt', {}, 'Database'), el('dd', {}, copyable(g.db_name)),
+        el('dt', {}, 'User'), el('dd', {}, copyable(g.db_user)),
+        el('dt', {}, 'Password'), el('dd', {}, copyable(g.db_password, true))),
+      el('a', { class: 'btn primary', href: '/api/gis/qgis/postgis-connection.xml', download: 'weave-postgis.xml' }, 'Download QGIS connection'),
+      el('h4', {}, 'QGIS'),
+      steps('In the Browser panel, right-click PostgreSQL and choose Load Connections.',
+        'Pick the downloaded weave-postgis.xml and import it.',
+        'Expand "Weave twin (read-only)": asset, ref and twin hold the layers. asset.dma_status has DMA outlines with their current status.'),
+      el('h4', {}, 'ArcGIS Pro'),
+      steps('Insert > Connections > Database > New Database Connection.',
+        'Platform PostgreSQL, instance localhost,5432, database authentication with the user and password above.'),
+      el('h4', {}, 'GDAL / ogr2ogr'),
+      el('pre', { class: 'cmd' }, `ogrinfo "PG:host=${g.db_host} port=${g.db_port} dbname=${g.db_name} user=${g.db_user}" asset.dma_status`),
+      el('p', { class: 'muted small' }, `Connection URI: ${pgUri}`)),
+    el('div', { class: 'card gis' },
+      el('h3', {}, 'OGC API – Features', el('span', { class: 'tag real' }, 'standard web API')),
+      el('p', { class: 'muted small' }, 'An open standard most GIS clients and web maps read without a database driver. Read-only, paged GeoJSON.'),
+      el('dl', { class: 'kv' },
+        el('dt', {}, 'URL'), el('dd', {}, copyable(g.ogcapi_url))),
+      el('div', { class: 'row-end', style: 'justify-content:flex-start;margin-top:0' },
+        el('a', { class: 'btn primary', href: '/api/gis/qgis/ogcapi-connection.xml', download: 'weave-ogcapi.xml' }, 'Download QGIS connection'),
+        el('a', { class: 'btn', href: g.ogcapi_url, target: '_blank', rel: 'noopener' }, 'Browse the API')),
+      el('h4', {}, 'QGIS'),
+      steps('In the Browser panel, right-click WFS / OGC API - Features and choose Load Connections.',
+        'Pick the downloaded weave-ogcapi.xml, or add a new connection with the URL above and version "OGC API - Features".',
+        'Expand "Weave twin (OGC API)" and drag layers onto the map.'),
+      el('h4', {}, 'ArcGIS Pro'),
+      steps('Insert > Connections > New OGC API Server, and enter the URL above.'),
+      el('h4', {}, 'GDAL / ogr2ogr'),
+      el('pre', { class: 'cmd' }, `ogrinfo OAPIF:${g.ogcapi_url}`)),
+  );
+}
+
+async function loadGisLayers() {
+  const tbl = $('#gis-layers');
+  let rows;
+  try {
+    rows = await api('/api/gis/collections');
+  } catch (err) {
+    tbl.replaceChildren(el('tr', {}, el('td', { class: 'err' }, `${err.message}. Is the featureserv container running?`)));
+    return;
+  }
+  const origin = (id) => (id.startsWith('ref.') && id !== 'ref.hydrometry_site') || id === 'asset.dma' || id === 'asset.dma_status'
+    ? 'synthetic' : 'real';
+  tbl.replaceChildren(
+    el('tr', {}, el('th', {}, 'Layer'), el('th', {}, 'Origin'), el('th', {}, '')),
+    ...rows.map((c) => el('tr', {},
+      el('td', {}, el('code', {}, c.id)),
+      el('td', {}, el('span', { class: `tag ${origin(c.id)}` }, origin(c.id))),
+      el('td', {}, el('a', { href: `${state.config.gis.ogcapi_url}/collections/${encodeURIComponent(c.id)}/items.html`, target: '_blank', rel: 'noopener' }, 'Preview')))),
+  );
 }
 
 // ------------------------------------------------------------------- boot
@@ -632,11 +813,9 @@ async function boot() {
     return;
   }
   renderHeader();
-  if (state.config.tile_url) {
-    L.tileLayer(state.config.tile_url, { attribution: state.config.tile_attribution, maxZoom: 19 }).addTo(map);
-  }
-  applyMapStyle();
-  darkQuery.addEventListener('change', () => { applyMapStyle(); loadMap(); });
+  renderBasemapPicker();
+  applyBasemap();
+  renderGis();
   await refreshStatus();
   loadMap();
   setInterval(refreshStatus, 10000);

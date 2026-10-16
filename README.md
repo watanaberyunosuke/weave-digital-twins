@@ -56,7 +56,7 @@ cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
 # Start the stack
 docker compose up -d broker connect flink-jobmanager flink-taskmanager \
     flink-sql-client postgres ingest-market ingest-hydrometry \
-    gis-loader simulator console
+    gis-loader simulator console featureserv
 
 # Bootstrap (load GIS, derive synthetic assets, start generators, bring up ELK)
 ./scripts/bootstrap.sh
@@ -75,6 +75,18 @@ facilities and gauges), telemetry freshness with each table labelled real or
 synthetic, the real feeds, and flagged residuals. Its pipeline panel runs the
 same steps as `bootstrap.sh`, one at a time, showing the exact command and its
 output, so you can also bootstrap from there instead of the terminal.
+
+The map has a basemap picker (OpenStreetMap, CARTO, Esri imagery and
+topographic, OpenTopoMap, and Google Maps when `.env` holds a Map Tiles API
+key) and a light/dark theme toggle. No basemap is drawn until you pick one,
+because tile requests tell the provider which area you are looking at.
+
+**Desktop GIS.** QGIS, ArcGIS Pro and GDAL can open the twin's layers
+read-only, either straight from PostGIS (`localhost:5432`, user
+`weave_reader`) or over OGC API Features at `http://localhost:9000`. The
+console's *GIS clients* tab has the details, copy buttons and QGIS
+connection files to import.
+
 
 Kibana reads Elasticsearch, not Postgres, so Logstash mirrors the `twin.*`
 tables into it every 15 seconds and Filebeat ships the containers' logs

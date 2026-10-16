@@ -32,7 +32,7 @@ import psycopg
 import yaml
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -240,15 +240,189 @@ async def status():
 
 @app.get("/api/config")
 def config():
+    providers = basemaps()
+    ids = [b["id"] for b in providers]
+    default = os.environ.get("CONSOLE_BASEMAP") or ("custom" if "custom" in ids else "none")
     return {
         "region_config": REGION_CONFIG,
         "layers": region_layers(),
-        "tile_url": os.environ.get("CONSOLE_TILE_URL", ""),
-        "tile_attribution": os.environ.get("CONSOLE_TILE_ATTRIBUTION", ""),
+        "basemaps": providers,
+        "basemap_default": default if default in ids else "none",
         "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
         "kibana_url": os.environ.get("KIBANA_PUBLIC_URL", "http://localhost:5601"),
         "flink_url": os.environ.get("FLINK_PUBLIC_URL", "http://localhost:9081"),
+        "gis": gis_connections(),
     }
+
+
+# ------------------------------------------------------------------ basemaps
+# Every tile request tells its provider which area is in view, so nothing is
+# drawn until a viewer picks a basemap or .env sets CONSOLE_BASEMAP. "kind"
+# drives the dark treatment: light tiles may be inverted, dark and imagery
+# tiles never are. Google tiles are never altered, as its terms require.
+OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+BUILTIN_BASEMAPS = [
+    {"id": "osm", "label": "OpenStreetMap", "kind": "light", "max_zoom": 19,
+     "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "attribution": OSM_CREDIT},
+    {"id": "carto-light", "label": "CARTO Positron", "kind": "light", "max_zoom": 20,
+     "dark_variant": "carto-dark", "subdomains": "abcd",
+     "url": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+     "attribution": f'{OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>'},
+    {"id": "carto-dark", "label": "CARTO Dark Matter", "kind": "dark", "max_zoom": 20,
+     "subdomains": "abcd",
+     "url": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+     "attribution": f'{OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>'},
+    {"id": "esri-imagery", "label": "Esri World Imagery", "kind": "imagery", "max_zoom": 19,
+     "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+     "attribution": "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, "
+                    "and the GIS User Community"},
+    {"id": "esri-topo", "label": "Esri World Topographic", "kind": "light", "max_zoom": 19,
+     "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+     "attribution": "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, FAO, NOAA, USGS, "
+                    f"{OSM_CREDIT}, and the GIS User Community"},
+    {"id": "opentopomap", "label": "OpenTopoMap", "kind": "light", "max_zoom": 17,
+     "subdomains": "abc", "url": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+     "attribution": f'{OSM_CREDIT}, SRTM | Style: &copy; '
+                    '<a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)'},
+]
+
+GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+_google_sessions: dict[str, dict] = {}
+
+
+def google_session(map_type: str) -> str | None:
+    """A Map Tiles API session token, reused until shortly before it expires.
+
+    Region and language come from .env like every other region setting; with
+    no region set, Google is left out rather than defaulting to a place.
+    """
+    region = os.environ.get("GOOGLE_MAPS_REGION", "")
+    if not GOOGLE_KEY or not region:
+        return None
+    cached = _google_sessions.get(map_type)
+    if cached and cached["expiry"] - time.time() > 3600:
+        return cached["session"]
+    try:
+        r = httpx.post("https://tile.googleapis.com/v1/createSession",
+                       params={"key": GOOGLE_KEY}, timeout=5,
+                       json={"mapType": map_type, "region": region,
+                             "language": os.environ.get("GOOGLE_MAPS_LANGUAGE", "en")})
+        r.raise_for_status()
+        body = r.json()
+        _google_sessions[map_type] = {"session": body["session"], "expiry": int(body["expiry"])}
+        return body["session"]
+    except Exception as exc:  # noqa: BLE001 — Google is optional; the rest still works
+        print(f"! google createSession({map_type}) failed: {exc}")
+        return None
+
+
+def basemaps() -> list[dict]:
+    out = [{"id": "none", "label": "None (no tile requests)", "kind": "none"}] + BUILTIN_BASEMAPS
+    custom = os.environ.get("CONSOLE_TILE_URL", "")
+    if custom:
+        out.append({"id": "custom", "label": "Custom (CONSOLE_TILE_URL)", "kind": "light",
+                    "max_zoom": 19, "url": custom,
+                    "attribution": os.environ.get("CONSOLE_TILE_ATTRIBUTION", "")})
+    for map_type, label, kind in (("roadmap", "Google Maps", "fixed"),
+                                  ("satellite", "Google Satellite", "imagery")):
+        session = google_session(map_type)
+        if session:
+            out.append({"id": f"google-{map_type}", "label": label, "kind": kind, "max_zoom": 22,
+                        "google": True, "session": session,
+                        "url": f"https://tile.googleapis.com/v1/2dtiles/{{z}}/{{x}}/{{y}}"
+                               f"?session={session}&key={GOOGLE_KEY}",
+                        "attribution": "Google"})
+    return out
+
+
+@app.get("/api/basemaps/google-attribution")
+def google_attribution(map_id: str, zoom: int, north: float, south: float,
+                       east: float, west: float):
+    # Google's terms require the copyright for the area in view, which only
+    # its viewport endpoint knows; proxied so the key stays in one place.
+    session = google_session(map_id.removeprefix("google-"))
+    if not session:
+        raise HTTPException(404, "Google basemaps are not configured")
+    r = httpx.get("https://tile.googleapis.com/tile/v1/viewport", timeout=5, params={
+        "session": session, "key": GOOGLE_KEY, "zoom": zoom,
+        "north": north, "south": south, "east": east, "west": west})
+    if r.status_code != 200:
+        raise HTTPException(502, "Google viewport lookup failed")
+    return {"copyright": r.json().get("copyright", "")}
+
+
+# ------------------------------------------------------------ GIS clients
+# Desktop GIS (QGIS, ArcGIS Pro) and GDAL connect either to PostGIS directly
+# or to the OGC API Features service; both use the read-only role, so a GIS
+# client can never change the twin. Hosts and ports are as seen from this
+# machine, not from inside the compose network.
+GIS = {
+    "db_host": os.environ.get("GIS_DB_HOST", "localhost"),
+    "db_port": os.environ.get("GIS_DB_PORT", "5432"),
+    "db_name": os.environ.get("GIS_DB_NAME", "weave_twin"),
+    "db_user": os.environ.get("GIS_DB_USER", "weave_reader"),
+    "db_password": os.environ.get("GIS_DB_PASSWORD", "weave_reader"),
+    "ogcapi_url": os.environ.get("FEATURESERV_PUBLIC_URL", "http://localhost:9000"),
+}
+FEATURESERV_URL = os.environ.get("FEATURESERV_URL", "http://featureserv:9000")
+# Must not exceed featureserv's PGFS_PAGING_LIMITMAX in the compose overlay.
+OGCAPI_PAGE_SIZE = int(os.environ.get("FEATURESERV_PAGE_SIZE", "50000"))
+
+
+def gis_connections() -> dict:
+    return {**GIS, "ogcapi_url": GIS["ogcapi_url"].rstrip("/")}
+
+
+@app.get("/api/gis/collections")
+def gis_collections():
+    try:
+        r = httpx.get(f"{FEATURESERV_URL}/collections.json", timeout=4)
+        r.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — shown in the panel
+        raise HTTPException(503, f"feature server: {str(exc).splitlines()[0]}") from exc
+    return [{"id": c["id"], "title": c.get("title") or c["id"],
+             "description": c.get("description", "")} for c in r.json().get("collections", [])]
+
+
+def _xml_attr(value: str) -> str:
+    return (value.replace("&", "&amp;").replace('"', "&quot;")
+                 .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _download(body: str, filename: str, media: str = "application/xml") -> Response:
+    return Response(body, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/gis/qgis/postgis-connection.xml")
+def qgis_postgis_connection():
+    # QGIS: Browser > PostgreSQL > right-click > Load Connections.
+    g = {k: _xml_attr(v) for k, v in GIS.items()}
+    return _download(
+        "<!DOCTYPE connections>\n"
+        '<qgsPgConnections version="1.0">\n'
+        f'  <postgis name="Weave twin (read-only)" host="{g["db_host"]}" port="{g["db_port"]}"'
+        f' database="{g["db_name"]}" service="" sslmode="SslDisable"'
+        f' username="{g["db_user"]}" password="{g["db_password"]}"'
+        ' saveUsername="true" savePassword="true" authcfg=""'
+        ' estimatedMetadata="false" geometryColumnsOnly="false" dontResolveType="false"'
+        ' allowGeometrylessTables="false" publicOnly="false" projectsInDatabase="false"/>\n'
+        "</qgsPgConnections>\n", "weave-postgis.xml")
+
+
+@app.get("/api/gis/qgis/ogcapi-connection.xml")
+def qgis_ogcapi_connection():
+    # QGIS: Browser > WFS / OGC API - Features > right-click > Load Connections.
+    # pg_featureserv returns no "next" link, so QGIS treats the first page as
+    # the whole layer; one page as large as the server allows avoids that.
+    url = _xml_attr(GIS["ogcapi_url"].rstrip("/") + "/")
+    return _download(
+        "<!DOCTYPE connections>\n"
+        '<qgsWFSConnections version="1.0">\n'
+        f'  <wfs name="Weave twin (OGC API)" url="{url}" version="OGC_API_FEATURES"'
+        ' username="" password="" authcfg="" ignoreAxisOrientation="0"'
+        f' invertAxisOrientation="0" pagingenabled="enabled" pagesize="{OGCAPI_PAGE_SIZE}"/>\n'
+        "</qgsWFSConnections>\n", "weave-ogcapi.xml")
 
 
 def region_layers() -> list[str]:

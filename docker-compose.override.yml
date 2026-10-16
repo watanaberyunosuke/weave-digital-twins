@@ -155,6 +155,12 @@ services:
       CONSOLE_TILE_URL: ${CONSOLE_TILE_URL:-}
       CONSOLE_TILE_ATTRIBUTION: ${CONSOLE_TILE_ATTRIBUTION:-}
       CONSOLE_TILE_STYLE: ${CONSOLE_TILE_STYLE:-auto}
+      CONSOLE_BASEMAP: ${CONSOLE_BASEMAP:-}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      GOOGLE_MAPS_REGION: ${GOOGLE_MAPS_REGION:-}
+      GOOGLE_MAPS_LANGUAGE: ${GOOGLE_MAPS_LANGUAGE:-en}
+      FEATURESERV_URL: http://featureserv:9000
+      FEATURESERV_PUBLIC_URL: ${FEATURESERV_PUBLIC_URL:-http://localhost:9000}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts:/weave/scripts:ro
@@ -162,6 +168,25 @@ services:
       - ./schemas:/weave/schemas:ro
       - ./gis/regions:/weave/gis/regions:ro
       - siminp:/sim:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- OGC API Features: the twin's layers for QGIS, ArcGIS Pro, GDAL --------
+  # Publishes every spatial table the read-only role can see. Loopback only,
+  # like the console: in aggregate the layers describe a real network.
+  featureserv:
+    logging: *json-logs
+    image: pramsey/pg_featureserv:20250917
+    container_name: featureserv
+    ports:
+      - "127.0.0.1:${FEATURESERV_PORT:-9000}:9000"
+    environment:
+      DATABASE_URL: postgresql://weave_reader:weave_reader@postgres:5432/weave_twin
+      PGFS_SERVER_URLBASE: ${FEATURESERV_PUBLIC_URL:-http://localhost:9000}
+      PGFS_PAGING_LIMITDEFAULT: "1000"
+      PGFS_PAGING_LIMITMAX: "50000"
     depends_on:
       postgres:
         condition: service_healthy
