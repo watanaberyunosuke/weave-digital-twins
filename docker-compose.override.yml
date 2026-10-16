@@ -90,6 +90,9 @@ services:
   # --- hydraulic simulation: EPANET via WNTR --------------------------------
   simulator:
     build: ./model
+    # WNTR bundles EPANET for linux-x64 only, so on ARM hosts (Apple Silicon)
+    # the solver can't load natively; amd64 runs under emulation there.
+    platform: linux/amd64
     container_name: simulator
     environment:
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin

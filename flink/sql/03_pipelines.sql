@@ -5,10 +5,10 @@ EXECUTE STATEMENT SET
 BEGIN
 
 INSERT INTO hydrometry_sink
-SELECT CAST(kafka_ts AS TIMESTAMP(3)), site_id, variable, value,
+SELECT CAST(kafka_ts AS TIMESTAMP(3)), site_id, variable, `value`,
        quality_code, provider, false
 FROM hydrometry_raw
-WHERE value IS NOT NULL;
+WHERE `value` IS NOT NULL;
 
 INSERT INTO market_sink
 SELECT CAST(kafka_ts AS TIMESTAMP(3)), region_id, price_mwh, total_demand_mw,

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS hydrometry_raw (
     site_id      STRING,
     variable     STRING,
     unit         STRING,
-    value        DOUBLE,
+    `value`      DOUBLE,
     quality_code STRING,
     provider     STRING,
     is_synthetic BOOLEAN,

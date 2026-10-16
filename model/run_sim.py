@@ -19,6 +19,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import networkx as nx
 import psycopg
 import wntr
 
@@ -84,6 +85,25 @@ def build_inp() -> str:
             except Exception:
                 continue
 
+        # Public GIS is fragmentary, and skipped pipes (zero-length after
+        # snapping, over the cap, failed adds) strand more nodes. EPANET
+        # rejects a junction with no link and cannot solve a fragment with
+        # no fixed head, so only the parts a reservoir feeds are kept.
+        graph = wn.to_graph().to_undirected()
+        reservoirs = set(wn.reservoir_name_list)
+        fed = set()
+        for component in nx.connected_components(graph):
+            if reservoirs & component:
+                fed |= component
+        for link_name in list(wn.link_name_list):
+            if wn.get_link(link_name).start_node_name not in fed:
+                wn.remove_link(link_name)
+        dropped = [n for n in wn.junction_name_list if n not in fed]
+        for name in dropped:
+            wn.remove_node(name)
+        if dropped:
+            print(f"  dropped {len(dropped)} junctions in fragments no reservoir feeds")
+
         # Demands from synthetic meters, aggregated to the nearest node.
         cur.execute("""
             SELECT n.node_id, COALESCE(avg(m.flow_lpm), 0) / 60000.0
@@ -115,7 +135,10 @@ def simulate() -> str:
 
     wn = wntr.network.WaterNetworkModel(INP_PATH)
     sim = wntr.sim.EpanetSimulator(wn)
-    results = sim.run_sim()
+    # EPANET's scratch files default to temp.* in the working directory, so
+    # the --loop container and a --once run from the console would overwrite
+    # each other's mid-solve.
+    results = sim.run_sim(file_prefix=f"/tmp/weave-sim-{os.getpid()}")
 
     run_id = uuid.uuid4().hex[:12]
     now = datetime.now(timezone.utc)
@@ -157,7 +180,10 @@ def compute_residuals(run_id: str) -> int:
             modelled AS (
                 SELECT d.dma_id, avg(sr.value) AS modelled
                 FROM twin.sim_result sr
-                JOIN asset.node n ON n.node_id = replace(sr.element_id, 'N', '')::bigint
+                -- Reservoirs (R...) have pressure results too but no graph
+                -- node, so only junction ids are cast.
+                JOIN asset.node n ON n.node_id = CASE WHEN sr.element_id ~ '^N[0-9]+$'
+                                                      THEN substr(sr.element_id, 2)::bigint END
                 JOIN asset.dma d ON ST_Contains(d.geom, n.geom)
                 WHERE sr.run_id = %s AND sr.variable = 'pressure'
                 GROUP BY d.dma_id
@@ -182,7 +208,10 @@ def compute_residuals(run_id: str) -> int:
                         WHEN abs(residual) > 2 THEN 'WATCH'
                         ELSE 'OK' END
             FROM twin.sim_residual
-            WHERE ts > now() - interval '1 minute'
+            -- now() is fixed for the transaction, so this is exactly the
+            -- rows inserted above; a window would also catch a concurrent
+            -- run's rows and upsert the same DMA twice.
+            WHERE ts = now()
             ON CONFLICT (dma_id) DO UPDATE SET
                 ts = EXCLUDED.ts,
                 min_pressure_m = EXCLUDED.min_pressure_m,
