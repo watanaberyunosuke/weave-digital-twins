@@ -323,22 +323,28 @@ def geo_gauges():
 
 
 @app.get("/api/geo/meters")
-def geo_meters(dma_id: str):
-    # Per DMA only: the full registry is too many points to be useful at once.
+def geo_meters(dma_id: str | None = None, limit: int = Query(20000, ge=1, le=200000)):
+    # The whole registry by default, capped: a few thousand synthetic points
+    # draw fine on a canvas, a utility-scale fleet would not.
     return geojson("""
-        SELECT json_build_object('type', 'Feature',
-               'geometry', ST_AsGeoJSON(geom, 6)::json,
-               'properties', json_build_object(
-                   'id', meter_id, 'kind', 'meter', 'meter_type', meter_type,
-                   'synthetic', synthetic)) AS feature
-        FROM ref.water_meter WHERE dma_id = %(d)s AND geom IS NOT NULL
-        UNION ALL
-        SELECT json_build_object('type', 'Feature',
-               'geometry', ST_AsGeoJSON(geom, 6)::json,
-               'properties', json_build_object(
-                   'id', logger_id, 'kind', 'logger', 'synthetic', synthetic))
-        FROM ref.pressure_logger WHERE dma_id = %(d)s AND geom IS NOT NULL
-    """, {"d": dma_id})
+        SELECT feature FROM (
+            SELECT json_build_object('type', 'Feature',
+                   'geometry', ST_AsGeoJSON(geom, 6)::json,
+                   'properties', json_build_object(
+                       'id', meter_id, 'dma_id', dma_id, 'kind', 'meter',
+                       'meter_type', meter_type, 'synthetic', synthetic)) AS feature
+            FROM ref.water_meter
+            WHERE geom IS NOT NULL AND (%(d)s::text IS NULL OR dma_id = %(d)s)
+            UNION ALL
+            SELECT json_build_object('type', 'Feature',
+                   'geometry', ST_AsGeoJSON(geom, 6)::json,
+                   'properties', json_build_object(
+                       'id', logger_id, 'dma_id', dma_id, 'kind', 'logger',
+                       'synthetic', synthetic))
+            FROM ref.pressure_logger
+            WHERE geom IS NOT NULL AND (%(d)s::text IS NULL OR dma_id = %(d)s)
+        ) m LIMIT %(limit)s
+    """, {"d": dma_id, "limit": limit})
 
 
 # ----------------------------------------------------------------- telemetry

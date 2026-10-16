@@ -46,7 +46,6 @@ const state = {
   actions: [],
   status: null,
   selectedDma: null,
-  showMeters: false,
   selectedJob: null,
   jobOffset: 0,
   tab: 'map',
@@ -340,12 +339,14 @@ function popupHtml(title, rows) {
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, facilities, gauges] = await Promise.all([
+  const [dmas, pipes, facilities, gauges, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
     api('/api/geo/facilities').catch(() => null),
     api('/api/geo/gauges').catch(() => null),
+    api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
+  drawMeters(meters);
 
   layers.pipes.clearLayers();
   if (pipes) {
@@ -360,9 +361,11 @@ async function loadMap() {
         ['Material', f.properties.material], ['In graph', f.properties.in_graph ? 'yes' : 'no'],
       ])),
     }).addTo(layers.pipes);
-    $('#map-note').textContent = pipes.features.length >= 8000
-      ? 'Pipes capped at 8,000, largest diameters first.' : '';
   }
+  $('#map-note').textContent = [
+    pipes && pipes.features.length >= 8000 ? 'Pipes capped at 8,000, largest diameters first.' : '',
+    meters && meters.features.length >= METER_CAP ? `Meters capped at ${fmt.n(METER_CAP)}.` : '',
+  ].filter(Boolean).join(' ');
 
   layers.dmas.clearLayers();
   if (dmas) {
@@ -430,12 +433,6 @@ async function openDma(dmaId) {
   }
   if (state.selectedDma !== dmaId) return;
   const i = d.info;
-  const meterCb = el('input', { type: 'checkbox', checked: state.showMeters });
-  meterCb.addEventListener('change', () => {
-    state.showMeters = meterCb.checked;
-    toggleMeters(dmaId, meterCb.checked);
-  });
-  toggleMeters(dmaId, state.showMeters);
   drawer.replaceChildren(
     el('header', {},
       el('div', {}, el('h3', {}, i.name || i.dma_id, el('span', { class: 'tag syn' }, 'synthetic')),
@@ -447,7 +444,6 @@ async function openDma(dmaId) {
       el('dt', {}, 'Meters / loggers'), el('dd', {}, `${fmt.n(i.meters)} / ${fmt.n(i.loggers)}`),
       el('dt', {}, 'Observed pressure'), el('dd', {}, i.min_pressure_m === null ? '—' : `${fmt.n(i.min_pressure_m, 1)} m`),
       el('dt', {}, 'Status as of'), el('dd', {}, fmt.ts(i.ts))),
-    el('label', { class: 'small' }, meterCb, ' Show meters and loggers on the map'),
     chart('Consumption per 15 min (L)', [{ name: 'consumption', colour: css('--syn'), points: d.balance.map((r) => [r.ts, r.consumption_l]) }]),
     chart('Min pressure (m)', [{ name: 'min pressure', colour: css('--derived'), points: d.balance.map((r) => [r.ts, r.min_pressure_m]) }]),
     chart('Pressure: modelled vs observed (m)', [
@@ -460,15 +456,12 @@ async function openDma(dmaId) {
 
 function closeDma() {
   state.selectedDma = null;
-  state.showMeters = false;
   $('#drawer').hidden = true;
-  layers.meters.clearLayers();
 }
 
-async function toggleMeters(dmaId, on) {
+const METER_CAP = 20000;
+function drawMeters(fc) {
   layers.meters.clearLayers();
-  if (!on) return;
-  const fc = await api(`/api/geo/meters?dma_id=${encodeURIComponent(dmaId)}`).catch(() => null);
   if (!fc) return;
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
@@ -476,7 +469,7 @@ async function toggleMeters(dmaId, on) {
       color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
     }),
-    onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''}`),
+    onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`),
   }).addTo(layers.meters);
 }
 
