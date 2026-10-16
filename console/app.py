@@ -84,7 +84,12 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "host not allowed"}, status_code=403)
     if request.method == "POST" and request.headers.get("x-weave-console") != "1":
         return JSONResponse({"detail": "missing X-Weave-Console header"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    # The page has no build step to fingerprint file names, so browsers are
+    # told to revalidate; otherwise a rebuilt console serves stale JS or CSS.
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 # --------------------------------------------------------------- db helpers
@@ -240,6 +245,7 @@ def config():
         "layers": region_layers(),
         "tile_url": os.environ.get("CONSOLE_TILE_URL", ""),
         "tile_attribution": os.environ.get("CONSOLE_TILE_ATTRIBUTION", ""),
+        "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
         "kibana_url": os.environ.get("KIBANA_PUBLIC_URL", "http://localhost:5601"),
         "flink_url": os.environ.get("FLINK_PUBLIC_URL", "http://localhost:9081"),
     }

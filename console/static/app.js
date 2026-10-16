@@ -320,7 +320,10 @@ const layers = {
   gauges: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
 };
-const statusColour = (s) => css({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK: '--leak' }[s] || '--unknown');
+// Map colours resolve against #map, which carries its own tokens when the
+// basemap is dark so pipes and markers stay readable on it.
+const mcss = (name) => getComputedStyle($('#map')).getPropertyValue(name).trim();
+const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK: '--leak' }[s] || '--unknown');
 
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
@@ -348,7 +351,7 @@ async function loadMap() {
   if (pipes) {
     L.geoJSON(pipes, {
       style: (f) => ({
-        color: css(f.properties.in_graph ? '--pipe' : '--pipe-off'),
+        color: mcss(f.properties.in_graph ? '--pipe' : '--pipe-off'),
         weight: f.properties.diameter_mm >= 600 ? 2.5 : f.properties.diameter_mm >= 300 ? 1.6 : 1,
         opacity: 0.85,
       }),
@@ -379,7 +382,7 @@ async function loadMap() {
   if (facilities) {
     L.geoJSON(facilities, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 6, color: css('--facility'), fillColor: css('--facility'), fillOpacity: 0.85, weight: 1,
+        radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
         ['Type', f.properties.facility_type], ['Capacity', f.properties.capacity_ml && `${fmt.n(f.properties.capacity_ml)} ML`],
@@ -391,7 +394,7 @@ async function loadMap() {
   if (gauges) {
     L.geoJSON(gauges, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 5, color: '#fff', fillColor: css('--gauge'), fillOpacity: 1, weight: 1.5,
+        radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
         ['Site', f.properties.site_id], ['Variable', f.properties.variable], ['Provider', f.properties.provider],
@@ -470,7 +473,7 @@ async function toggleMeters(dmaId, on) {
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
       radius: f.properties.kind === 'logger' ? 5 : 3,
-      color: css('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : css('--syn'),
+      color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
     }),
     onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''}`),
@@ -618,6 +621,15 @@ async function loadAnomalies() {
   );
 }
 
+// A dark basemap is the light tiles inverted in CSS rather than a second
+// tile provider, so turning it on sends the area in view nowhere new.
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+function applyMapStyle() {
+  const style = state.config.tile_style || 'auto';
+  const dark = style === 'dark' || (style === 'auto' && darkQuery.matches);
+  $('#map').classList.toggle('map-dark', dark);
+}
+
 // ------------------------------------------------------------------- boot
 async function boot() {
   try {
@@ -630,6 +642,8 @@ async function boot() {
   if (state.config.tile_url) {
     L.tileLayer(state.config.tile_url, { attribution: state.config.tile_attribution, maxZoom: 19 }).addTo(map);
   }
+  applyMapStyle();
+  darkQuery.addEventListener('change', () => { applyMapStyle(); loadMap(); });
   await refreshStatus();
   loadMap();
   setInterval(refreshStatus, 10000);

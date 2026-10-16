@@ -163,6 +163,15 @@ a { color: var(--accent); }
   color: var(--muted); text-align: center; pointer-events: none; padding: 20px;
 }
 .leaflet-container { font: inherit; background: var(--map-bg); }
+#map.map-dark {
+  --map-bg: #0e141c;
+  --pipe: #9cc0ea;
+  --pipe-off: #4a5a6e;
+  --facility: #40c2b4;
+  --gauge: #6aa8ff;
+  --syn: #c39cf5;
+}
+#map.map-dark .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.88) saturate(.55); }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); }
 
 /* ----------------------------------------------------------------- tags */
