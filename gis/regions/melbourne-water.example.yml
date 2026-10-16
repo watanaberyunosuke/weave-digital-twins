@@ -51,13 +51,13 @@ layers:
     description: Sewer main centrelines
 
   service_reservoir:
-    item_id: null        # discover_layers.py --search "service reservoir"
+    item_id: edb323c130374cf38733d955a93fc4eb   # discover_layers.py --search "service reservoir"
     layer: 0
     target: facility
     facility_type: service_reservoir
 
   storage_dam:
-    item_id: null        # --search "water supply storage dams"
+    item_id: 4310d5bcf21a42bbb2103a51892fc9f8   # --search "water supply storage dams"
     layer: 0
     target: facility
     facility_type: storage_dam

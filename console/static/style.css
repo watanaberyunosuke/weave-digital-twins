@@ -23,8 +23,10 @@
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 4px 12px rgba(16, 24, 40, .06);
   color-scheme: light;
 }
+/* Dark palette: the OS setting applies unless the header toggle forced a
+   theme, which sets data-theme on <html>. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0e131b;
     --panel: #151c27;
     --panel-2: #1b2431;
@@ -48,6 +50,30 @@
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 12px rgba(0, 0, 0, .25);
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #0e131b;
+  --panel: #151c27;
+  --panel-2: #1b2431;
+  --line: #2a3443;
+  --text: #e3e8ef;
+  --muted: #93a0b2;
+  --accent: #5b9dff;
+  --ok: #3fbf7f;
+  --watch: #e6b04a;
+  --leak: #f0695a;
+  --unknown: #6b7684;
+  --real: #5b9dff;
+  --syn: #b48af0;
+  --derived: #3cc3b8;
+  --pipe: #8fb0dc;
+  --pipe-off: #3d4a5c;
+  --facility: #40c2b4;
+  --gauge: #5b9dff;
+  --map-bg: #111822;
+  --log-bg: #0a0e15;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 12px rgba(0, 0, 0, .25);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -79,7 +105,10 @@ a { color: var(--accent); }
 }
 .region { font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .health { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
-.links { display: flex; gap: 12px; font-size: 13px; }
+.links { display: flex; gap: 12px; font-size: 13px; align-items: center; }
+.theme-btn { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
+.theme-btn:hover { border-color: var(--accent); }
 .pill {
   display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px;
   border: 1px solid var(--line); border-radius: 999px; font-size: 12px; background: var(--panel-2);
@@ -148,6 +177,7 @@ a { color: var(--accent); }
   display: flex; flex-direction: column; gap: 4px; font-size: 13px; max-width: 260px;
 }
 .map-ctl label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.map-ctl select { font: inherit; font-size: 12px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); margin-top: 4px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
 .legend span { display: inline-flex; align-items: center; gap: 4px; }
 .sw { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
@@ -163,6 +193,15 @@ a { color: var(--accent); }
   color: var(--muted); text-align: center; pointer-events: none; padding: 20px;
 }
 .leaflet-container { font: inherit; background: var(--map-bg); }
+#map.map-dark {
+  --map-bg: #0e141c;
+  --pipe: #9cc0ea;
+  --pipe-off: #4a5a6e;
+  --facility: #40c2b4;
+  --gauge: #6aa8ff;
+  --syn: #c39cf5;
+}
+#map.map-invert .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.88) saturate(.55); }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); }
 
 /* ----------------------------------------------------------------- tags */
@@ -246,3 +285,13 @@ input[type="number"], input[type="text"], select {
   .jobs { grid-template-columns: 1fr; }
   .top { flex-wrap: wrap; }
 }
+
+/* ----------------------------------------------------------- GIS clients */
+.gis { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.gis h4 { margin: 6px 0 0; font-size: 13px; }
+.gis .btn.primary { align-self: flex-start; text-decoration: none; }
+.gis a.btn { text-decoration: none; }
+.steps-list { margin: 0; padding-left: 1.2rem; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.copy { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.copy .val { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.copy .btn { padding: 1px 8px; font-size: 11px; }

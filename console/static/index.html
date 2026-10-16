@@ -16,6 +16,7 @@
     <div class="region muted" id="region"></div>
     <div class="health" id="health"></div>
     <nav class="links" id="links"></nav>
+    <button type="button" class="theme-btn" id="theme-btn" aria-label="Colour theme"></button>
   </header>
 
   <div class="layout">
@@ -40,6 +41,7 @@
         <button role="tab" data-tab="map" aria-selected="true">Map</button>
         <button role="tab" data-tab="telemetry">Telemetry</button>
         <button role="tab" data-tab="anomalies">Anomalies</button>
+        <button role="tab" data-tab="gis">GIS clients</button>
         <button role="tab" data-tab="jobs">Jobs <span class="badge" id="job-badge" hidden></span></button>
       </div>
 
@@ -51,6 +53,9 @@
             <label><input type="checkbox" data-layer="pipes" checked> Pipes <span class="tag real">real</span></label>
             <label><input type="checkbox" data-layer="facilities" checked> Facilities <span class="tag real">real</span></label>
             <label><input type="checkbox" data-layer="gauges" checked> Gauges <span class="tag real">real</span></label>
+            <label><input type="checkbox" data-layer="meters" checked> Meters and loggers <span class="tag syn">synthetic</span></label>
+            <label class="small muted" for="basemap">Basemap</label>
+            <select id="basemap"></select>
             <div class="legend">
               <span><i class="sw ok"></i>OK</span>
               <span><i class="sw watch"></i>Watch</span>
@@ -87,6 +92,15 @@
         <div class="card">
           <h3>Residuals over threshold <span class="muted small">modelled vs observed pressure, last 24 h</span></h3>
           <table class="tbl" id="anomalies"></table>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-gis" hidden>
+        <p class="hint">Open the twin's layers in desktop GIS. Both connections log in as the read-only role, so a GIS client can browse and query but never change the twin.</p>
+        <div class="grid2" id="gis-cards"></div>
+        <div class="card">
+          <h3>Published layers <span class="muted small">OGC API Features collections</span></h3>
+          <table class="tbl" id="gis-layers"></table>
         </div>
       </section>
 

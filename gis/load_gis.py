@@ -267,6 +267,9 @@ def main() -> int:
                 total += load_layer(conn, name, layer_cfg, extent, hints,
                                     source_id, args.limit)
             except Exception as exc:                      # keep going on failure
+                # A failed statement aborts the transaction; without the
+                # rollback every later layer and the topology build fail too.
+                conn.rollback()
                 print(f"  ! {name} failed: {exc}")
 
         if args.build_topology:

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Weave is a framework for building digital twins of utility networks (water, electricity, transport). It loads **real** public GIS topology into PostGIS, derives **synthetic** meters onto that real geometry, and runs both real and synthetic telemetry through one Kafka/Flink pipeline into TimescaleDB, where an EPANET model's output is compared against observations to flag anomalies.
 
-This repo is **an overlay, not a standalone stack**. It is copied over `cp-all-in-one/cp-all-in-one-community/` (Confluent's compose stack, branch `8.2.0-post`), which supplies `broker`, `connect`, `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Running compose from this directory alone will not work.
+This repo is **an overlay, not a standalone stack**. It is copied over `cp-all-in-one/cp-all-in-one-community/` (Confluent's compose stack, branch `8.2.0-post`), which supplies `broker`, `connect`, `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Running compose from this directory alone will not work.
 
 ## Commands
 
@@ -24,7 +24,7 @@ Full bring-up (from inside `cp-all-in-one-community/` after the overlay is copie
 cp .env.example .env                     # then edit for your region
 ./scripts/download-flink-connectors.sh   # populates flink/lib/ (gitignored, must exist before compose up)
 docker compose up -d broker connect flink-jobmanager flink-taskmanager \
-    flink-sql-client postgres ingest-market ingest-hydrometry gis-loader simulator console
+    flink-sql-client postgres ingest-market ingest-hydrometry gis-loader simulator console featureserv
 ./scripts/bootstrap.sh                   # topics -> GIS load -> seed synthetic -> connectors -> build model -> ELK
 docker exec -it flink-sql-client sql-client.sh
   SOURCE '/sql/01_sources.sql'; SOURCE '/sql/02_sinks.sql'; SOURCE '/sql/03_pipelines.sql';
@@ -54,7 +54,7 @@ curl 'localhost:9200/_cat/indices/twin-*,weave-logs-*?v'
 psql postgresql://weave:weave@localhost:5432/weave_twin
 ```
 
-Console `:8090` (loopback only), Kibana `:5601` and Elasticsearch `:9200` (the local cluster: security off, loopback only), Flink `:9081`, Connect `:8083`, Postgres `:5432`.
+Console `:8090` and OGC API Features `:9000` (both loopback only), Kibana `:5601` and Elasticsearch `:9200` (the local cluster: security off, loopback only), Flink `:9081`, Connect `:8083`, Postgres `:5432`.
 
 ## Architecture
 
@@ -111,7 +111,7 @@ Kibana can only read Elasticsearch, so Elasticsearch holds a **derived, disposab
 - The saved JDBC positions belong to one target cluster. [elk/logstash/reset-on-target-change.sh](elk/logstash/reset-on-target-change.sh) is the image entrypoint: when `ES_URL` differs from the last run, it deletes the positions so the new cluster gets the full 7-day backfill instead of only rows newer than the switch.
 - Logstash outputs always carry `user`/`password`/`ssl_certificate_authorities`. For the local cluster these are empty (security off), and the CA falls back to the system bundle, because the option is path-validated even though plain http ignores it.
 - Unlike Flink SQL, Logstash does substitute `${ENV}`, so its Postgres credentials come from `docker-compose.override.yml`.
-- Filebeat reads only containers with a compose project label, and it excludes the ELK services so their own failures can't loop back through them. Logs are kept for 7 days. Autodiscover conditions match label keys in their dotted form (`docker.container.labels.com.docker.compose.project`); the dedotted form silently matches nothing.
+- Filebeat reads only containers with a compose project label, and it excludes the ELK services so their own failures can't loop back through them. Logs are kept for 7 days. It reads Docker's JSON log files, so every service in the overlay (upstream ones included) sets `logging: *json-logs` (json-file, 3 × 10 MB); an engine defaulting to the `local` driver writes a binary format Filebeat silently can't read. Give any new service the same anchor. Autodiscover conditions match label keys in their dotted form (`docker.container.labels.com.docker.compose.project`); the dedotted form silently matches nothing.
 - Elasticsearch uses absolute disk watermarks (2gb / 1500mb / 1gb). On Docker Desktop its data path is the whole shared VM disk, and the default 90% watermark leaves every shard unassigned, so Kibana hangs at startup.
 
 ### Console
@@ -123,7 +123,19 @@ Kibana can only read Elasticsearch, so Elasticsearch holds a **derived, disposab
 - **One job at a time**, because seeding truncates what loading and model building read. Jobs live in memory; killing the console doesn't stop a `docker exec` already started.
 - **It holds the Docker socket**, so it binds to loopback, rejects other `Host` headers, and requires an `X-Weave-Console` header on POSTs so other sites in the browser can't trigger operations. Keep all three.
 - Starting the Flink pipelines is refused while any Flink job runs: a second statement set writes every row twice, and the telemetry hypertables have no key to deduplicate on.
-- The basemap is off unless `.env` sets `CONSOLE_TILE_URL`, because tile requests tell a third party which area is being viewed.
+- **Basemaps** are a server-side catalogue (`BUILTIN_BASEMAPS` in `console/app.py`: OSM, CARTO, Esri, OpenTopoMap, an optional `CONSOLE_TILE_URL`, and Google via the official Map Tiles API when `GOOGLE_MAPS_API_KEY` and `GOOGLE_MAPS_REGION` are set). None is drawn unless `CONSOLE_BASEMAP` or the viewer picks one, because every tile request tells the provider which area is in view. Dark mode swaps CARTO to its dark variant and inverts other light tiles in CSS; imagery and Google tiles are never altered (Google's terms forbid it). Google attribution is fetched per viewport through `/api/basemaps/google-attribution`; the Google logo its terms also require is not drawn yet.
+- **Theme** is Auto/Light/Dark from the header toggle (`data-theme` on `<html>`, remembered per browser). Every colour is a token defined on `:root` and redefined for dark under both `prefers-color-scheme` and `[data-theme="dark"]`; map overlays read tokens from `#map`, which carries its own when the basemap is dark.
+- Static files are served `Cache-Control: no-cache`; there is no build step to fingerprint names, so without it browsers keep stale JS/CSS after a rebuild.
+
+### GIS clients
+
+Desktop GIS reaches the twin two ways, both as the read-only role `weave_reader` ([postgres/init/04_gis_reader.sql](postgres/init/04_gis_reader.sql): grants plus `default_transaction_read_only`, and default privileges so new tables are covered):
+
+- **PostGIS direct** on `localhost:5432`, for SQL and the raw attributes.
+- **OGC API Features** from `featureserv` (pg_featureserv) on `127.0.0.1:9000`, which publishes every spatial table the role can see. It returns no "next" link, so a client treats the first page as the whole layer: the QGIS connection file sets `pagesize` to `FEATURESERV_PAGE_SIZE` (50,000) and `PGFS_PAGING_LIMITMAX` must be at least that. A layer larger than that is silently truncated over OGC API; use PostGIS for it.
+- `asset.dma_status` is a view joining DMA outlines to `twin.dma_latest`, because the status table has no geometry.
+- The console's GIS clients tab serves QGIS connection files (`/api/gis/qgis/*.xml`, imported via Browser > right-click > Load Connections). Both formats were checked by importing them into QGIS 4.2.3 and loading every feature.
+- `04_gis_reader.sql` runs only on an empty volume; apply it by hand to an existing one.
 
 ### Model layer
 

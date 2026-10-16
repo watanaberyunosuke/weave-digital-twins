@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS hydrometry_sink (
     ts           TIMESTAMP(3),
     site_id      STRING,
     variable     STRING,
-    value        DOUBLE,
+    `value`      DOUBLE,
     quality_code STRING,
     provider     STRING,
     is_synthetic BOOLEAN

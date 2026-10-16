@@ -46,7 +46,6 @@ const state = {
   actions: [],
   status: null,
   selectedDma: null,
-  showMeters: false,
   selectedJob: null,
   jobOffset: 0,
   tab: 'map',
@@ -65,9 +64,33 @@ function showTab(name) {
   if (name === 'telemetry') loadTelemetry();
   if (name === 'anomalies') loadAnomalies();
   if (name === 'jobs') loadJobs();
+  if (name === 'gis') loadGisLayers();
 }
 
 // ----------------------------------------------------------------- header
+// Auto follows the OS; Light and Dark pin it for this browser.
+const THEMES = ['auto', 'light', 'dark'];
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+const readTheme = () => { try { return localStorage.getItem('weave-theme') || 'auto'; } catch { return 'auto'; } };
+const isDark = () => document.documentElement.dataset.theme === 'dark'
+  || (!document.documentElement.dataset.theme && darkQuery.matches);
+
+function applyTheme(theme) {
+  if (theme === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('weave-theme', theme); } catch { /* storage blocked: still applies */ }
+  $('#theme-btn').textContent = `Theme: ${theme[0].toUpperCase()}${theme.slice(1)}`;
+  $('#theme-btn').dataset.theme = theme;
+}
+
+$('#theme-btn').addEventListener('click', () => {
+  const next = THEMES[(THEMES.indexOf($('#theme-btn').dataset.theme) + 1) % THEMES.length];
+  applyTheme(next);
+  onThemeChange();
+});
+darkQuery.addEventListener('change', () => onThemeChange());
+applyTheme(readTheme());
+
 function renderHeader() {
   const { config } = state;
   $('#region').textContent = config.region_config || 'GIS_REGION_CONFIG not set';
@@ -161,7 +184,11 @@ function renderContainers(st) {
   }
   $('#containers').replaceChildren(...rows.map((c) => el(
     'li', { title: c.status },
-    el('i', { class: `dot ${c.state === 'running' ? 'ok' : c.state === 'exited' ? 'bad' : 'warn'}` }),
+    // One-shot services (elk-setup) exit 0 by design; only a failure is red.
+    el('i', {
+      class: `dot ${c.state === 'running' ? 'ok'
+        : c.state === 'exited' ? (c.status.startsWith('Exited (0)') ? '' : 'bad') : 'warn'}`,
+    }),
     c.name,
   )));
 }
@@ -316,7 +343,10 @@ const layers = {
   gauges: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
 };
-const statusColour = (s) => css({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK: '--leak' }[s] || '--unknown');
+// Map colours resolve against #map, which carries its own tokens when the
+// basemap is dark so pipes and markers stay readable on it.
+const mcss = (name) => getComputedStyle($('#map')).getPropertyValue(name).trim();
+const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK: '--leak' }[s] || '--unknown');
 
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
@@ -333,18 +363,20 @@ function popupHtml(title, rows) {
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, facilities, gauges] = await Promise.all([
+  const [dmas, pipes, facilities, gauges, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
     api('/api/geo/facilities').catch(() => null),
     api('/api/geo/gauges').catch(() => null),
+    api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
+  drawMeters(meters);
 
   layers.pipes.clearLayers();
   if (pipes) {
     L.geoJSON(pipes, {
       style: (f) => ({
-        color: css(f.properties.in_graph ? '--pipe' : '--pipe-off'),
+        color: mcss(f.properties.in_graph ? '--pipe' : '--pipe-off'),
         weight: f.properties.diameter_mm >= 600 ? 2.5 : f.properties.diameter_mm >= 300 ? 1.6 : 1,
         opacity: 0.85,
       }),
@@ -353,9 +385,11 @@ async function loadMap() {
         ['Material', f.properties.material], ['In graph', f.properties.in_graph ? 'yes' : 'no'],
       ])),
     }).addTo(layers.pipes);
-    $('#map-note').textContent = pipes.features.length >= 8000
-      ? 'Pipes capped at 8,000, largest diameters first.' : '';
   }
+  $('#map-note').textContent = [
+    pipes && pipes.features.length >= 8000 ? 'Pipes capped at 8,000, largest diameters first.' : '',
+    meters && meters.features.length >= METER_CAP ? `Meters capped at ${fmt.n(METER_CAP)}.` : '',
+  ].filter(Boolean).join(' ');
 
   layers.dmas.clearLayers();
   if (dmas) {
@@ -375,7 +409,7 @@ async function loadMap() {
   if (facilities) {
     L.geoJSON(facilities, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 6, color: css('--facility'), fillColor: css('--facility'), fillOpacity: 0.85, weight: 1,
+        radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
         ['Type', f.properties.facility_type], ['Capacity', f.properties.capacity_ml && `${fmt.n(f.properties.capacity_ml)} ML`],
@@ -387,7 +421,7 @@ async function loadMap() {
   if (gauges) {
     L.geoJSON(gauges, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 5, color: '#fff', fillColor: css('--gauge'), fillOpacity: 1, weight: 1.5,
+        radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
         ['Site', f.properties.site_id], ['Variable', f.properties.variable], ['Provider', f.properties.provider],
@@ -423,12 +457,6 @@ async function openDma(dmaId) {
   }
   if (state.selectedDma !== dmaId) return;
   const i = d.info;
-  const meterCb = el('input', { type: 'checkbox', checked: state.showMeters });
-  meterCb.addEventListener('change', () => {
-    state.showMeters = meterCb.checked;
-    toggleMeters(dmaId, meterCb.checked);
-  });
-  toggleMeters(dmaId, state.showMeters);
   drawer.replaceChildren(
     el('header', {},
       el('div', {}, el('h3', {}, i.name || i.dma_id, el('span', { class: 'tag syn' }, 'synthetic')),
@@ -440,7 +468,6 @@ async function openDma(dmaId) {
       el('dt', {}, 'Meters / loggers'), el('dd', {}, `${fmt.n(i.meters)} / ${fmt.n(i.loggers)}`),
       el('dt', {}, 'Observed pressure'), el('dd', {}, i.min_pressure_m === null ? '—' : `${fmt.n(i.min_pressure_m, 1)} m`),
       el('dt', {}, 'Status as of'), el('dd', {}, fmt.ts(i.ts))),
-    el('label', { class: 'small' }, meterCb, ' Show meters and loggers on the map'),
     chart('Consumption per 15 min (L)', [{ name: 'consumption', colour: css('--syn'), points: d.balance.map((r) => [r.ts, r.consumption_l]) }]),
     chart('Min pressure (m)', [{ name: 'min pressure', colour: css('--derived'), points: d.balance.map((r) => [r.ts, r.min_pressure_m]) }]),
     chart('Pressure: modelled vs observed (m)', [
@@ -453,23 +480,20 @@ async function openDma(dmaId) {
 
 function closeDma() {
   state.selectedDma = null;
-  state.showMeters = false;
   $('#drawer').hidden = true;
-  layers.meters.clearLayers();
 }
 
-async function toggleMeters(dmaId, on) {
+const METER_CAP = 20000;
+function drawMeters(fc) {
   layers.meters.clearLayers();
-  if (!on) return;
-  const fc = await api(`/api/geo/meters?dma_id=${encodeURIComponent(dmaId)}`).catch(() => null);
   if (!fc) return;
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
       radius: f.properties.kind === 'logger' ? 5 : 3,
-      color: css('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : css('--syn'),
+      color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
     }),
-    onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''}`),
+    onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`),
   }).addTo(layers.meters);
 }
 
@@ -614,6 +638,172 @@ async function loadAnomalies() {
   );
 }
 
+// ---------------------------------------------------------------- basemaps
+// The list comes from the server (Google only appears when .env has a key).
+// The choice is per browser. In dark mode a light basemap switches to its
+// dark variant where one exists, or is inverted in CSS, which sends the area
+// in view to no extra provider. Imagery and Google are never altered.
+let baseLayer = null;
+let googleTimer = null;
+const readBasemap = () => { try { return localStorage.getItem('weave-basemap'); } catch { return null; } };
+
+function currentBasemap() {
+  const all = state.config.basemaps || [];
+  const chosen = $('#basemap').value || state.config.basemap_default;
+  return all.find((b) => b.id === chosen) || all[0];
+}
+
+function applyBasemap() {
+  const all = state.config.basemaps || [];
+  let b = currentBasemap();
+  const style = state.config.tile_style || 'auto';
+  const wantDark = style === 'dark' || (style === 'auto' && isDark());
+  if (wantDark && b.dark_variant) b = all.find((x) => x.id === b.dark_variant) || b;
+  const invert = wantDark && b.kind === 'light';
+  $('#map').classList.toggle('map-invert', invert);
+  // Overlay colours follow what the map looks like, not the page theme.
+  $('#map').classList.toggle('map-dark', invert || b.kind === 'dark' || b.kind === 'imagery');
+
+  if (baseLayer) map.removeLayer(baseLayer);
+  baseLayer = null;
+  clearTimeout(googleTimer);
+  map.off('moveend', googleAttribution);
+  if (b.url) {
+    baseLayer = L.tileLayer(b.url, {
+      attribution: b.attribution, maxZoom: b.max_zoom || 19, subdomains: b.subdomains || 'abc',
+    }).addTo(map);
+    baseLayer.bringToBack();
+    if (b.google) {
+      map.on('moveend', googleAttribution);
+      googleAttribution();
+    }
+  }
+}
+
+// Google's terms require the copyright for the area in view.
+async function googleAttribution() {
+  const b = currentBasemap();
+  if (!b.google || !baseLayer) return;
+  clearTimeout(googleTimer);
+  googleTimer = setTimeout(async () => {
+    const bounds = map.getBounds();
+    const q = new URLSearchParams({
+      map_id: b.id, zoom: map.getZoom(), north: bounds.getNorth(), south: bounds.getSouth(),
+      east: bounds.getEast(), west: bounds.getWest(),
+    });
+    const res = await api(`/api/basemaps/google-attribution?${q}`).catch(() => null);
+    if (res && baseLayer) {
+      map.attributionControl.removeAttribution(baseLayer.getAttribution());
+      baseLayer.options.attribution = `Google ${res.copyright}`.trim();
+      map.attributionControl.addAttribution(baseLayer.options.attribution);
+    }
+  }, 300);
+}
+
+function renderBasemapPicker() {
+  const all = state.config.basemaps || [];
+  const saved = readBasemap();
+  const value = all.some((b) => b.id === saved) ? saved : state.config.basemap_default;
+  $('#basemap').replaceChildren(...all.map((b) => el('option', { value: b.id, selected: b.id === value }, b.label)));
+  $('#basemap').addEventListener('change', () => {
+    try { localStorage.setItem('weave-basemap', $('#basemap').value); } catch { /* per-visit only */ }
+    applyBasemap();
+    loadMap();
+  });
+}
+
+function onThemeChange() {
+  if (!state.config) return;
+  applyBasemap();
+  loadMap();
+}
+
+// -------------------------------------------------------------- GIS clients
+function copyable(value, secret = false) {
+  const code = el('code', { class: 'val' }, secret ? '••••••••' : value);
+  const btn = el('button', {
+    type: 'button', class: 'btn ghost',
+    onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        btn.textContent = 'Copied';
+      } catch {
+        code.textContent = value;
+        btn.textContent = 'Select and copy';
+      }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    },
+  }, 'Copy');
+  return el('span', { class: 'copy' }, code, btn);
+}
+
+function steps(...items) {
+  return el('ol', { class: 'steps-list' }, ...items.map((t) => el('li', {}, t)));
+}
+
+function renderGis() {
+  const g = state.config.gis;
+  const pgUri = `postgresql://${g.db_user}@${g.db_host}:${g.db_port}/${g.db_name}`;
+  $('#gis-cards').replaceChildren(
+    el('div', { class: 'card gis' },
+      el('h3', {}, 'PostGIS (direct)', el('span', { class: 'tag real' }, 'full SQL')),
+      el('p', { class: 'muted small' }, 'Fastest for large layers, and the only route for SQL queries or the raw GIS attributes.'),
+      el('dl', { class: 'kv' },
+        el('dt', {}, 'Host'), el('dd', {}, copyable(g.db_host)),
+        el('dt', {}, 'Port'), el('dd', {}, copyable(g.db_port)),
+        el('dt', {}, 'Database'), el('dd', {}, copyable(g.db_name)),
+        el('dt', {}, 'User'), el('dd', {}, copyable(g.db_user)),
+        el('dt', {}, 'Password'), el('dd', {}, copyable(g.db_password, true))),
+      el('a', { class: 'btn primary', href: '/api/gis/qgis/postgis-connection.xml', download: 'weave-postgis.xml' }, 'Download QGIS connection'),
+      el('h4', {}, 'QGIS'),
+      steps('In the Browser panel, right-click PostgreSQL and choose Load Connections.',
+        'Pick the downloaded weave-postgis.xml and import it.',
+        'Expand "Weave twin (read-only)": asset, ref and twin hold the layers. asset.dma_status has DMA outlines with their current status.'),
+      el('h4', {}, 'ArcGIS Pro'),
+      steps('Insert > Connections > Database > New Database Connection.',
+        'Platform PostgreSQL, instance localhost,5432, database authentication with the user and password above.'),
+      el('h4', {}, 'GDAL / ogr2ogr'),
+      el('pre', { class: 'cmd' }, `ogrinfo "PG:host=${g.db_host} port=${g.db_port} dbname=${g.db_name} user=${g.db_user}" asset.dma_status`),
+      el('p', { class: 'muted small' }, `Connection URI: ${pgUri}`)),
+    el('div', { class: 'card gis' },
+      el('h3', {}, 'OGC API – Features', el('span', { class: 'tag real' }, 'standard web API')),
+      el('p', { class: 'muted small' }, 'An open standard most GIS clients and web maps read without a database driver. Read-only, paged GeoJSON.'),
+      el('dl', { class: 'kv' },
+        el('dt', {}, 'URL'), el('dd', {}, copyable(g.ogcapi_url))),
+      el('div', { class: 'row-end', style: 'justify-content:flex-start;margin-top:0' },
+        el('a', { class: 'btn primary', href: '/api/gis/qgis/ogcapi-connection.xml', download: 'weave-ogcapi.xml' }, 'Download QGIS connection'),
+        el('a', { class: 'btn', href: g.ogcapi_url, target: '_blank', rel: 'noopener' }, 'Browse the API')),
+      el('h4', {}, 'QGIS'),
+      steps('In the Browser panel, right-click WFS / OGC API - Features and choose Load Connections.',
+        'Pick the downloaded weave-ogcapi.xml, or add a new connection with the URL above and version "OGC API - Features".',
+        'Expand "Weave twin (OGC API)" and drag layers onto the map.'),
+      el('h4', {}, 'ArcGIS Pro'),
+      steps('Insert > Connections > New OGC API Server, and enter the URL above.'),
+      el('h4', {}, 'GDAL / ogr2ogr'),
+      el('pre', { class: 'cmd' }, `ogrinfo OAPIF:${g.ogcapi_url}`)),
+  );
+}
+
+async function loadGisLayers() {
+  const tbl = $('#gis-layers');
+  let rows;
+  try {
+    rows = await api('/api/gis/collections');
+  } catch (err) {
+    tbl.replaceChildren(el('tr', {}, el('td', { class: 'err' }, `${err.message}. Is the featureserv container running?`)));
+    return;
+  }
+  const origin = (id) => (id.startsWith('ref.') && id !== 'ref.hydrometry_site') || id === 'asset.dma' || id === 'asset.dma_status'
+    ? 'synthetic' : 'real';
+  tbl.replaceChildren(
+    el('tr', {}, el('th', {}, 'Layer'), el('th', {}, 'Origin'), el('th', {}, '')),
+    ...rows.map((c) => el('tr', {},
+      el('td', {}, el('code', {}, c.id)),
+      el('td', {}, el('span', { class: `tag ${origin(c.id)}` }, origin(c.id))),
+      el('td', {}, el('a', { href: `${state.config.gis.ogcapi_url}/collections/${encodeURIComponent(c.id)}/items.html`, target: '_blank', rel: 'noopener' }, 'Preview')))),
+  );
+}
+
 // ------------------------------------------------------------------- boot
 async function boot() {
   try {
@@ -623,9 +813,9 @@ async function boot() {
     return;
   }
   renderHeader();
-  if (state.config.tile_url) {
-    L.tileLayer(state.config.tile_url, { attribution: state.config.tile_attribution, maxZoom: 19 }).addTo(map);
-  }
+  renderBasemapPicker();
+  applyBasemap();
+  renderGis();
   await refreshStatus();
   loadMap();
   setInterval(refreshStatus, 10000);
