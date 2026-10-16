@@ -1,0 +1,275 @@
+# Weave — layered onto cp-all-in-one/cp-all-in-one-community
+# Region settings come from .env (see .env.example); nothing here names a place.
+
+services:
+
+  connect:
+    volumes:
+      - ./schemas:/schemas:ro
+
+  flink-jobmanager:
+    volumes:
+      - ./flink/lib:/opt/flink/lib/weave:ro
+      - ./flink/sql:/sql:ro
+
+  flink-taskmanager:
+    volumes:
+      - ./flink/lib:/opt/flink/lib/weave:ro
+
+  flink-sql-client:
+    volumes:
+      - ./flink/lib:/opt/flink/lib/weave:ro
+      - ./flink/sql:/sql:ro
+
+  # --- asset graph + telemetry store: PostGIS, pgRouting, TimescaleDB -------
+  postgres:
+    image: timescale/timescaledb-ha:pg16
+    # Not "postgres": that name is commonly taken by a stock postgres
+    # container, which can't host this schema (no PostGIS, pgRouting or
+    # TimescaleDB). Other services reach this one by hostname, not by name.
+    container_name: weave-postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: weave_twin
+      POSTGRES_USER: weave
+      POSTGRES_PASSWORD: weave
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weave -d weave_twin"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # --- real feed: wholesale electricity market dispatch ----------------------
+  ingest-market:
+    build: ./ingest
+    container_name: ingest-market
+    command: python market_poller.py
+    environment:
+      KAFKA_BOOTSTRAP: broker:29092
+      MARKET_DISPATCH_URL: ${MARKET_DISPATCH_URL}
+      MARKET_REGION: ${MARKET_REGION}
+      MARKET_INTERVAL_S: ${MARKET_INTERVAL_S:-300}
+    restart: unless-stopped
+
+  # --- real feed: public water gauge telemetry ------------------------------
+  ingest-hydrometry:
+    build: ./ingest
+    container_name: ingest-hydrometry
+    command: python hydrometry_poller.py
+    environment:
+      KAFKA_BOOTSTRAP: broker:29092
+      HYDRO_URL: ${HYDRO_URL}
+      HYDRO_PROVIDER: ${HYDRO_PROVIDER:-hydrometry}
+      HYDRO_SITES: ${HYDRO_SITES}
+      HYDRO_INTERVAL_S: ${HYDRO_INTERVAL_S:-900}
+    restart: unless-stopped
+
+  # --- batch: public GIS network loader (run on demand) ---------------------
+  gis-loader:
+    build: ./ingest
+    container_name: gis-loader
+    working_dir: /work
+    command: ["sleep", "infinity"]
+    environment:
+      TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
+      GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
+      SCHEMA_NAMESPACE: ${SCHEMA_NAMESPACE:-weave}
+    volumes:
+      - ./gis:/work/gis:ro
+      - ./scripts:/work/scripts:ro
+      - ./schemas:/work/schemas
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- hydraulic simulation: EPANET via WNTR --------------------------------
+  simulator:
+    build: ./model
+    container_name: simulator
+    environment:
+      TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
+      SIM_INTERVAL_S: "900"
+      SIM_MAX_PIPES: "5000"
+    volumes:
+      - siminp:/app/out
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- console: one page to see the twin and run the bootstrap steps --------
+  # Reads Postgres, Connect, Flink and Kafka; operates only by running the
+  # documented scripts and `docker exec` commands. That takes the Docker
+  # socket, which is root on the host, so the port binds to loopback only.
+  console:
+    build: ./console
+    container_name: weave-console
+    ports:
+      - "127.0.0.1:${CONSOLE_PORT:-8090}:8090"
+    environment:
+      TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
+      GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
+      KAFKA_BOOTSTRAP: broker:29092
+      CONNECT_URL: http://connect:8083
+      FLINK_URL: ${FLINK_URL:-http://flink-jobmanager:9081}
+      KIBANA_PUBLIC_URL: ${KIBANA_PUBLIC_URL:-http://localhost:5601}
+      FLINK_PUBLIC_URL: ${FLINK_PUBLIC_URL:-http://localhost:9081}
+      CONSOLE_TILE_URL: ${CONSOLE_TILE_URL:-}
+      CONSOLE_TILE_ATTRIBUTION: ${CONSOLE_TILE_ATTRIBUTION:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts:/weave/scripts:ro
+      - ./connectors:/weave/connectors:ro
+      - ./schemas:/weave/schemas:ro
+      - ./gis/regions:/weave/gis/regions:ro
+      - siminp:/sim:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- ELK: a disposable 7-day read copy of twin.*, plus container logs -----
+  # Postgres stays the system of record; Logstash mirrors it into
+  # Elasticsearch because Kibana cannot query Postgres. All Elastic images
+  # share one version.
+  #
+  # An existing cluster is used when one answers at ELASTICSEARCH_URL (.env);
+  # otherwise the local-elk profile below starts one. scripts/elk-up.sh makes
+  # that choice — bring ELK up through it, not with a bare compose up.
+  #
+  # The local cluster runs without security, so its ports bind to loopback
+  # only — both indices identify the region.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.4
+    container_name: elasticsearch
+    profiles: ["local-elk"]
+    ports:
+      - "127.0.0.1:9200:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      # Absolute rather than percentage watermarks. On Docker Desktop the data
+      # path is the whole shared VM disk, which is routinely >90% used by
+      # images, and the default 90% high watermark then refuses to allocate
+      # any shard at all. The copy is capped at 7 days, so free space is the
+      # thing worth guarding.
+      cluster.routing.allocation.disk.watermark.low: 2gb
+      cluster.routing.allocation.disk.watermark.high: 1500mb
+      cluster.routing.allocation.disk.watermark.flood_stage: 1gb
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.4
+    container_name: kibana
+    profiles: ["local-elk"]
+    ports:
+      - "127.0.0.1:5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      TELEMETRY_OPTIN: "false"
+      TELEMETRY_ALLOWCHANGINGOPTINSTATUS: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # One-shot: ILM, index templates and Kibana data views must exist before
+  # Logstash writes, or the first documents fix the mappings by guesswork.
+  # Elasticsearch defaults to the local-elk service; Kibana has no default,
+  # because an existing cluster may have none (scripts/elk-up.sh sets it for
+  # the local one). An empty ELASTICSEARCH_CA means curl's own trust store.
+  elk-setup:
+    image: curlimages/curl:8.16.0
+    container_name: elk-setup
+    command: ["sh", "/work/scripts/setup-elk.sh"]
+    environment:
+      ES_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
+      KIBANA_URL: ${KIBANA_URL:-}
+      ES_USER: ${ELASTICSEARCH_USERNAME:-}
+      ES_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
+      ES_CA: ${ELASTICSEARCH_CA:+/certs/${ELASTICSEARCH_CA}}
+    volumes:
+      - ./scripts:/work/scripts:ro
+      - ./elk/certs:/certs:ro
+    networks: [default, elk]
+    restart: "no"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+        required: false
+      kibana:
+        condition: service_healthy
+        required: false
+
+  logstash:
+    build: ./elk/logstash
+    container_name: logstash
+    environment:
+      TWIN_JDBC_URL: jdbc:postgresql://postgres:5432/weave_twin
+      TWIN_DB_USER: weave
+      TWIN_DB_PASSWORD: weave
+      ES_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
+      ES_USER: ${ELASTICSEARCH_USERNAME:-}
+      ES_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
+      # The output validates this path even for plain http, where it is
+      # ignored, so it falls back to the system trust store rather than empty.
+      ES_CA: ${ELASTICSEARCH_CA:+/certs/}${ELASTICSEARCH_CA:-/etc/pki/tls/certs/ca-bundle.crt}
+      LS_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - ./elk/logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./elk/certs:/certs:ro
+      - logstash-data:/usr/share/logstash/data
+    networks: [default, elk]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elk-setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:9.5.4
+    container_name: filebeat
+    user: root
+    # The config is bind-mounted from the host, so its ownership can't satisfy
+    # Filebeat's permission check.
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - filebeat-data:/usr/share/filebeat/data
+    depends_on:
+      - logstash
+    restart: unless-stopped
+
+networks:
+  # The network an existing cluster lives on, joined (never created or
+  # removed) so its TLS certificate's hostname resolves as issued. With no
+  # existing cluster it is just a network of Weave's own.
+  elk:
+    name: ${ELK_NETWORK:-weave-elk}
+
+volumes:
+  pgdata:
+  siminp:
+  esdata:
+  logstash-data:
+  filebeat-data:

@@ -1,0 +1,32 @@
+# Weave — ship this compose project's container logs to Logstash.
+# Only containers carrying a compose project label are read, so unrelated
+# containers on the same Docker host stay out. The ELK services themselves
+# are excluded: Logstash logging a failed write would otherwise be shipped
+# back through the same failing write.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      templates:
+        - condition:
+            and:
+              # Autodiscover nests label keys on their dots; the dedotted
+              # form (com_docker_compose_project) never matches here.
+              - has_fields: ["docker.container.labels.com.docker.compose.project"]
+              - not:
+                  regexp:
+                    docker.container.name: "^(elasticsearch|kibana|logstash|filebeat|elk-setup)$"
+          config:
+            - type: filestream
+              id: "container-${data.docker.container.id}"
+              paths:
+                - "/var/lib/docker/containers/${data.docker.container.id}/*.log"
+              parsers:
+                - container: ~
+              prospector.scanner.symlinks: true
+
+processors:
+  - add_docker_metadata: ~
+
+output.logstash:
+  hosts: ["logstash:5044"]

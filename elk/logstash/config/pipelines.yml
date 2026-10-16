@@ -1,0 +1,5 @@
+# Separate pipelines so a stalled log shipper can't back-pressure telemetry.
+- pipeline.id: twin
+  path.config: "/usr/share/logstash/pipeline/twin.conf"
+- pipeline.id: logs
+  path.config: "/usr/share/logstash/pipeline/logs.conf"

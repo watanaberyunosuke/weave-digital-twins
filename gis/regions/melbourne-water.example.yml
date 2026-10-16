@@ -1,0 +1,80 @@
+# Example region — a worked copy of TEMPLATE.yml, not a default.
+#
+# Nothing loads this unless you ask for it:
+#     python gis/load_gis.py --config gis/regions/melbourne-water.example.yml --all
+#
+# It exists so there is one end-to-end example of a filled-in region. Delete
+# it once you have written your own.
+#
+# The loader resolves item_id -> FeatureServer URL at runtime via the ArcGIS
+# sharing REST API, so it survives service URL changes. The three item IDs
+# marked "confirmed" were read directly from the hub pages; for the rest run
+# discover_layers.py against this config and paste in what it prints.
+
+region:
+  name: Greater Melbourne
+  source_id: melbourne_water_gis
+  extent:
+    xmin: 144.5
+    ymin: -38.5
+    xmax: 145.6
+    ymax: -37.4
+
+provider:
+  arcgis:
+    owner: melbournewater
+    hub_url: https://data-melbournewater.opendata.arcgis.com/
+  ckan:
+    api_url: https://discover.data.vic.gov.au/api/3/action/package_search
+    organization: melbourne-water-corporation
+
+layers:
+  water_main:
+    item_id: 7c0e5ccf71854e60bb77345dc26ddb76   # confirmed
+    layer: 0
+    target: pipe
+    owner: Melbourne Water
+    description: Water supply main centrelines owned by Melbourne Water
+
+  water_main_other:
+    item_id: b217c542a6f8496c8d8daca40e87cd67   # confirmed
+    layer: 0
+    target: pipe
+    owner: Other authority
+    description: Water supply mains owned by other water authorities
+
+  sewer_main:
+    item_id: f927c73700a9481aaac35f8f40923b86   # confirmed
+    layer: 0
+    target: pipe
+    owner: Melbourne Water
+    description: Sewer main centrelines
+
+  service_reservoir:
+    item_id: null        # discover_layers.py --search "service reservoir"
+    layer: 0
+    target: facility
+    facility_type: service_reservoir
+
+  storage_dam:
+    item_id: null        # --search "water supply storage dams"
+    layer: 0
+    target: facility
+    facility_type: storage_dam
+
+  pump_set:
+    item_id: null        # --search "pump sets"
+    layer: 0
+    target: facility
+    facility_type: pump_set
+
+  waterway_centreline:
+    item_id: null        # --search "waterways centreline"
+    layer: 0
+    target: raw_only
+
+attribute_hints:
+  diameter_mm: [DIAMETER, DIAMETER_MM, NOMINAL_DIAMETER, PIPE_DIAMETER, Diameter]
+  material:    [MATERIAL, PIPE_MATERIAL, MATERIAL_TYPE, Material]
+  asset_name:  [ASSET_NAME, NAME, MAIN_NAME, DESCRIPTION, Name]
+  capacity_ml: [CAPACITY_ML, CAPACITY, VOLUME_ML, Capacity]

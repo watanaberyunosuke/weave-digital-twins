@@ -1,0 +1,4 @@
+wntr==1.3.2
+psycopg[binary]==3.2.3
+shapely==2.0.6
+numpy==2.1.3

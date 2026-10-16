@@ -1,0 +1,56 @@
+# Weave region template — copy to gis/regions/<your-region>.yml and fill in.
+#
+# No place name appears anywhere in the Weave code. This file is the only
+# thing that knows where the twin is. Point the loader at it with either:
+#
+#     GIS_REGION_CONFIG=gis/regions/<your-region>.yml python gis/load_gis.py --all
+#     python gis/load_gis.py --config gis/regions/<your-region>.yml --all
+#
+# See melbourne-water.example.yml for a filled-in one.
+
+region:
+  name:        # human-readable; appears in log output only
+  source_id:   # written to asset.pipe.source and asset.facility.source
+
+  # Optional server-side bounding box, EPSG:4326. Omit the whole `extent`
+  # block to query a service unfiltered — fine for a small network, slow
+  # and rude for a large one.
+  extent:
+    xmin:
+    ymin:
+    xmax:
+    ymax:
+
+# Where discover_layers.py goes looking for candidate layers. Both blocks
+# are optional; drop whichever catalogue your region doesn't publish to.
+provider:
+  arcgis:
+    owner:      # ArcGIS Online username that publishes the layers
+    hub_url:    # Open Data Hub landing page, printed as a manual fallback
+  ckan:
+    api_url:      # https://<catalogue>/api/3/action/package_search
+    organization: # CKAN organization slug
+
+# Each entry becomes one pass of the loader. `target` decides which
+# conformed table it lands in: pipe | facility | raw_only.
+layers: {}
+  # water_main:
+  #   item_id: <arcgis item id>
+  #   layer: 0
+  #   target: pipe
+  #   owner: <asset owner, stored on each row>
+  #   description: <free text>
+  #
+  # service_reservoir:
+  #   item_id: <arcgis item id>
+  #   layer: 0
+  #   target: facility
+  #   facility_type: service_reservoir
+
+# Attribute name candidates, checked in order. GIS layers are inconsistent
+# about casing and naming, so the loader tries several.
+attribute_hints:
+  diameter_mm: [DIAMETER, DIAMETER_MM, NOMINAL_DIAMETER, PIPE_DIAMETER, Diameter]
+  material:    [MATERIAL, PIPE_MATERIAL, MATERIAL_TYPE, Material]
+  asset_name:  [ASSET_NAME, NAME, MAIN_NAME, DESCRIPTION, Name]
+  capacity_ml: [CAPACITY_ML, CAPACITY, VOLUME_ML, Capacity]

@@ -1,0 +1,15 @@
+{
+  "name": "datagen-electricity-meters",
+  "config": {
+    "connector.class": "io.confluent.kafka.connect.datagen.DatagenConnector",
+    "kafka.topic": "electricity.meter-interval.raw.v1",
+    "schema.filename": "/schemas/electricity_interval.avsc",
+    "schema.keyfield": "meter_id",
+    "max.interval": 1000,
+    "iterations": 100000000,
+    "tasks.max": "1",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weave console</title>
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <strong>Weave</strong><span class="muted">console</span>
+    </div>
+    <div class="region muted" id="region"></div>
+    <div class="health" id="health"></div>
+    <nav class="links" id="links"></nav>
+  </header>
+
+  <div class="layout">
+    <aside class="side">
+      <section>
+        <h2>Pipeline</h2>
+        <p class="hint">The bootstrap order. Each step runs the documented command; status is read live.</p>
+        <ol class="steps" id="steps"></ol>
+      </section>
+      <section>
+        <h2>Tools</h2>
+        <div id="tools"></div>
+      </section>
+      <section>
+        <h2>Containers</h2>
+        <ul class="containers" id="containers"></ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="map" aria-selected="true">Map</button>
+        <button role="tab" data-tab="telemetry">Telemetry</button>
+        <button role="tab" data-tab="anomalies">Anomalies</button>
+        <button role="tab" data-tab="jobs">Jobs <span class="badge" id="job-badge" hidden></span></button>
+      </div>
+
+      <section class="tab" id="tab-map">
+        <div class="map-wrap">
+          <div id="map"></div>
+          <div class="map-ctl card">
+            <label><input type="checkbox" data-layer="dmas" checked> DMAs <span class="tag syn">synthetic</span></label>
+            <label><input type="checkbox" data-layer="pipes" checked> Pipes <span class="tag real">real</span></label>
+            <label><input type="checkbox" data-layer="facilities" checked> Facilities <span class="tag real">real</span></label>
+            <label><input type="checkbox" data-layer="gauges" checked> Gauges <span class="tag real">real</span></label>
+            <div class="legend">
+              <span><i class="sw ok"></i>OK</span>
+              <span><i class="sw watch"></i>Watch</span>
+              <span><i class="sw leak"></i>Suspected leak</span>
+              <span><i class="sw unknown"></i>No status</span>
+            </div>
+            <div class="muted small" id="map-note"></div>
+          </div>
+          <div class="drawer card" id="drawer" hidden></div>
+          <div class="empty" id="map-empty" hidden></div>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-telemetry" hidden>
+        <div class="grid2">
+          <div class="card">
+            <h3>Freshness <span class="muted small">last 7 days</span></h3>
+            <table class="tbl" id="freshness"></table>
+          </div>
+          <div class="card">
+            <h3>Market dispatch <span class="tag real">real</span></h3>
+            <div class="chart" id="market-price"></div>
+            <div class="chart" id="market-demand"></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Hydrometry gauges <span class="tag real">real</span></h3>
+          <div class="gauges" id="gauges"></div>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-anomalies" hidden>
+        <div class="tiles" id="status-tiles"></div>
+        <div class="card">
+          <h3>Residuals over threshold <span class="muted small">modelled vs observed pressure, last 24 h</span></h3>
+          <table class="tbl" id="anomalies"></table>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-jobs" hidden>
+        <div class="jobs">
+          <ul class="job-list card" id="job-list"></ul>
+          <div class="card job-view">
+            <div id="job-head" class="muted">Run a step to see its output here.</div>
+            <pre class="log" id="job-log"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="run-dialog">
+    <form method="dialog" id="run-form">
+      <h3 id="run-title"></h3>
+      <p id="run-desc" class="muted"></p>
+      <div id="run-params"></div>
+      <div class="warn" id="run-warn" hidden></div>
+      <label class="small muted">Command</label>
+      <pre class="cmd" id="run-cmd"></pre>
+      <div class="err" id="run-err" hidden></div>
+      <div class="row-end">
+        <button value="cancel" class="btn ghost">Cancel</button>
+        <button value="run" class="btn primary" id="run-go">Run</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
