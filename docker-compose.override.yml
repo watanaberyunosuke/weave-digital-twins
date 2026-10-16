@@ -1,28 +1,53 @@
 # Weave — layered onto cp-all-in-one/cp-all-in-one-community
 # Region settings come from .env (see .env.example); nothing here names a place.
 
+# Every service logs as json-file: Filebeat reads Docker's JSON log files,
+# and an engine whose default driver is `local` writes a binary format it
+# can't parse. Rotation caps each container at 30 MB, since Filebeat ships
+# the lines and Docker Desktop's disk is shared with every image.
+x-logging: &json-logs
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
 services:
 
+  # Upstream services, listed only to set their logging.
+  broker:
+    logging: *json-logs
+  schema-registry:
+    logging: *json-logs
+  ksqldb-server:
+    logging: *json-logs
+  rest-proxy:
+    logging: *json-logs
+
   connect:
+    logging: *json-logs
     volumes:
       - ./schemas:/schemas:ro
 
   flink-jobmanager:
+    logging: *json-logs
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
       - ./flink/sql:/sql:ro
 
   flink-taskmanager:
+    logging: *json-logs
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
 
   flink-sql-client:
+    logging: *json-logs
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
       - ./flink/sql:/sql:ro
 
   # --- asset graph + telemetry store: PostGIS, pgRouting, TimescaleDB -------
   postgres:
+    logging: *json-logs
     image: timescale/timescaledb-ha:pg16
     # Not "postgres": that name is commonly taken by a stock postgres
     # container, which can't host this schema (no PostGIS, pgRouting or
@@ -46,6 +71,7 @@ services:
 
   # --- real feed: wholesale electricity market dispatch ----------------------
   ingest-market:
+    logging: *json-logs
     build: ./ingest
     container_name: ingest-market
     command: python market_poller.py
@@ -58,6 +84,7 @@ services:
 
   # --- real feed: public water gauge telemetry ------------------------------
   ingest-hydrometry:
+    logging: *json-logs
     build: ./ingest
     container_name: ingest-hydrometry
     command: python hydrometry_poller.py
@@ -71,6 +98,7 @@ services:
 
   # --- batch: public GIS network loader (run on demand) ---------------------
   gis-loader:
+    logging: *json-logs
     build: ./ingest
     container_name: gis-loader
     working_dir: /work
@@ -89,6 +117,7 @@ services:
 
   # --- hydraulic simulation: EPANET via WNTR --------------------------------
   simulator:
+    logging: *json-logs
     build: ./model
     # WNTR bundles EPANET for linux-x64 only, so on ARM hosts (Apple Silicon)
     # the solver can't load natively; amd64 runs under emulation there.
@@ -110,6 +139,7 @@ services:
   # documented scripts and `docker exec` commands. That takes the Docker
   # socket, which is root on the host, so the port binds to loopback only.
   console:
+    logging: *json-logs
     build: ./console
     container_name: weave-console
     ports:
@@ -148,6 +178,7 @@ services:
   # The local cluster runs without security, so its ports bind to loopback
   # only — both indices identify the region.
   elasticsearch:
+    logging: *json-logs
     image: docker.elastic.co/elasticsearch/elasticsearch:9.5.4
     container_name: elasticsearch
     profiles: ["local-elk"]
@@ -174,6 +205,7 @@ services:
       retries: 30
 
   kibana:
+    logging: *json-logs
     image: docker.elastic.co/kibana/kibana:9.5.4
     container_name: kibana
     profiles: ["local-elk"]
@@ -198,6 +230,7 @@ services:
   # because an existing cluster may have none (scripts/elk-up.sh sets it for
   # the local one). An empty ELASTICSEARCH_CA means curl's own trust store.
   elk-setup:
+    logging: *json-logs
     image: curlimages/curl:8.16.0
     container_name: elk-setup
     command: ["sh", "/work/scripts/setup-elk.sh"]
@@ -221,6 +254,7 @@ services:
         required: false
 
   logstash:
+    logging: *json-logs
     build: ./elk/logstash
     container_name: logstash
     environment:
@@ -248,6 +282,7 @@ services:
     restart: unless-stopped
 
   filebeat:
+    logging: *json-logs
     image: docker.elastic.co/beats/filebeat:9.5.4
     container_name: filebeat
     user: root
