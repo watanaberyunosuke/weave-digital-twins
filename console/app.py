@@ -419,9 +419,12 @@ def qgis_ogcapi_connection():
     return _download(
         "<!DOCTYPE connections>\n"
         '<qgsWFSConnections version="1.0">\n'
+        # No credential attributes: the API is anonymous, QGIS reads a
+        # missing attribute as empty, and an empty password="" reads to
+        # secret scanners as a hardcoded password.
         f'  <wfs name="Weave twin (OGC API)" url="{url}" version="OGC_API_FEATURES"'
-        ' username="" password="" authcfg="" ignoreAxisOrientation="0"'
-        f' invertAxisOrientation="0" pagingenabled="enabled" pagesize="{OGCAPI_PAGE_SIZE}"/>\n'
+        ' ignoreAxisOrientation="0" invertAxisOrientation="0"'
+        f' pagingenabled="enabled" pagesize="{OGCAPI_PAGE_SIZE}"/>\n'
         "</qgsWFSConnections>\n", "weave-ogcapi.xml")
 
 
