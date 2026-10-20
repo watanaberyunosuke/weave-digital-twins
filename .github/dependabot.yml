@@ -1,0 +1,28 @@
+# Dependabot version updates for the Python images. Each folder below has its
+# own requirements.txt and is built into its own container.
+#
+# The model's ignores are compatibility limits, not preferences:
+# - setuptools 82 removed pkg_resources, which wntr 1.3.2 imports (HDH-134).
+# - wntr 1.3.2 declares numpy<2.0.
+# Lift both together when wntr is upgraded past those limits.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/model"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "setuptools"
+        versions: [">=82"]
+      - dependency-name: "numpy"
+        versions: [">=2"]
+
+  - package-ecosystem: "pip"
+    directory: "/ingest"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "pip"
+    directory: "/console"
+    schedule:
+      interval: "weekly"
