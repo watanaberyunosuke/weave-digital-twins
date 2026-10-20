@@ -146,6 +146,10 @@ Enable the hook that checks branch names before a push:
 git config core.hooksPath .githooks
 ```
 
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the syntax checks, installs each
+component's `requirements.txt` on Python 3.12 and imports its code. Dependabot patch updates
+merge themselves once CI passes; minor and major updates wait for review.
+
 ## Known limits
 
 - **Topology build is slow** on large networks; use `--limit` to test first
