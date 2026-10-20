@@ -1,4 +1,4 @@
 requests==2.33.0
 kafka-python-ng==2.2.3
-psycopg[binary]==3.2.3
+psycopg[binary]==3.3.6
 PyYAML==6.0.3
