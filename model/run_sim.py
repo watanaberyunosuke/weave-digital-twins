@@ -23,6 +23,8 @@ import networkx as nx
 import psycopg
 import wntr
 
+from subgraph import Pipe, element_name, select_supplied_subgraph
+
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
 INTERVAL_S = int(os.environ.get("SIM_INTERVAL_S", "900"))
@@ -39,61 +41,90 @@ def build_inp() -> str:
         if cur.fetchone()[0] == 0:
             sys.exit("! topology not built — run SELECT asset.build_topology();")
 
-        # Junctions from graph nodes, with a nominal elevation.
-        cur.execute("""
-            SELECT node_id, ST_Y(geom), ST_X(geom), COALESCE(elevation_m, 50)
-            FROM asset.node
-        """)
-        for node_id, lat, lon, elev in cur.fetchall():
-            wn.add_junction(f"N{node_id}", base_demand=0.0,
-                            elevation=float(elev), coordinates=(lon, lat))
-
         # Reservoirs from real service reservoirs and storage dams. Each is
-        # snapped to its nearest graph node so it connects to the network.
+        # snapped to its nearest graph node so it connects to the network;
+        # node_id breaks distance ties so the snap is the same every build.
         cur.execute("""
-            SELECT f.facility_id, f.name, ST_Y(f.geom), ST_X(f.geom),
+            SELECT f.facility_id, ST_Y(f.geom), ST_X(f.geom),
                    (SELECT n.node_id FROM asset.node n
-                     ORDER BY n.geom <-> f.geom LIMIT 1)
+                     ORDER BY n.geom <-> f.geom, n.node_id LIMIT 1)
             FROM asset.facility f
             WHERE f.facility_type IN ('service_reservoir', 'storage_dam')
+            ORDER BY f.facility_id
         """)
-        for fid, name, lat, lon, near_node in cur.fetchall():
-            rid = f"R{abs(hash(fid)) % 100000}"
-            wn.add_reservoir(rid, base_head=80.0, coordinates=(lon, lat))
-            if near_node:
-                wn.add_pipe(f"L{rid}", rid, f"N{near_node}",
-                            length=10.0, diameter=0.6, roughness=100)
+        reservoirs = [r for r in cur.fetchall() if r[3] is not None]
+        if not reservoirs:
+            sys.exit("! no supply: load a service_reservoir or storage_dam layer "
+                     "so the model has a fixed head")
 
-        # Pipes as links.
+        # Every usable pipe, then a deterministic walk out from the
+        # reservoirs up to the cap (see subgraph.py for why not LIMIT).
         cur.execute("""
             SELECT pipe_id, start_node, end_node,
                    COALESCE(length_m, ST_Length(geom::geography)),
                    COALESCE(diameter_mm, 150) / 1000.0
             FROM asset.pipe
             WHERE start_node IS NOT NULL AND end_node IS NOT NULL
-              AND start_node <> end_node
-            LIMIT %s
-        """, (MAX_PIPES,))
-        added = 0
-        for pipe_id, s, e, length, dia in cur.fetchall():
-            try:
-                wn.add_pipe(f"P{added}", f"N{s}", f"N{e}",
-                            length=max(float(length or 1), 1.0),
-                            diameter=max(float(dia or 0.15), 0.05),
-                            roughness=100)
-                added += 1
-            except Exception:
-                continue
+        """)
+        pipes = [Pipe(pipe_id, s, e,
+                      max(float(length or 1), 1.0),
+                      max(float(dia or 0.15), 0.05))
+                 for pipe_id, s, e, length, dia in cur.fetchall()]
+        sel = select_supplied_subgraph(pipes, [r[3] for r in reservoirs], MAX_PIPES)
+        print(f"  selected {len(sel.pipes)} of {len(pipes)} pipes from "
+              f"{len(reservoirs)} reservoirs (SIM_MAX_PIPES={MAX_PIPES}): "
+              f"{sel.capped_pipes} over the cap, {sel.unsupplied_pipes} in "
+              f"components no reservoir feeds, {sel.skipped_pipes} zero-length")
+        if not sel.pipes:
+            sys.exit("! no supplied network: no reservoir snaps to a node with a "
+                     "connected pipe — check facility locations and topology")
 
-        # Public GIS is fragmentary, and skipped pipes (zero-length after
-        # snapping, over the cap, failed adds) strand more nodes. EPANET
-        # rejects a junction with no link and cannot solve a fragment with
-        # no fixed head, so only the parts a reservoir feeds are kept.
+        # Junctions only for nodes the selected pipes touch.
+        cur.execute("""
+            SELECT node_id, ST_Y(geom), ST_X(geom), COALESCE(elevation_m, 50)
+            FROM asset.node
+            WHERE node_id = ANY(%s)
+            ORDER BY node_id
+        """, (sorted(sel.nodes),))
+        for node_id, lat, lon, elev in cur.fetchall():
+            wn.add_junction(f"N{node_id}", base_demand=0.0,
+                            elevation=float(elev), coordinates=(lon, lat))
+
+        # Element ids carry the source asset id (element_name), so results
+        # join back to asset.facility and asset.pipe across builds.
+        unattached = []
+        for fid, lat, lon, near_node in reservoirs:
+            if near_node not in sel.nodes:
+                unattached.append(fid)
+                continue
+            rid = element_name("R", fid)
+            wn.add_reservoir(rid, base_head=80.0, coordinates=(lon, lat))
+            wn.add_pipe(element_name("L", fid), rid, f"N{near_node}",
+                        length=10.0, diameter=0.6, roughness=100)
+        if unattached:
+            print(f"  {len(unattached)} reservoirs left out: their node has no "
+                  f"selected pipe (no connected pipe, or beyond the cap)")
+
+        failed = 0
+        for pipe in sel.pipes:
+            try:
+                wn.add_pipe(element_name("P", pipe.pipe_id),
+                            f"N{pipe.start_node}", f"N{pipe.end_node}",
+                            length=pipe.length_m, diameter=pipe.diameter_m,
+                            roughness=100)
+            except Exception:
+                failed += 1
+        if failed:
+            print(f"  {failed} selected pipes failed to add")
+
+        # The walk guarantees supply, but a pipe that failed to add can strand
+        # what lay beyond it, and EPANET rejects a junction with no link or a
+        # fragment with no fixed head. Keep only what a reservoir still feeds.
         graph = wn.to_graph().to_undirected()
-        reservoirs = set(wn.reservoir_name_list)
+        reservoir_names = set(wn.reservoir_name_list)
         fed = set()
         for component in nx.connected_components(graph):
-            if reservoirs & component:
+            if reservoir_names & component:
                 fed |= component
         for link_name in list(wn.link_name_list):
             if wn.get_link(link_name).start_node_name not in fed:
@@ -102,7 +133,7 @@ def build_inp() -> str:
         for name in dropped:
             wn.remove_node(name)
         if dropped:
-            print(f"  dropped {len(dropped)} junctions in fragments no reservoir feeds")
+            print(f"  dropped {len(dropped)} junctions stranded by failed pipes")
 
         # Demands from synthetic meters, aggregated to the nearest node.
         cur.execute("""

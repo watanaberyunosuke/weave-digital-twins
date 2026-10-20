@@ -10,10 +10,11 @@ This repo is **an overlay, not a standalone stack**. It is copied over `cp-all-i
 
 ## Commands
 
-Everything runs in containers; there is no local build, no test suite and no linter. Syntax-check before running:
+Everything runs in containers; there is no local build and no linter. Syntax-check before running, and run the unit tests (standard library only; the EPANET solve test skips unless `wntr` is installed):
 
 ```bash
-python3 -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/run_sim.py console/app.py
+python3 -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/app.py
+python3 -m unittest discover -s model -p 'test_*.py'
 bash -n scripts/*.sh
 node --check console/static/app.js
 ```
@@ -139,7 +140,12 @@ Desktop GIS reaches the twin two ways, both as the read-only role `weave_reader`
 
 ### Model layer
 
-[model/run_sim.py](model/run_sim.py) builds the EPANET network from real geometry — junctions from `asset.node`, reservoirs snapped to their nearest node, pipes capped at `SIM_MAX_PIPES` — but takes demands from synthetic meter readings. That split is deliberate. Expect the first build to be messy: real GIS has fragments, missing diameters and no elevations, and the code compensates with `COALESCE` defaults (elevation 50 m, diameter 150 mm, reservoir head 80 m) and by skipping pipes that fail to add.
+[model/run_sim.py](model/run_sim.py) builds the EPANET network from real geometry — reservoirs snapped to their nearest node, then pipes and the junctions they touch — but takes demands from synthetic meter readings. That split is deliberate.
+
+- **What gets modelled.** [model/subgraph.py](model/subgraph.py) walks out from the reservoirs' nodes, in node-id then pipe-id order, keeping pipes until `SIM_MAX_PIPES`. Every kept pipe is connected to supply by construction, and the same graph always gives the same model; a plain `LIMIT` gave an arbitrary subset with unsupplied fragments. The build prints how many pipes were left out (over the cap, in components no reservoir feeds, zero-length after snapping) and exits with a diagnostic when there is no reservoir or no supplied pipe.
+- **Element ids map back to assets.** Pipes are `P<pipe_id>`, reservoirs `R<facility_id>` with connector `L<facility_id>`, junctions `N<node_id>`, so `twin.sim_result` joins straight back to the asset tables. An id EPANET can't take (over 31 characters, or containing whitespace, `;` or `"`) becomes `<prefix>#` plus 16 hex of its SHA-1, recomputable with `element_name()`. Keep both properties when changing the build; per-pipe outputs depend on them.
+
+Expect the first build to be messy: real GIS has fragments, missing diameters and no elevations, and the code compensates with `COALESCE` defaults (elevation 50 m, diameter 150 mm, reservoir head 80 m) and by skipping pipes that fail to add.
 
 ## Conventions
 
