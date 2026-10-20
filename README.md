@@ -135,6 +135,17 @@ Synthetic data is *coherent*: every meter ID exists, every meter sits on real ge
 
 **Swap the model:** EPANET for water is the default. Use OpenDSS or pandapower for electricity, SUMO for transport. The schema is model-agnostic.
 
+## Contributing
+
+Work is tracked in Linear, one branch per issue, named
+`<type>/hdh-<n>-<short-description>` where type is `feature`, `enhancement`,
+`fix`, `chore` or `docs` (for example `fix/hdh-79-deterministic-supplied-subgraph`).
+Enable the hook that checks branch names before a push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Known limits
 
 - **Topology build is slow** on large networks; use `--limit` to test first
