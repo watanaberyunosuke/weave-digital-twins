@@ -1,5 +1,10 @@
-# Weave — layered onto cp-all-in-one/cp-all-in-one-community
+# Weave — layered onto Confluent's cp-all-in-one-community compose file,
+# copied into a directory of its own (weave-stack in the README).
 # Region settings come from .env (see .env.example); nothing here names a place.
+
+# Pinned so volume, network and image names don't follow whatever the
+# directory is called; renaming it would otherwise orphan pgdata.
+name: weave
 
 # Every service logs as json-file: Filebeat reads Docker's JSON log files,
 # and an engine whose default driver is `local` writes a binary format it

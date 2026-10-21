@@ -40,12 +40,13 @@ residual calculation — stays the same.
 ## Quick start
 
 ```bash
-# Clone cp-all-in-one and overlay Weave
-git clone -b 8.2.0-post https://github.com/confluentinc/cp-all-in-one.git
+# Take Confluent's community compose stack into weave-stack, then overlay Weave
+git clone --depth 1 -b 8.2.0-post https://github.com/confluentinc/cp-all-in-one.git
+cp -R cp-all-in-one/cp-all-in-one-community weave-stack
 git clone https://github.com/watanaberyunosuke/weave-digital-twins.git
 # rsync rather than cp -r weave/*, which skips dotfiles such as .env.example
-rsync -a --exclude .git weave-digital-twins/ cp-all-in-one/cp-all-in-one-community/
-cd cp-all-in-one/cp-all-in-one-community
+rsync -a --exclude .git weave-digital-twins/ weave-stack/
+cd weave-stack
 
 # Point it at a region
 cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
