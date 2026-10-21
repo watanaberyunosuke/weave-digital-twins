@@ -39,8 +39,10 @@ services:
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
 
+  # A `docker exec` target that only idles; see the console for why init.
   flink-sql-client:
     logging: *json-logs
+    init: true
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
       - ./flink/sql:/sql:ro
@@ -74,6 +76,7 @@ services:
     logging: *json-logs
     build: ./ingest
     container_name: ingest-market
+    init: true
     command: python market_poller.py
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -87,6 +90,7 @@ services:
     logging: *json-logs
     build: ./ingest
     container_name: ingest-hydrometry
+    init: true
     command: python hydrometry_poller.py
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -101,6 +105,7 @@ services:
     logging: *json-logs
     build: ./ingest
     container_name: gis-loader
+    init: true
     working_dir: /work
     command: ["sleep", "infinity"]
     environment:
@@ -123,6 +128,7 @@ services:
     # the solver can't load natively; amd64 runs under emulation there.
     platform: linux/amd64
     container_name: simulator
+    init: true
     environment:
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
       SIM_INTERVAL_S: "900"
@@ -138,10 +144,16 @@ services:
   # Reads Postgres, Connect, Flink and Kafka; operates only by running the
   # documented scripts and `docker exec` commands. That takes the Docker
   # socket, which is root on the host, so the port binds to loopback only.
+  # init: the scripts it runs leave orphans that uvicorn, as PID 1, never
+  # reaps. A zombie makes `docker stop` fail and leaves Docker Desktop holding
+  # the stack's ports, so the next start hangs. The Python and `sleep` services
+  # get init too: as PID 1 they ignore SIGTERM and are only killed at the
+  # 10 s timeout.
   console:
     logging: *json-logs
     build: ./console
     container_name: weave-console
+    init: true
     ports:
       - "127.0.0.1:${CONSOLE_PORT:-8090}:8090"
     environment:
