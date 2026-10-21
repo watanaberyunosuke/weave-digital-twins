@@ -23,6 +23,8 @@ region:
 
 # Where discover_layers.py goes looking for candidate layers. Both blocks
 # are optional; drop whichever catalogue your region doesn't publish to.
+# Where several utilities serve the region, owner, hub_url and organization
+# each take a list (see victoria-water.example.yml).
 provider:
   arcgis:
     owner:      # ArcGIS Online username that publishes the layers
@@ -46,6 +48,34 @@ layers: {}
   #   layer: 0
   #   target: facility
   #   facility_type: service_reservoir
+  #
+  # A layer served over WFS 2.0 (GeoServer) instead of ArcGIS Online:
+  # service_area:
+  #   wfs_url: https://<geoserver>/geoserver/wfs
+  #   type_name: <workspace>:<feature type>
+  #   cql_filter: <optional CQL, e.g. type = 'retailer'>
+  #   geometry_field: geom      # only for the extent filter; default geom
+  #   target: raw_only
+  #
+  # An OpenStreetMap query (ODbL: attribute the contributors, and share-alike
+  # applies to a public database built from it). The query sets its own area
+  # and must end in `out geom;`; the region extent is not applied.
+  # mapped_tanks:
+  #   overpass_query: |
+  #     [out:json][timeout:180];
+  #     area["name"="<region>"]["boundary"="administrative"]->.a;
+  #     nwr["man_made"="storage_tank"]["operator"="<utility>"](area.a);
+  #     out geom;
+  #   overpass_url: https://overpass-api.de/api/interpreter   # the default
+  #   target: facility
+  #   facility_type: osm_storage
+
+# Optional: a DEM for node elevations (gis/load_elevation.py). An ArcGIS
+# elevation tile service in Web Mercator with LERC tiles. Without it every
+# junction gets the model's 50 m default.
+# elevation:
+#   tile_service: https://<host>/arcgis/rest/services/<dem>/ImageServer
+#   level: 14
 
 # Attribute name candidates, checked in order. GIS layers are inconsistent
 # about casing and naming, so the loader tries several.

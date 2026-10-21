@@ -29,6 +29,15 @@ DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_t
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
 INTERVAL_S = int(os.environ.get("SIM_INTERVAL_S", "900"))
 MAX_PIPES = int(os.environ.get("SIM_MAX_PIPES", "5000"))
+# A reservoir's head is the ground level at its node plus this depth of
+# water. A fixed head only worked while every node sat at the same default
+# elevation; with a DEM, anything above it came out at negative pressure.
+RESERVOIR_DEPTH_M = float(os.environ.get("SIM_RESERVOIR_DEPTH_M", "10"))
+# Reservoirs further than this from any node are left out. Snapping a
+# catchment dam onto whatever main is nearest, kilometres away, would put a
+# fixed head where there is none.
+MAX_SNAP_M = float(os.environ.get("SIM_MAX_SNAP_M", "500"))
+DEFAULT_ELEVATION_M = 50.0
 
 
 # --------------------------------------------------------------- build model
@@ -46,16 +55,26 @@ def build_inp() -> str:
         # node_id breaks distance ties so the snap is the same every build.
         cur.execute("""
             SELECT f.facility_id, ST_Y(f.geom), ST_X(f.geom),
-                   (SELECT n.node_id FROM asset.node n
-                     ORDER BY n.geom <-> f.geom, n.node_id LIMIT 1)
+                   near.node_id, near.elevation_m,
+                   ST_Distance(f.geom::geography, near.geom::geography)
             FROM asset.facility f
+            CROSS JOIN LATERAL (
+                SELECT n.node_id, n.elevation_m, n.geom FROM asset.node n
+                ORDER BY n.geom <-> f.geom, n.node_id LIMIT 1) near
             WHERE f.facility_type IN ('service_reservoir', 'storage_dam')
             ORDER BY f.facility_id
         """)
-        reservoirs = [r for r in cur.fetchall() if r[3] is not None]
+        candidates = cur.fetchall()
+        reservoirs = [r for r in candidates if r[5] <= MAX_SNAP_M]
+        too_far = [r for r in candidates if r[5] > MAX_SNAP_M]
+        if too_far:
+            print(f"  {len(too_far)} reservoirs left out: further than "
+                  f"SIM_MAX_SNAP_M={MAX_SNAP_M:g} m from any node "
+                  f"(furthest {max(r[5] for r in too_far):.0f} m)")
         if not reservoirs:
             sys.exit("! no supply: load a service_reservoir or storage_dam layer "
-                     "so the model has a fixed head")
+                     "within SIM_MAX_SNAP_M of the network so the model has a "
+                     "fixed head")
 
         # Every usable pipe, then a deterministic walk out from the
         # reservoirs up to the cap (see subgraph.py for why not LIMIT).
@@ -81,11 +100,11 @@ def build_inp() -> str:
 
         # Junctions only for nodes the selected pipes touch.
         cur.execute("""
-            SELECT node_id, ST_Y(geom), ST_X(geom), COALESCE(elevation_m, 50)
+            SELECT node_id, ST_Y(geom), ST_X(geom), COALESCE(elevation_m, %s)
             FROM asset.node
             WHERE node_id = ANY(%s)
             ORDER BY node_id
-        """, (sorted(sel.nodes),))
+        """, (DEFAULT_ELEVATION_M, sorted(sel.nodes)))
         for node_id, lat, lon, elev in cur.fetchall():
             wn.add_junction(f"N{node_id}", base_demand=0.0,
                             elevation=float(elev), coordinates=(lon, lat))
@@ -93,12 +112,14 @@ def build_inp() -> str:
         # Element ids carry the source asset id (element_name), so results
         # join back to asset.facility and asset.pipe across builds.
         unattached = []
-        for fid, lat, lon, near_node in reservoirs:
+        for fid, lat, lon, near_node, ground, _ in reservoirs:
             if near_node not in sel.nodes:
                 unattached.append(fid)
                 continue
             rid = element_name("R", fid)
-            wn.add_reservoir(rid, base_head=80.0, coordinates=(lon, lat))
+            head = float(ground if ground is not None else DEFAULT_ELEVATION_M)
+            wn.add_reservoir(rid, base_head=head + RESERVOIR_DEPTH_M,
+                             coordinates=(lon, lat))
             wn.add_pipe(element_name("L", fid), rid, f"N{near_node}",
                         length=10.0, diameter=0.6, roughness=100)
         if unattached:

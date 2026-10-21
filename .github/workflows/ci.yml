@@ -59,7 +59,10 @@ jobs:
           python -c "import wntr, run_sim"
           python -m unittest discover -s . -p 'test_*.py'
       - if: matrix.component == 'ingest'
-        run: python -c "import common, hydrometry_poller, market_poller"
+        # gis/ runs in the ingest image, so its decoder is checked here too.
+        run: |
+          python -c "import common, hydrometry_poller, market_poller"
+          python -c "import imagecodecs, numpy; imagecodecs.lerc_decode"
       - if: matrix.component == 'console'
         run: python -c "import app"
 
