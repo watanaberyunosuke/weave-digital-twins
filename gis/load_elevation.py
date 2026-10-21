@@ -81,7 +81,71 @@ def bilinear(grid: np.ndarray, valid: np.ndarray | None, fx: float, fy: float):
                  + z[1, 0] * (1 - dx) * dy + z[1, 1] * dx * dy)
 
 
-def main() -> int:
+def nodes_by_tile(cur, level: int, every_node: bool) -> dict:
+    """Group the nodes to sample by the tile that holds them."""
+    cur.execute("SELECT node_id, ST_X(geom), ST_Y(geom) FROM asset.node"
+                + ("" if every_node else " WHERE elevation_m IS NULL"))
+    by_tile: dict[tuple[int, int], list[tuple[int, float, float]]] = defaultdict(list)
+    for node_id, lon, lat in cur.fetchall():
+        row, col, fx, fy = tile_position(lon, lat, level)
+        by_tile[(row, col)].append((node_id, fx, fy))
+    return by_tile
+
+
+def fetch_tile(url: str, level: int, key: tuple[int, int]):
+    """(key, decoded grid and mask or None if outside the DEM, error or None).
+
+    A tile that fails or lies outside the DEM leaves its nodes unset (the
+    model's default) instead of stopping the run.
+    """
+    row, col = key
+    try:
+        resp = requests.get(f"{url}/tile/{level}/{row}/{col}", timeout=60)
+        if resp.status_code == 404:
+            return key, None, None
+        resp.raise_for_status()
+        return key, imagecodecs.lerc_decode(resp.content, masks=True), None
+    except Exception as exc:
+        return key, None, exc
+
+
+def sample_tiles(url: str, level: int, by_tile: dict):
+    """Interpolate every node from its tile; (samples, missing, failed)."""
+    samples: list[tuple[int, float]] = []
+    missing = failed = 0
+    # Each tile takes seconds to arrive, so a few are fetched at once, as a
+    # map viewer would; more would lean on a free public service.
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        results = pool.map(lambda key: fetch_tile(url, level, key), sorted(by_tile))
+        for i, (key, decoded, exc) in enumerate(results, 1):
+            members = by_tile[key]
+            if exc is not None:
+                print(f"  ! tile {level}/{key[0]}/{key[1]} failed: {exc}")
+                failed += len(members)
+            elif decoded is None:
+                missing += len(members)
+            else:
+                grid, valid = decoded
+                values = [(node_id, bilinear(grid, valid, fx, fy))
+                          for node_id, fx, fy in members]
+                samples += [(n, round(z, 2)) for n, z in values if z is not None]
+                missing += sum(1 for _, z in values if z is None)
+            if i % 100 == 0:
+                print(f"  {i}/{len(by_tile)} tiles ...")
+    return samples, missing, failed
+
+
+def write_elevations(cur, samples: list[tuple[int, float]]) -> int:
+    cur.execute("CREATE TEMP TABLE node_elevation (node_id BIGINT, elevation_m DOUBLE PRECISION)")
+    with cur.copy("COPY node_elevation FROM STDIN") as copy:
+        for row in samples:
+            copy.write_row(row)
+    cur.execute("""UPDATE asset.node n SET elevation_m = e.elevation_m
+                   FROM node_elevation e WHERE e.node_id = n.node_id""")
+    return cur.rowcount
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", help="region config (default: $GIS_REGION_CONFIG)")
     ap.add_argument("--all", action="store_true",
@@ -95,69 +159,21 @@ def main() -> int:
     if not url:
         print("no elevation.tile_service in the region config — nodes keep the "
               "model's default elevation")
-        return 0
+        return
     level = args.level if args.level is not None else int(elevation.get("level", 14))
     service_info(url, level)
 
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT node_id, ST_X(geom), ST_Y(geom) FROM asset.node"
-                    + ("" if args.all else " WHERE elevation_m IS NULL"))
-        by_tile: dict[tuple[int, int], list[tuple[int, float, float]]] = defaultdict(list)
-        for node_id, lon, lat in cur.fetchall():
-            row, col, fx, fy = tile_position(lon, lat, level)
-            by_tile[(row, col)].append((node_id, fx, fy))
+        by_tile = nodes_by_tile(cur, level, args.all)
         nodes = sum(len(v) for v in by_tile.values())
         print(f"sampling {nodes} nodes from {len(by_tile)} tiles at level {level}")
-
-        def fetch(key: tuple[int, int]):
-            # A tile that fails or lies outside the DEM leaves its nodes
-            # unset (the model's default) instead of stopping the run.
-            row, col = key
-            try:
-                resp = requests.get(f"{url}/tile/{level}/{row}/{col}", timeout=60)
-                if resp.status_code == 404:
-                    return key, None, None
-                resp.raise_for_status()
-                return key, imagecodecs.lerc_decode(resp.content, masks=True), None
-            except Exception as exc:
-                return key, None, exc
-
-        samples: list[tuple[int, float]] = []
-        missing = failed = 0
-        # Each tile takes seconds to arrive, so a few are fetched at once,
-        # as a map viewer would; more would lean on a free public service.
-        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            for i, (key, decoded, exc) in enumerate(pool.map(fetch, sorted(by_tile)), 1):
-                members = by_tile[key]
-                if exc is not None:
-                    print(f"  ! tile {level}/{key[0]}/{key[1]} failed: {exc}")
-                    failed += len(members)
-                elif decoded is None:
-                    missing += len(members)
-                else:
-                    grid, valid = decoded
-                    for node_id, fx, fy in members:
-                        z = bilinear(grid, valid, fx, fy)
-                        if z is None:
-                            missing += 1
-                        else:
-                            samples.append((node_id, round(z, 2)))
-                if i % 100 == 0:
-                    print(f"  {i}/{len(by_tile)} tiles ...")
-
-        cur.execute("CREATE TEMP TABLE node_elevation (node_id BIGINT, elevation_m DOUBLE PRECISION)")
-        with cur.copy("COPY node_elevation FROM STDIN") as copy:
-            for row_ in samples:
-                copy.write_row(row_)
-        cur.execute("""UPDATE asset.node n SET elevation_m = e.elevation_m
-                       FROM node_elevation e WHERE e.node_id = n.node_id""")
-        updated = cur.rowcount
+        samples, missing, failed = sample_tiles(url, level, by_tile)
+        updated = write_elevations(cur, samples)
         conn.commit()
 
     print(f"\n{updated} nodes given an elevation; {missing} outside the DEM or on "
           f"nodata, {failed} on tiles that failed to fetch")
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

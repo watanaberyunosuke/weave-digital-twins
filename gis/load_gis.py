@@ -75,6 +75,28 @@ def resolve_service_url(item_id: str) -> str:
     return url.rstrip("/")
 
 
+def paged(fetch_page, limit: int | None = None):
+    """Yield features page by page until a short page, an empty one or the limit.
+
+    `fetch_page(offset)` returns one page's features; the services differ in
+    how they're asked for a page, not in how paging ends.
+    """
+    offset, fetched = 0, 0
+    while True:
+        features = fetch_page(offset)
+        if not features:
+            return
+        for feat in features:
+            yield feat
+            fetched += 1
+            if limit and fetched >= limit:
+                return
+        if len(features) < PAGE_SIZE:
+            return
+        offset += PAGE_SIZE
+        time.sleep(0.3)          # be polite to a free public service
+
+
 def fetch_features(service_url: str, layer_index: int, extent: dict | None,
                    limit: int | None = None):
     """Page through a FeatureServer layer, yielding GeoJSON features.
@@ -83,51 +105,36 @@ def fetch_features(service_url: str, layer_index: int, extent: dict | None,
     slow for a large one.
     """
     query_url = f"{service_url}/{layer_index}/query"
-    offset, fetched = 0, 0
+    params = {
+        "where": "1=1",
+        "outFields": "*",
+        "inSR": 4326,
+        "outSR": 4326,
+        "returnGeometry": "true",
+        "resultRecordCount": PAGE_SIZE,
+        "f": "geojson",
+    }
+    if extent:
+        params.update({
+            "geometry": json.dumps({
+                "xmin": extent["xmin"], "ymin": extent["ymin"],
+                "xmax": extent["xmax"], "ymax": extent["ymax"],
+                "spatialReference": {"wkid": 4326},
+            }),
+            "geometryType": "esriGeometryEnvelope",
+            "spatialRel": "esriSpatialRelIntersects",
+        })
 
-    while True:
-        params = {
-            "where": "1=1",
-            "outFields": "*",
-            "inSR": 4326,
-            "outSR": 4326,
-            "returnGeometry": "true",
-            "resultOffset": offset,
-            "resultRecordCount": PAGE_SIZE,
-            "f": "geojson",
-        }
-        if extent:
-            params.update({
-                "geometry": json.dumps({
-                    "xmin": extent["xmin"], "ymin": extent["ymin"],
-                    "xmax": extent["xmax"], "ymax": extent["ymax"],
-                    "spatialReference": {"wkid": 4326},
-                }),
-                "geometryType": "esriGeometryEnvelope",
-                "spatialRel": "esriSpatialRelIntersects",
-            })
-
-        resp = requests.get(query_url, params=params, timeout=120)
+    def page(offset: int) -> list:
+        resp = requests.get(query_url, params={**params, "resultOffset": offset},
+                            timeout=120)
         resp.raise_for_status()
         payload = resp.json()
-
         if "error" in payload:
             raise RuntimeError(f"Query error: {payload['error']}")
+        return payload.get("features", [])
 
-        features = payload.get("features", [])
-        if not features:
-            return
-
-        for feat in features:
-            yield feat
-            fetched += 1
-            if limit and fetched >= limit:
-                return
-
-        if len(features) < PAGE_SIZE:
-            return
-        offset += PAGE_SIZE
-        time.sleep(0.3)          # be polite to a free public service
+    return paged(page, limit)
 
 
 def fetch_wfs_features(wfs_url: str, type_name: str, extent: dict | None,
@@ -145,42 +152,28 @@ def fetch_wfs_features(wfs_url: str, type_name: str, extent: dict | None,
             f"BBOX({geometry_field}, {extent['xmin']}, {extent['ymin']}, "
             f"{extent['xmax']}, {extent['ymax']}, 'EPSG:4326')"
         )
-    offset, fetched = 0, 0
+    params = {
+        "service": "WFS",
+        "version": "2.0.0",
+        "request": "GetFeature",
+        "typeNames": type_name,
+        "outputFormat": "application/json",
+        "srsName": "EPSG:4326",
+        "count": PAGE_SIZE,
+    }
+    if clauses:
+        params["cql_filter"] = " AND ".join(clauses)
 
-    while True:
-        params = {
-            "service": "WFS",
-            "version": "2.0.0",
-            "request": "GetFeature",
-            "typeNames": type_name,
-            "outputFormat": "application/json",
-            "srsName": "EPSG:4326",
-            "count": PAGE_SIZE,
-            "startIndex": offset,
-        }
-        if clauses:
-            params["cql_filter"] = " AND ".join(clauses)
-
-        resp = requests.get(wfs_url, params=params, timeout=120)
+    def page(offset: int) -> list:
+        resp = requests.get(wfs_url, params={**params, "startIndex": offset},
+                            timeout=120)
         resp.raise_for_status()
         # GeoServer reports errors as an XML exception report with HTTP 200.
         if not resp.headers.get("Content-Type", "").startswith("application/json"):
             raise RuntimeError(f"WFS error: {resp.text[:300]}")
+        return resp.json().get("features", [])
 
-        features = resp.json().get("features", [])
-        if not features:
-            return
-
-        for feat in features:
-            yield feat
-            fetched += 1
-            if limit and fetched >= limit:
-                return
-
-        if len(features) < PAGE_SIZE:
-            return
-        offset += PAGE_SIZE
-        time.sleep(0.3)
+    return paged(page, limit)
 
 
 def osm_geometry(element: dict) -> dict | None:
