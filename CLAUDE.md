@@ -40,6 +40,7 @@ docker exec gis-loader python gis/discover_layers.py --search reservoir
 # Load GIS. --limit is the way to iterate — a full load of a large network is slow
 docker exec gis-loader python gis/load_gis.py --layer water_main --limit 500
 docker exec gis-loader python gis/load_gis.py --all --build-topology
+docker exec gis-loader python gis/load_elevation.py   # node elevations from the region's DEM; --all re-samples
 
 # Re-derive DMAs/meters (TRUNCATEs asset.dma, ref.water_meter, ref.pressure_logger) and rewrite schemas/
 docker exec gis-loader python scripts/seed_synthetic_network.py --dmas 40 --meters-per-dma 25
@@ -145,13 +146,16 @@ Desktop GIS reaches the twin two ways, both as the read-only role `weave_reader`
 - **What gets modelled.** [model/subgraph.py](model/subgraph.py) walks out from the reservoirs' nodes, in node-id then pipe-id order, keeping pipes until `SIM_MAX_PIPES`. Every kept pipe is connected to supply by construction, and the same graph always gives the same model; a plain `LIMIT` gave an arbitrary subset with unsupplied fragments. The build prints how many pipes were left out (over the cap, in components no reservoir feeds, zero-length after snapping) and exits with a diagnostic when there is no reservoir or no supplied pipe.
 - **Element ids map back to assets.** Pipes are `P<pipe_id>`, reservoirs `R<facility_id>` with connector `L<facility_id>`, junctions `N<node_id>`, so `twin.sim_result` joins straight back to the asset tables. An id EPANET can't take (over 31 characters, or containing whitespace, `;` or `"`) becomes `<prefix>#` plus 16 hex of its SHA-1, recomputable with `element_name()`. Keep both properties when changing the build; per-pipe outputs depend on them.
 
-Expect the first build to be messy: real GIS has fragments, missing diameters and no elevations, and the code compensates with `COALESCE` defaults (elevation 50 m, diameter 150 mm, reservoir head 80 m) and by skipping pipes that fail to add.
+Expect the first build to be messy: real GIS has fragments, missing diameters and no elevations, and the code compensates with `COALESCE` defaults (elevation 50 m, diameter 150 mm) and by skipping pipes that fail to add. A reservoir's head is its snapped node's ground level plus `SIM_RESERVOIR_DEPTH_M` (10 m), and reservoirs further than `SIM_MAX_SNAP_M` (500 m) from any node are left out, because the snap otherwise attaches a remote dam to whatever main is nearest.
+
+- **Elevations come from a DEM, not the GIS.** [gis/load_elevation.py](gis/load_elevation.py) samples the region config's `elevation.tile_service` onto `asset.node.elevation_m`: an ArcGIS elevation tile service (Web Mercator, LERC), because public DEMs are usually tile-only with no `getSamples`. Each tile's 257th row and column repeat its neighbour's first, so nodes are interpolated bilinearly from one tile. It fills only nodes with no elevation, so run it after every topology build that adds nodes; nodes outside the DEM keep the 50 m default.
 
 ## Conventions
 
 - Comments explain *why* a choice was made, not what the line does; keep that register. The prose in the docstrings and SQL headers is part of the deliverable.
 - Loaders keep going on failure: a failed layer prints and continues, a failed poll logs and retries, a pipe that won't add is skipped. Don't convert these to hard exits.
 - GIS attribute names are inconsistent across sources; resolve them through `attribute_hints` in the region config via `pick()`, never by hardcoding a column name.
+- A region layer comes from an ArcGIS Online `item_id`, a WFS 2.0 `wfs_url` + `type_name` (optional `cql_filter`), or an `overpass_query`; `layer_features()` in `gis/load_gis.py` is the one place a new source kind goes. Assets that aren't supply (registered dams, OpenStreetMap tanks, pumpsets) load under facility types `run_sim.py` doesn't read, so they never become a fixed head in the model.
 - Branches are `<type>/hdh-<n>-<short-description>`, lowercase and hyphen-separated: `feature/` new capability, `enhancement/` improvement to existing behaviour, `fix/` defect, `chore/` maintenance, `docs/` documentation only. The Linear id stays in the name because that is how a pull request links to its ticket. [.githooks/pre-push](.githooks/pre-push) rejects pushes from any other branch name except `main`; enable it once per clone with `git config core.hooksPath .githooks`.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml) is the only gate before a Dependabot patch update merges itself, so when a component gains a module or a test, add its import or test there too. Keep `import wntr` explicit: the EPANET test skips rather than fails when wntr can't load.
 - Weave services whose command is a plain process (Python, `sleep`, uvicorn) set `init: true`. As PID 1 they ignore SIGTERM and never reap orphans; a zombie in the console made `docker compose stop` fail and left Docker Desktop holding the stack's ports, so the next start hung until Docker Desktop was restarted.

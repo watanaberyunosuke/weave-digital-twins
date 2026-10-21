@@ -137,7 +137,9 @@ services:
     environment:
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
       SIM_INTERVAL_S: "900"
-      SIM_MAX_PIPES: "5000"
+      SIM_MAX_PIPES: "10000"
+      SIM_RESERVOIR_DEPTH_M: "10"
+      SIM_MAX_SNAP_M: "500"
     volumes:
       - siminp:/app/out
     depends_on:

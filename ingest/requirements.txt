@@ -2,3 +2,5 @@ requests==2.34.2
 kafka-python-ng==2.2.3
 psycopg[binary]==3.3.6
 PyYAML==6.0.3
+numpy==2.5.4
+imagecodecs==2026.10.10

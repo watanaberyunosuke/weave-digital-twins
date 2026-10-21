@@ -13,6 +13,7 @@ echo "== 1. topics =="
 
 echo "== 2. load real GIS network =="
 docker exec gis-loader python gis/load_gis.py --all --build-topology
+docker exec gis-loader python gis/load_elevation.py
 
 echo "== 3. derive synthetic DMAs + meters from real network =="
 docker exec gis-loader python scripts/seed_synthetic_network.py \

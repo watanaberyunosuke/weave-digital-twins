@@ -1,0 +1,207 @@
+# Example region — every Victorian water corporation that publishes its
+# network as open data, on top of the Melbourne Water wholesale layers.
+#
+#     python gis/load_gis.py --config gis/regions/victoria-water.example.yml --all
+#
+# Checked against ArcGIS Online and discover.data.vic.gov.au in October 2026.
+# Only layers the corporation itself publishes under a stated open licence
+# are listed. That excludes, deliberately:
+#
+#   - GWMWater: its services are public, but the stated conditions of use
+#     forbid any use beyond the project they were supplied for.
+#   - Coliban Water: a public network view exists, but there is no licence
+#     and no open data catalogue entry for it. Ask Coliban Water first.
+#   - Copies held by contractors, councils or the CFA. Those were shared for
+#     a specific job, not published.
+#
+# Metropolitan retailers (Yarra Valley Water, South East Water, Greater
+# Western Water), the other regional urban corporations and the rural
+# corporations (Goulburn-Murray Water, Southern Rural Water, Lower Murray
+# Water) publish no network layers. DEECA's statewide Victorian Water Asset
+# Database excludes channels and supply infrastructure, so it doesn't fill
+# the gap either.
+#
+# Licences differ by publisher. Barwon Water and Central Highlands Water use
+# CC BY-NC-ND 4.0 (CHW's item page says CC BY-SA 4.0, its catalogue entry says
+# BY-NC-ND; the stricter one is assumed). That means non-commercial use only,
+# and no redistributing anything derived from their layers. That covers the
+# conformed tables, the seeded meters and the model output.
+#
+# The regional networks have no published reservoirs. They load and get
+# synthetic meters, but run_sim.py leaves them out of the EPANET model,
+# because it only keeps pipes it can reach from a reservoir.
+
+region:
+  name: Victoria
+  source_id: victoria_water_gis
+  # The whole state. Each publisher's service covers only its own area, so
+  # this filters nothing; narrow it to load one corner for a quick test.
+  extent:
+    xmin: 140.9
+    ymin: -39.2
+    xmax: 150.0
+    ymax: -33.9
+
+provider:
+  arcgis:
+    owner:
+      - MWCESRIAdmin           # Melbourne Water
+      - BarwonWaterGIS         # Barwon Water
+      - nic.hendriks@chw.net.au_chw   # Central Highlands Water
+    hub_url:
+      - https://data-melbournewater.opendata.arcgis.com/
+      - https://water-barwon.opendata.arcgis.com/
+  ckan:
+    api_url: https://discover.data.vic.gov.au/api/3/action/package_search
+    organization:
+      - melbourne-water-corporation
+      - barwon-water
+      - central-highlands-water
+
+layers:
+  # --- Melbourne Water (wholesale, CC BY 4.0). Same layer names as
+  # melbourne-water.example.yml, so switching configs upserts the same rows
+  # instead of loading the network twice.
+  water_main:
+    item_id: 7c0e5ccf71854e60bb77345dc26ddb76
+    layer: 0
+    target: pipe
+    owner: Melbourne Water
+    description: Water supply main centrelines owned by Melbourne Water
+
+  water_main_other:
+    item_id: b217c542a6f8496c8d8daca40e87cd67
+    layer: 0
+    target: pipe
+    owner: Other authority
+    description: Water supply mains in Melbourne Water's records owned by other authorities
+
+  sewer_main:
+    item_id: f927c73700a9481aaac35f8f40923b86
+    layer: 0
+    target: pipe
+    owner: Melbourne Water
+    description: Sewer main centrelines
+
+  service_reservoir:
+    item_id: edb323c130374cf38733d955a93fc4eb
+    layer: 0
+    target: facility
+    facility_type: service_reservoir
+
+  storage_dam:
+    item_id: 4310d5bcf21a42bbb2103a51892fc9f8
+    layer: 0
+    target: facility
+    facility_type: storage_dam
+
+  # Melbourne Water's recycled and pumping assets (CC BY-SA 4.0). The
+  # recycled mains are a separate network from drinking water, so they stay
+  # out of asset.pipe and therefore out of the model and the DMA seeding.
+  recycled_water_main:
+    item_id: f20c34e8cafd49eb848e0f90c9822c0e
+    layer: 0
+    target: raw_only
+    description: Melbourne Water recycled water mains
+
+  pump_set:
+    item_id: dba0069ce11940bab87420344abdff78
+    layer: 0
+    target: facility
+    facility_type: pump_set
+
+  # --- Barwon Water (regional urban, CC BY-NC-ND 4.0). Layer 2 of the Water
+  # Assets service is the in-service pipes: reticulation, feeder, transfer
+  # and raw water mains (about 107k). Layer 0 holds fittings, but its node
+  # types are valves, junctions and meters; there are no reservoirs in it.
+  barwon_water_main:
+    item_id: 16dbdea8b286401ea4dde492d81a5ce5
+    layer: 2
+    target: pipe
+    owner: Barwon Water
+    description: Barwon Water in-service water pipes
+
+  # --- Central Highlands Water (regional urban, see the licence note
+  # above). Treated, raw and non-potable mains, about 35k.
+  chw_water_main:
+    item_id: 8a5933397ef54092bd8efb52016a365b
+    layer: 0
+    target: pipe
+    owner: Central Highlands Water
+    description: Central Highlands Water water mains
+
+  # --- Service areas (DEECA, CC BY 4.0). Both datasets are filters on one
+  # statewide WFS layer of all 20 water corporations, so they share a URL.
+  # They load into asset.gis_raw only: they show which corporation serves
+  # an area, including the retailers whose pipes aren't published.
+  water_retailer_boundary:
+    wfs_url: https://opendata.maps.vic.gov.au/geoserver/wfs
+    type_name: open-data-platform:water_corp
+    cql_filter: watercorp_type = 'Melbourne Water Retailer'
+    target: raw_only
+    description: Melbourne Water Retailers (Yarra Valley, South East, Greater Western)
+
+  urban_water_corp_boundary:
+    wfs_url: https://opendata.maps.vic.gov.au/geoserver/wfs
+    type_name: open-data-platform:water_corp
+    cql_filter: watercorp_type = 'Urban Water Corporation'
+    target: raw_only
+    description: Urban Water Corporation Boundaries (the regional urban corporations)
+
+  # --- Retailer and regional storages and sites. None of these corporations
+  # publishes its own assets, so these come from public registers instead.
+  # They load as facilities of types run_sim.py doesn't read as supply:
+  # most sit on networks that aren't loaded, so their nearest main belongs
+  # to someone else.
+  #
+  # DEECA's register of public dams (CC BY 4.0): water corporation storages
+  # and treatment lagoons, with capacity in ML. Yarra Valley Water has none
+  # listed.
+  registered_storage:
+    wfs_url: https://opendata.maps.vic.gov.au/geoserver/wfs
+    type_name: open-data-platform:public_dam_retarding_basin_points_unrestricted
+    cql_filter: >-
+      decom = 'N' AND damowner IN ('Greater Western Water', 'South East Water',
+      'Yarra Valley Water', 'Barwon Water', 'Central Highlands Water')
+    target: facility
+    facility_type: registered_storage
+    description: Public dams register entries for the loaded and retailer corporations
+
+  # OpenStreetMap (ODbL 1.0): features whose operator tag names a retailer.
+  # Attribute "© OpenStreetMap contributors". ODbL is share-alike, so a
+  # database built from these and made public must be offered under ODbL too.
+  osm_retailer_storage:
+    overpass_query: |
+      [out:json][timeout:180];
+      area["name"="Victoria"]["boundary"="administrative"]["admin_level"="4"]->.vic;
+      nwr["man_made"~"^(reservoir_covered|water_tower|storage_tank)$"]
+         ["content"!~"wastewater|sewage"]
+         ["operator"~"^(Yarra Valley Water|South ?East Water|Greater Western Water|Western Water|City West Water)$"](area.vic);
+      out geom;
+    target: facility
+    facility_type: osm_storage
+    description: Retailer tanks, covered reservoirs and water towers mapped in OpenStreetMap
+
+  osm_retailer_site:
+    overpass_query: |
+      [out:json][timeout:180];
+      area["name"="Victoria"]["boundary"="administrative"]["admin_level"="4"]->.vic;
+      nwr["man_made"~"^(pumping_station|water_works|wastewater_plant|pipeline)$"]
+         ["operator"~"^(Yarra Valley Water|South ?East Water|Greater Western Water|Western Water|City West Water)$"](area.vic);
+      out geom;
+    target: raw_only
+    description: Retailer pump stations, treatment plants and pipelines mapped in OpenStreetMap
+
+# Node elevations for the hydraulic model, sampled by gis/load_elevation.py
+# after the topology build. Vicmap Elevation 10m DEM (Vicmap, CC BY 4.0),
+# served as LERC tiles only. Level 14 is about 7.5 m a pixel at this
+# latitude, the closest level to the DEM's 10 m.
+elevation:
+  tile_service: https://tiles-ap1.arcgis.com/P744lA0wf4LlBZ84/arcgis/rest/services/Vicmap_10m_DEM/ImageServer
+  level: 14
+
+attribute_hints:
+  diameter_mm: [DIAMETER, DIAMETER_MM, NOMINAL_DIAMETER, PIPE_DIAMETER, PIPE_DIA, NOM_DIAM, Diameter]
+  material:    [MATERIAL, PIPE_MATERIAL, MATERIAL_TYPE, Material]
+  asset_name:  [ASSET_NAME, NAME, MAIN_NAME, PUMP_STATION_NAME, DAMNAME, DESCRIPTION, Name]
+  capacity_ml: [CAPACITY_ML, CAPACITY, VOLUME_ML, Capacity]

@@ -695,6 +695,14 @@ ACTIONS: dict[str, dict] = {
                        "container also does this on its own every SIM_INTERVAL_S.",
         "params": [],
     },
+    "load_elevation": {
+        "label": "Sample node elevations",
+        "step": None,
+        "description": "Fills asset.node.elevation_m from the region config's DEM tile "
+                       "service. Run after the topology build, then rebuild the model.",
+        "params": [Param(name="all", label="Re-sample every node", kind="bool",
+                         default=False)],
+    },
     "discover": {
         "label": "Discover catalogue layers",
         "step": None,
@@ -734,6 +742,9 @@ def build_command(action: str, p: dict) -> list[str]:
         return ["docker", "exec", "flink-sql-client", "sh", "-c",
                 "cat /sql/01_sources.sql /sql/02_sinks.sql /sql/03_pipelines.sql "
                 "> /tmp/weave_pipelines.sql && sql-client.sh -f /tmp/weave_pipelines.sql"]
+    if action == "load_elevation":
+        cmd = exec_ + ["gis-loader", "python", "gis/load_elevation.py"]
+        return cmd + (["--all"] if p["all"] else [])
     if action == "discover":
         cmd = exec_ + ["gis-loader", "python", "gis/discover_layers.py"]
         return cmd + (["--search", p["search"]] if p["search"] else [])

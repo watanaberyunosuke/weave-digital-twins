@@ -2,7 +2,7 @@
 """Find the item IDs to paste into a region config.
 
 Searches whichever public catalogues the region config names under
-`provider:` — an ArcGIS Online owner and/or a CKAN organization. The
+`provider:` — ArcGIS Online owners and/or CKAN organizations. The
 catalogue endpoints are config, not code, so a new region needs no change
 here.
 
@@ -25,6 +25,12 @@ from load_gis import resolve_config_path
 ARCGIS_SEARCH = "https://www.arcgis.com/sharing/rest/search"
 
 
+def as_list(value) -> list:
+    if not value:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
 def arcgis_search(owner: str, term: str, limit: int = 100) -> list[dict]:
     query = f'owner:{owner} AND (type:"Feature Service")'
     if term:
@@ -42,9 +48,9 @@ def arcgis_search(owner: str, term: str, limit: int = 100) -> list[dict]:
     return out[:limit]
 
 
-def ckan_search(api_url: str, organization: str, term: str,
+def ckan_search(api_url: str, organizations: list[str], term: str,
                 rows: int = 100) -> list[dict]:
-    q = f"organization:{organization}" if organization else ""
+    q = f"organization:({' OR '.join(organizations)})" if organizations else ""
     if term:
         q = f"{q} AND {term}" if q else term
     r = requests.get(api_url, params={"q": q, "rows": rows}, timeout=30)
@@ -67,18 +73,22 @@ def main() -> int:
     arcgis = provider.get("arcgis") or {}
     ckan = provider.get("ckan") or {}
 
-    owner = args.arcgis_owner or arcgis.get("owner")
-    hub_url = arcgis.get("hub_url")
+    # A region served by several utilities lists one owner (and hub) per
+    # publisher; a single string is still accepted.
+    owners = [args.arcgis_owner] if args.arcgis_owner else as_list(arcgis.get("owner"))
+    hub_urls = as_list(arcgis.get("hub_url"))
     ckan_api = args.ckan_api_url or ckan.get("api_url")
-    ckan_org = args.ckan_organization or ckan.get("organization")
+    ckan_orgs = ([args.ckan_organization] if args.ckan_organization
+                 else as_list(ckan.get("organization")))
 
     if args.source in ("arcgis", "both"):
         print("=" * 70)
         print("ArcGIS Online — paste item_id values into your region config")
         print("=" * 70)
-        if not owner:
+        if not owners:
             print("  (no provider.arcgis.owner in config — skipping)")
-        else:
+        for owner in owners:
+            print(f"\n--- owner: {owner}")
             try:
                 for item in arcgis_search(owner, args.search):
                     print(f"\n{item.get('title')}")
@@ -86,7 +96,7 @@ def main() -> int:
                     print(f"  url:     {item.get('url')}")
             except Exception as exc:
                 print(f"  ! ArcGIS search failed: {exc}")
-                if hub_url:
+                for hub_url in hub_urls:
                     print(f"  Fallback: open a dataset page on {hub_url} and read")
                     print("  the item ID out of the thumbnail URL in the page source.")
 
@@ -98,7 +108,7 @@ def main() -> int:
             print("  (no provider.ckan.api_url in config — skipping)")
         else:
             try:
-                for ds in ckan_search(ckan_api, ckan_org, args.search):
+                for ds in ckan_search(ckan_api, ckan_orgs, args.search):
                     print(f"\n{ds.get('title')}")
                     for res in ds.get("resources", []):
                         print(f"  [{res.get('format')}] {res.get('url')}")

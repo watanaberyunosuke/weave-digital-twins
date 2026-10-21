@@ -22,7 +22,7 @@ region:
 
 provider:
   arcgis:
-    owner: melbournewater
+    owner: MWCESRIAdmin
     hub_url: https://data-melbournewater.opendata.arcgis.com/
   ckan:
     api_url: https://discover.data.vic.gov.au/api/3/action/package_search
@@ -63,7 +63,7 @@ layers:
     facility_type: storage_dam
 
   pump_set:
-    item_id: null        # --search "pump sets"
+    item_id: dba0069ce11940bab87420344abdff78   # Water Supply Pumpset Assets
     layer: 0
     target: facility
     facility_type: pump_set

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Load public GIS network layers into PostGIS.
 
-Resolves ArcGIS Online item IDs to FeatureServer URLs at runtime, pages
-through features as GeoJSON, and writes both a verbatim copy (asset.gis_raw)
-and a conformed copy (asset.pipe / asset.facility).
+Resolves ArcGIS Online item IDs to FeatureServer URLs at runtime (or reads a
+WFS 2.0 feature type or an Overpass query directly), pages through features
+as GeoJSON, and writes
+both a verbatim copy (asset.gis_raw) and a conformed copy (asset.pipe /
+asset.facility).
 
 Which network — and where it is — comes entirely from a region config under
 gis/regions/. Nothing here is region-specific.
@@ -128,6 +130,119 @@ def fetch_features(service_url: str, layer_index: int, extent: dict | None,
         time.sleep(0.3)          # be polite to a free public service
 
 
+def fetch_wfs_features(wfs_url: str, type_name: str, extent: dict | None,
+                       cql_filter: str | None = None,
+                       geometry_field: str = "geom", limit: int | None = None):
+    """Page through a WFS 2.0 feature type as GeoJSON (GeoServer's dialect).
+
+    The extent goes into the CQL filter as a BBOX rather than the `bbox`
+    parameter, because GeoServer refuses requests that carry both. CQL takes
+    the 'EPSG:4326' code in lon/lat order, unlike the WFS 2.0 bbox axis order.
+    """
+    clauses = [f"({cql_filter})"] if cql_filter else []
+    if extent:
+        clauses.append(
+            f"BBOX({geometry_field}, {extent['xmin']}, {extent['ymin']}, "
+            f"{extent['xmax']}, {extent['ymax']}, 'EPSG:4326')"
+        )
+    offset, fetched = 0, 0
+
+    while True:
+        params = {
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "GetFeature",
+            "typeNames": type_name,
+            "outputFormat": "application/json",
+            "srsName": "EPSG:4326",
+            "count": PAGE_SIZE,
+            "startIndex": offset,
+        }
+        if clauses:
+            params["cql_filter"] = " AND ".join(clauses)
+
+        resp = requests.get(wfs_url, params=params, timeout=120)
+        resp.raise_for_status()
+        # GeoServer reports errors as an XML exception report with HTTP 200.
+        if not resp.headers.get("Content-Type", "").startswith("application/json"):
+            raise RuntimeError(f"WFS error: {resp.text[:300]}")
+
+        features = resp.json().get("features", [])
+        if not features:
+            return
+
+        for feat in features:
+            yield feat
+            fetched += 1
+            if limit and fetched >= limit:
+                return
+
+        if len(features) < PAGE_SIZE:
+            return
+        offset += PAGE_SIZE
+        time.sleep(0.3)
+
+
+def osm_geometry(element: dict) -> dict | None:
+    """GeoJSON geometry for an Overpass element returned with `out geom`."""
+    if element["type"] == "node":
+        return {"type": "Point", "coordinates": [element["lon"], element["lat"]]}
+    if element["type"] == "way" and element.get("geometry"):
+        coords = [[p["lon"], p["lat"]] for p in element["geometry"]]
+        if len(coords) >= 4 and coords[0] == coords[-1]:
+            return {"type": "Polygon", "coordinates": [coords]}
+        return {"type": "LineString", "coordinates": coords}
+    if element["type"] == "relation" and element.get("bounds"):
+        # A multipolygon's parts would need assembling; its bounds centre is
+        # enough to place a site.
+        b = element["bounds"]
+        return {"type": "Point", "coordinates": [(b["minlon"] + b["maxlon"]) / 2,
+                                                 (b["minlat"] + b["maxlat"]) / 2]}
+    return None
+
+
+def fetch_overpass_features(overpass_url: str, query: str,
+                            limit: int | None = None):
+    """Run an Overpass QL query (ending in `out geom;`) and yield GeoJSON.
+
+    The query, area filter included, lives in the region config. Overpass
+    answers a whole query at once, so there is no paging; the extent is left
+    to the query because Overpass areas are tighter than a bounding box.
+    """
+    # The public instances refuse requests without an identifying agent.
+    resp = requests.post(overpass_url, data={"data": query}, timeout=300,
+                         headers={"User-Agent": "weave-digital-twins gis loader"})
+    resp.raise_for_status()
+    for n, element in enumerate(resp.json().get("elements", [])):
+        if limit and n >= limit:
+            return
+        geom = osm_geometry(element)
+        if geom:
+            yield {"id": f"{element['type']}/{element['id']}",
+                   "properties": element.get("tags", {}), "geometry": geom}
+
+
+def layer_features(name: str, cfg: dict, extent: dict | None,
+                   limit: int | None):
+    """The layer's features, from Overpass, a WFS feature type or an ArcGIS item."""
+    if cfg.get("overpass_query"):
+        url = cfg.get("overpass_url", "https://overpass-api.de/api/interpreter")
+        print(f"  querying {name} from {url} ...")
+        return fetch_overpass_features(url, cfg["overpass_query"], limit)
+
+    if cfg.get("wfs_url"):
+        print(f"  reading {name} ({cfg['type_name']}) from {cfg['wfs_url']} ...")
+        return fetch_wfs_features(cfg["wfs_url"], cfg["type_name"], extent,
+                                  cfg.get("cql_filter"),
+                                  cfg.get("geometry_field", "geom"), limit)
+
+    item_id = cfg["item_id"]
+    print(f"  resolving {name} ({item_id}) ...")
+    service_url = resolve_service_url(item_id)
+    print(f"    service: {service_url}")
+    return fetch_features(service_url, cfg.get("layer", 0), extent, limit)
+
+
 def pick(props: dict, candidates: list[str]):
     """GIS attribute names are inconsistent; try several."""
     lowered = {k.lower(): v for k, v in props.items()}
@@ -148,20 +263,15 @@ def to_number(val):
 
 def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
                source_id: str, limit: int | None = None) -> int:
-    item_id = cfg.get("item_id")
-    if not item_id:
+    if not (cfg.get("item_id") or cfg.get("wfs_url") or cfg.get("overpass_query")):
         print(f"  ! {name}: no item_id set — run discover_layers.py")
         return 0
-
-    print(f"  resolving {name} ({item_id}) ...")
-    service_url = resolve_service_url(item_id)
-    print(f"    service: {service_url}")
 
     target = cfg.get("target", "raw_only")
     count = 0
 
     with conn.cursor() as cur:
-        for feat in fetch_features(service_url, cfg.get("layer", 0), extent, limit):
+        for feat in layer_features(name, cfg, extent, limit):
             props = feat.get("properties") or {}
             geom = feat.get("geometry")
             if not geom:
@@ -181,25 +291,35 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
             )
 
             if target == "pipe" and geom.get("type") in ("LineString", "MultiLineString"):
+                # ST_LineMerge leaves a MultiLineString when the parts don't
+                # meet end to end, and asset.pipe holds LineStrings only. Each
+                # part becomes its own pipe, <layer>:<fid>:<n>; a feature that
+                # merges to one line keeps the plain <layer>:<fid> id.
                 cur.execute(
                     """INSERT INTO asset.pipe
                          (pipe_id, layer, owner, asset_name, diameter_mm,
                           material, length_m, geom, source)
-                       VALUES (%s, %s, %s, %s, %s, %s,
-                               ST_Length(ST_GeomFromGeoJSON(%s)::geography),
-                               ST_LineMerge(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)),
-                               %s)
+                       SELECT CASE WHEN count(*) OVER () = 1 THEN %(pipe_id)s
+                                   ELSE %(pipe_id)s || ':' || part.path[1] END,
+                              %(layer)s, %(owner)s, %(asset_name)s,
+                              %(diameter_mm)s, %(material)s,
+                              ST_Length(part.geom::geography), part.geom,
+                              %(source)s
+                         FROM ST_Dump(ST_LineMerge(ST_SetSRID(
+                                ST_GeomFromGeoJSON(%(geojson)s), 4326))) AS part
                        ON CONFLICT (pipe_id) DO UPDATE SET
                          diameter_mm = EXCLUDED.diameter_mm,
                          material = EXCLUDED.material,
+                         length_m = EXCLUDED.length_m,
                          geom = EXCLUDED.geom""",
-                    (
-                        f"{name}:{fid}", name, cfg.get("owner"),
-                        pick(props, hints["asset_name"]),
-                        to_number(pick(props, hints["diameter_mm"])),
-                        pick(props, hints["material"]),
-                        geojson, geojson, source_id,
-                    ),
+                    {
+                        "pipe_id": f"{name}:{fid}", "layer": name,
+                        "owner": cfg.get("owner"),
+                        "asset_name": pick(props, hints["asset_name"]),
+                        "diameter_mm": to_number(pick(props, hints["diameter_mm"])),
+                        "material": pick(props, hints["material"]),
+                        "geojson": geojson, "source": source_id,
+                    },
                 )
 
             elif target == "facility" and geom.get("type") in ("Point", "MultiPoint", "Polygon"):
