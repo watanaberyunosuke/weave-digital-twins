@@ -695,6 +695,15 @@ ACTIONS: dict[str, dict] = {
                        "container also does this on its own every SIM_INTERVAL_S.",
         "params": [],
     },
+    "reset_baseline": {
+        "label": "Reset residual baselines",
+        "step": None,
+        "description": "Starts DMA residual baselines afresh after a lasting change such "
+                       "as a model recalibration. Earlier residuals stay in the database "
+                       "but stop counting, so the DMA reads UNKNOWN until it has enough "
+                       "new ones. Blank resets every DMA.",
+        "params": [Param(name="dma", label="DMA id (blank = all)", kind="text", default="")],
+    },
     "load_elevation": {
         "label": "Sample node elevations",
         "step": None,
@@ -742,6 +751,9 @@ def build_command(action: str, p: dict) -> list[str]:
         return ["docker", "exec", "flink-sql-client", "sh", "-c",
                 "cat /sql/01_sources.sql /sql/02_sinks.sql /sql/03_pipelines.sql "
                 "> /tmp/weave_pipelines.sql && sql-client.sh -f /tmp/weave_pipelines.sql"]
+    if action == "reset_baseline":
+        cmd = exec_ + ["simulator", "python", "run_sim.py", "--reset-baseline"]
+        return cmd + (["--dma", p["dma"]] if p["dma"] else [])
     if action == "load_elevation":
         cmd = exec_ + ["gis-loader", "python", "gis/load_elevation.py"]
         return cmd + (["--all"] if p["all"] else [])

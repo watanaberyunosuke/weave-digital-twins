@@ -28,12 +28,20 @@ Z_LEAK = float(os.environ.get("SIM_RESIDUAL_Z_LEAK", "3"))
 # infinite z-score; 0.1 m is about the resolution of a pressure logger.
 SIGMA_FLOOR_M = float(os.environ.get("SIM_RESIDUAL_SIGMA_FLOOR_M", "0.1"))
 Z_TOLERANCE = 1e-9
+# Flagged residuals stay out of the baseline for this long, then rejoin it. A
+# leak is flagged for at least this long; a lasting change such as a model
+# recalibration is learned as the new normal afterwards instead of staying
+# flagged until it ages out of the whole baseline. Use --reset-baseline to
+# relearn straight away.
+RELEARN_HOURS = float(os.environ.get("SIM_RESIDUAL_RELEARN_HOURS", "24"))
+# dma_id in twin.residual_baseline_reset that resets every DMA at once.
+ALL_DMAS = "*"
 
 # Current residual per DMA with the statistics of its baseline: earlier rows
-# in twin.sim_residual inside the window. Rows that were flagged are left out
-# of the baseline, so a leak that persists is not learned as normal and stops
-# being flagged after a few days. The current run is not yet written when
-# this runs, so it is never part of its own baseline.
+# in twin.sim_residual inside the window and after the DMA's last reset.
+# Flagged rows younger than the grace period are left out, so a leak is not
+# learned as normal the moment it starts. The current run is not yet written
+# when this runs, so it is never part of its own baseline.
 RESIDUALS_SQL = """
     WITH observed AS (
         SELECT pr.dma_id, avg(pr.pressure_m) AS observed
@@ -55,11 +63,16 @@ RESIDUALS_SQL = """
     baseline AS (
         SELECT dma_id, count(*) AS n, avg(residual) AS mean,
                stddev_samp(residual) AS sd
-        FROM twin.sim_residual
+        FROM twin.sim_residual s
         WHERE variable = 'pressure'
           AND ts > now() - make_interval(secs => %(baseline_s)s)
+          AND ts > coalesce((SELECT max(r.reset_at)
+                               FROM twin.residual_baseline_reset r
+                              WHERE r.dma_id IN (s.dma_id, %(all_dmas)s)),
+                            '-infinity')
           AND residual IS NOT NULL
-          AND NOT coalesce(flagged, false)
+          AND NOT (coalesce(flagged, false)
+                   AND ts > now() - make_interval(secs => %(relearn_s)s))
         GROUP BY dma_id
     )
     SELECT o.dma_id, m.modelled, o.observed,
@@ -70,6 +83,15 @@ RESIDUALS_SQL = """
     ORDER BY o.dma_id
 """
 
+
+# postgres/init runs only on an empty volume, so the simulator creates this
+# table itself on volumes initialised before it existed.
+RESET_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS twin.residual_baseline_reset (
+        dma_id   TEXT PRIMARY KEY,          -- or '*' for every DMA
+        reset_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"""
 
 @dataclass(frozen=True)
 class Score:

@@ -24,7 +24,8 @@ import psycopg
 import wntr
 
 from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
-from residuals import BASELINE_DAYS, MIN_SAMPLES, RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify
+from residuals import (ALL_DMAS, BASELINE_DAYS, MIN_SAMPLES, RELEARN_HOURS, RESET_TABLE_SQL,
+                       RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify)
 from subgraph import Pipe, element_name, select_supplied_subgraph
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
@@ -215,7 +216,9 @@ def simulate() -> str:
 def compute_residuals(run_id: str) -> int:
     """Score each DMA's pressure residual against its own baseline."""
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute(RESIDUALS_SQL, {"run_id": run_id, "baseline_s": BASELINE_DAYS * 86400})
+        cur.execute(RESET_TABLE_SQL)
+        cur.execute(RESIDUALS_SQL, {"run_id": run_id, "baseline_s": BASELINE_DAYS * 86400,
+                                    "relearn_s": RELEARN_HOURS * 3600, "all_dmas": ALL_DMAS})
         rows = []
         for dma_id, modelled, observed, n, mean, sd in cur.fetchall():
             score = classify(modelled - observed, n, mean, sd)
@@ -246,8 +249,36 @@ def compute_residuals(run_id: str) -> int:
     print(f"  {len(rows)} DMA residuals: "
           + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
           + f" (baseline {BASELINE_DAYS:g} days, at least {MIN_SAMPLES} residuals,"
-            f" watch |z| >= {Z_WATCH:g}, flag |z| >= {Z_LEAK:g})")
+            f" watch |z| >= {Z_WATCH:g}, flag |z| >= {Z_LEAK:g},"
+            f" flagged rows rejoin after {RELEARN_HOURS:g} h)")
     return len(rows)
+
+
+def reset_baseline(dmas: list[str]) -> int:
+    """Start the named DMAs' baselines afresh, or every DMA's when none are named.
+
+    For after a genuine lasting change, such as a model recalibration, when the
+    old residuals no longer describe normal. Nothing is deleted: residuals
+    before the reset stay in twin.sim_residual and simply stop counting, and
+    the DMA reads UNKNOWN until it has the minimum number of new ones.
+    """
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(RESET_TABLE_SQL)
+        if dmas:
+            cur.execute("SELECT dma_id FROM asset.dma WHERE dma_id = ANY(%s)", (dmas,))
+            unknown = sorted(set(dmas) - {row[0] for row in cur.fetchall()})
+            if unknown:
+                sys.exit(f"! no such DMA: {', '.join(unknown)} — nothing reset")
+        targets = dmas or [ALL_DMAS]
+        cur.executemany(
+            """INSERT INTO twin.residual_baseline_reset (dma_id, reset_at)
+               VALUES (%s, now())
+               ON CONFLICT (dma_id) DO UPDATE SET reset_at = EXCLUDED.reset_at""",
+            [(d,) for d in targets])
+        conn.commit()
+    print(f"baseline reset for {', '.join(dmas) if dmas else 'every DMA'}; "
+          f"status is UNKNOWN until {MIN_SAMPLES} new residuals exist")
+    return len(targets)
 
 
 def main() -> int:
@@ -255,7 +286,17 @@ def main() -> int:
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--loop", action="store_true")
+    ap.add_argument("--reset-baseline", action="store_true",
+                    help="start residual baselines afresh (all DMAs unless --dma is given)")
+    ap.add_argument("--dma", action="append", default=[],
+                    help="with --reset-baseline: a DMA id; repeat for several")
     args = ap.parse_args()
+
+    if args.dma and not args.reset_baseline:
+        ap.error("--dma only applies with --reset-baseline")
+    if args.reset_baseline:
+        reset_baseline(args.dma)
+        return 0
 
     if args.build:
         build_inp()
@@ -273,7 +314,7 @@ def main() -> int:
                 print(f"! simulation failed: {exc}")
             time.sleep(INTERVAL_S)
 
-    ap.error("pass --build, --once or --loop")
+    ap.error("pass --build, --once, --loop or --reset-baseline")
     return 1
 
 

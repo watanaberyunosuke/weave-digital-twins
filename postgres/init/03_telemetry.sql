@@ -143,6 +143,14 @@ CREATE TABLE twin.sim_result (
     PRIMARY KEY (run_id, ts, element_type, element_id, variable)
 );
 
+-- A row here makes a DMA's residual baseline start afresh from reset_at
+-- (run_sim.py --reset-baseline); '*' resets every DMA. run_sim.py creates it
+-- on volumes initialised before it existed.
+CREATE TABLE twin.residual_baseline_reset (
+    dma_id   TEXT PRIMARY KEY,
+    reset_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE twin.sim_residual (
     ts           TIMESTAMPTZ NOT NULL,
     dma_id       TEXT,
