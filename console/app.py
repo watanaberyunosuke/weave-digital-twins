@@ -725,6 +725,7 @@ ACTIONS: dict[str, dict] = {
 def build_command(action: str, p: dict) -> list[str]:
     """The exact documented command for each action, nothing else."""
     exec_ = ["docker", "exec", "-e", "PYTHONUNBUFFERED=1"]
+    run_sim = exec_ + ["simulator", "python", "run_sim.py"]
     if action == "create_topics":
         return ["bash", str(WEAVE_DIR / "scripts/create-topics.sh")]
     if action == "load_gis":
@@ -742,9 +743,9 @@ def build_command(action: str, p: dict) -> list[str]:
     if action == "register_connectors":
         return ["bash", str(WEAVE_DIR / "scripts/register-connectors.sh")]
     if action == "build_model":
-        return exec_ + ["simulator", "python", "run_sim.py", "--build"]
+        return run_sim + ["--build"]
     if action == "run_sim_once":
-        return exec_ + ["simulator", "python", "run_sim.py", "--once"]
+        return run_sim + ["--once"]
     if action == "start_flink":
         # Tables are session-scoped in the SQL client, so the three files have
         # to run in one session — hence one concatenated script.
@@ -752,7 +753,7 @@ def build_command(action: str, p: dict) -> list[str]:
                 "cat /sql/01_sources.sql /sql/02_sinks.sql /sql/03_pipelines.sql "
                 "> /tmp/weave_pipelines.sql && sql-client.sh -f /tmp/weave_pipelines.sql"]
     if action == "reset_baseline":
-        cmd = exec_ + ["simulator", "python", "run_sim.py", "--reset-baseline"]
+        cmd = run_sim + ["--reset-baseline"]
         return cmd + (["--dma", p["dma"]] if p["dma"] else [])
     if action == "load_elevation":
         cmd = exec_ + ["gis-loader", "python", "gis/load_elevation.py"]
