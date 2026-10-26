@@ -279,6 +279,48 @@ def drop_stale_pipes(cur, stale: list[str]) -> int:
     return released
 
 
+def upsert_pipe(cur, name: str, fid: str, cfg: dict, props: dict, hints: dict,
+                geojson: str, source_id: str, previous_parts: int | None) -> int:
+    """Conform one line feature into asset.pipe; returns meters released.
+
+    ST_LineMerge leaves a MultiLineString when the parts don't meet end to
+    end, and asset.pipe holds LineStrings only. Each part becomes its own
+    pipe, <layer>:<fid>:<n>; a feature that merges to one line keeps the
+    plain <layer>:<fid> id.
+    """
+    pipe_id = f"{name}:{fid}"
+    cur.execute(
+        """INSERT INTO asset.pipe
+             (pipe_id, layer, owner, asset_name, diameter_mm,
+              material, length_m, geom, source)
+           SELECT CASE WHEN count(*) OVER () = 1 THEN %(pipe_id)s
+                       ELSE %(pipe_id)s || ':' || part.path[1] END,
+                  %(layer)s, %(owner)s, %(asset_name)s,
+                  %(diameter_mm)s, %(material)s,
+                  ST_Length(part.geom::geography), part.geom,
+                  %(source)s
+             FROM ST_Dump(ST_LineMerge(ST_SetSRID(
+                    ST_GeomFromGeoJSON(%(geojson)s), 4326))) AS part
+           ON CONFLICT (pipe_id) DO UPDATE SET
+             diameter_mm = EXCLUDED.diameter_mm,
+             material = EXCLUDED.material,
+             length_m = EXCLUDED.length_m,
+             geom = EXCLUDED.geom
+           RETURNING pipe_id""",
+        {
+            "pipe_id": pipe_id, "layer": name,
+            "owner": cfg.get("owner"),
+            "asset_name": pick(props, hints["asset_name"]),
+            "diameter_mm": to_number(pick(props, hints["diameter_mm"])),
+            "material": pick(props, hints["material"]),
+            "geojson": geojson, "source": source_id,
+        },
+    )
+    current = {row[0] for row in cur.fetchall()}
+    stale = part_ids(pipe_id, previous_parts) - current
+    return drop_stale_pipes(cur, sorted(stale)) if stale else 0
+
+
 def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
                source_id: str, limit: int | None = None) -> int:
     if not (cfg.get("item_id") or cfg.get("wfs_url") or cfg.get("overpass_query")):
@@ -324,41 +366,8 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
             previous_parts = cur.fetchone()[0]
 
             if target == "pipe" and geom.get("type") in ("LineString", "MultiLineString"):
-                # ST_LineMerge leaves a MultiLineString when the parts don't
-                # meet end to end, and asset.pipe holds LineStrings only. Each
-                # part becomes its own pipe, <layer>:<fid>:<n>; a feature that
-                # merges to one line keeps the plain <layer>:<fid> id.
-                cur.execute(
-                    """INSERT INTO asset.pipe
-                         (pipe_id, layer, owner, asset_name, diameter_mm,
-                          material, length_m, geom, source)
-                       SELECT CASE WHEN count(*) OVER () = 1 THEN %(pipe_id)s
-                                   ELSE %(pipe_id)s || ':' || part.path[1] END,
-                              %(layer)s, %(owner)s, %(asset_name)s,
-                              %(diameter_mm)s, %(material)s,
-                              ST_Length(part.geom::geography), part.geom,
-                              %(source)s
-                         FROM ST_Dump(ST_LineMerge(ST_SetSRID(
-                                ST_GeomFromGeoJSON(%(geojson)s), 4326))) AS part
-                       ON CONFLICT (pipe_id) DO UPDATE SET
-                         diameter_mm = EXCLUDED.diameter_mm,
-                         material = EXCLUDED.material,
-                         length_m = EXCLUDED.length_m,
-                         geom = EXCLUDED.geom
-                       RETURNING pipe_id""",
-                    {
-                        "pipe_id": f"{name}:{fid}", "layer": name,
-                        "owner": cfg.get("owner"),
-                        "asset_name": pick(props, hints["asset_name"]),
-                        "diameter_mm": to_number(pick(props, hints["diameter_mm"])),
-                        "material": pick(props, hints["material"]),
-                        "geojson": geojson, "source": source_id,
-                    },
-                )
-                current = {row[0] for row in cur.fetchall()}
-                stale = part_ids(f"{name}:{fid}", previous_parts) - current
-                if stale:
-                    released += drop_stale_pipes(cur, sorted(stale))
+                released += upsert_pipe(cur, name, fid, cfg, props, hints, geojson,
+                                        source_id, previous_parts)
 
             elif target == "facility" and geom.get("type") in ("Point", "MultiPoint", "Polygon"):
                 cur.execute(

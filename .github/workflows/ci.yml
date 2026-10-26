@@ -63,42 +63,25 @@ jobs:
         run: |
           python -c "import common, hydrometry_poller, market_poller"
           python -c "import imagecodecs, numpy; imagecodecs.lerc_decode"
+      # The loader's conforming happens in PostGIS, so its fixtures run against
+      # the image the stack's postgres service uses. It is started here rather
+      # than as a job service so the other components don't pull it, and the
+      # readiness check goes over TCP because the image's first-boot server
+      # answers on its socket before initialisation finishes.
+      - if: matrix.component == 'ingest'
+        env:
+          WEAVE_TEST_DSN: postgresql://postgres:weave@localhost:5432/postgres
+        run: |
+          docker run -d --name postgis -p 5432:5432 -e POSTGRES_PASSWORD=weave \
+            timescale/timescaledb-ha:pg16
+          timeout 180 sh -c 'until docker exec postgis pg_isready -h 127.0.0.1 -U postgres; do sleep 2; done'
+          python -m unittest discover -s ../gis -p 'test_*.py' -v
       - if: matrix.component == 'console'
         run: python -c "import app"
 
-  # The loader's conforming happens in PostGIS, so its fixtures need a real
-  # database: the image the stack's postgres service runs, not a stand-in.
-  gis:
-    name: gis
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: timescale/timescaledb-ha:pg16
-        env:
-          POSTGRES_PASSWORD: weave
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s --health-timeout 5s --health-retries 30
-    env:
-      WEAVE_TEST_DSN: postgresql://postgres:weave@localhost:5432/postgres
-    defaults:
-      run:
-        working-directory: gis
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: ingest/requirements.txt
-      # gis/ runs in the ingest image, so it installs ingest's requirements.
-      - run: pip install --only-binary ":all:" -r ../ingest/requirements.txt
-      - run: python -m unittest discover -s . -p 'test_*.py'
-
   dependabot-merge:
     name: Merge Dependabot patch update
-    needs: [syntax, component, gis]
+    needs: [syntax, component]
     # github.actor rules out a commit someone else pushed to a Dependabot branch.
     if: >-
       github.event_name == 'pull_request' &&
