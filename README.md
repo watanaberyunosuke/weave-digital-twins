@@ -44,8 +44,10 @@ residual calculation — stays the same.
 git clone --depth 1 -b 8.2.0-post https://github.com/confluentinc/cp-all-in-one.git
 cp -R cp-all-in-one/cp-all-in-one-community weave-stack
 git clone https://github.com/watanaberyunosuke/weave-digital-twins.git
-# rsync rather than cp -r weave/*, which skips dotfiles such as .env.example
-rsync -a --exclude .git weave-digital-twins/ weave-stack/
+# rsync rather than cp -r weave/*, which skips dotfiles such as .env.example.
+# .env is excluded so overlaying from a working copy never carries its
+# credentials across, and re-running the overlay keeps the stack's own .env.
+rsync -a --exclude .git --exclude .env weave-digital-twins/ weave-stack/
 cd weave-stack
 
 # Point it at a region
