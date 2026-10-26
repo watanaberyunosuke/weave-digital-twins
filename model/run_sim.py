@@ -23,6 +23,7 @@ import networkx as nx
 import psycopg
 import wntr
 
+from demands import DEMAND_WINDOW, METER_FLOWS_SQL, junction_demands
 from subgraph import Pipe, element_name, select_supplied_subgraph
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
@@ -156,21 +157,15 @@ def build_inp() -> str:
         if dropped:
             print(f"  dropped {len(dropped)} junctions stranded by failed pipes")
 
-        # Demands from synthetic meters, aggregated to the nearest node.
-        cur.execute("""
-            SELECT n.node_id, COALESCE(avg(m.flow_lpm), 0) / 60000.0
-            FROM ref.water_meter wm
-            JOIN LATERAL (SELECT node_id FROM asset.node
-                          ORDER BY geom <-> wm.geom LIMIT 1) n ON true
-            LEFT JOIN twin.meter_reading m
-                   ON m.meter_id = wm.meter_id
-                  AND m.ts > now() - interval '1 hour'
-            GROUP BY n.node_id
-        """)
-        for node_id, demand_cms in cur.fetchall():
+        # Demands from synthetic meters, summed at each meter's nearest node.
+        cur.execute(METER_FLOWS_SQL, {"window": DEMAND_WINDOW})
+        demands = junction_demands(cur.fetchall())
+        for node_id, demand_cms in demands.by_node.items():
             name = f"N{node_id}"
             if name in wn.junction_name_list:
-                wn.get_node(name).demand_timeseries_list[0].base_value = float(demand_cms)
+                wn.get_node(name).demand_timeseries_list[0].base_value = demand_cms
+        print(f"  demands: {demands.meters} meters, {demands.silent} with no reading"
+              f" in the last {DEMAND_WINDOW}")
 
     os.makedirs(os.path.dirname(INP_PATH), exist_ok=True)
     wn.options.time.duration = 0                       # snapshot solve
