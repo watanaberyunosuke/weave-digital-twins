@@ -54,3 +54,28 @@ def junction_demands(rows) -> Demands:
             continue
         by_node[node_id] = by_node.get(node_id, 0.0) + float(flow_lpm) / LPM_PER_CMS
     return Demands(by_node, meters, silent)
+
+
+def apply_demands(wn, demands: Demands) -> float:
+    """Set every junction's base demand in `wn`; returns m³/s left unmodelled.
+
+    Runs before every solve, not at build time, so the model follows the
+    meters instead of whatever they read when network.inp was written: a
+    build during bootstrap, before any telemetry arrives, otherwise froze
+    every demand at zero. Each junction is reset first, so a meter that has
+    gone silent stops drawing. Demand at a node outside the modelled subgraph
+    is returned rather than dropped unseen. Junctions are N<node_id>, as the
+    build names them; `wn` is a wntr WaterNetworkModel, used by duck typing
+    so this module stays importable without wntr.
+    """
+    junctions = set(wn.junction_name_list)
+    for name in junctions:
+        wn.get_node(name).demand_timeseries_list[0].base_value = 0.0
+    unmodelled = 0.0
+    for node_id, demand_cms in demands.by_node.items():
+        name = f"N{node_id}"
+        if name in junctions:
+            wn.get_node(name).demand_timeseries_list[0].base_value = demand_cms
+        else:
+            unmodelled += demand_cms
+    return unmodelled

@@ -23,7 +23,7 @@ import networkx as nx
 import psycopg
 import wntr
 
-from demands import DEMAND_WINDOW, METER_FLOWS_SQL, junction_demands
+from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
 from subgraph import Pipe, element_name, select_supplied_subgraph
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
@@ -157,16 +157,6 @@ def build_inp() -> str:
         if dropped:
             print(f"  dropped {len(dropped)} junctions stranded by failed pipes")
 
-        # Demands from synthetic meters, summed at each meter's nearest node.
-        cur.execute(METER_FLOWS_SQL, {"window": DEMAND_WINDOW})
-        demands = junction_demands(cur.fetchall())
-        for node_id, demand_cms in demands.by_node.items():
-            name = f"N{node_id}"
-            if name in wn.junction_name_list:
-                wn.get_node(name).demand_timeseries_list[0].base_value = demand_cms
-        print(f"  demands: {demands.meters} meters, {demands.silent} with no reading"
-              f" in the last {DEMAND_WINDOW}")
-
     os.makedirs(os.path.dirname(INP_PATH), exist_ok=True)
     wn.options.time.duration = 0                       # snapshot solve
     wntr.network.write_inpfile(wn, INP_PATH)
@@ -181,6 +171,14 @@ def simulate() -> str:
         build_inp()
 
     wn = wntr.network.WaterNetworkModel(INP_PATH)
+    # The .inp holds topology only; demands come from the meters each solve.
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(METER_FLOWS_SQL, {"window": DEMAND_WINDOW})
+        demands = junction_demands(cur.fetchall())
+    unmodelled = apply_demands(wn, demands)
+    print(f"  demands: {demands.meters} meters, {demands.silent} with no reading"
+          f" in the last {DEMAND_WINDOW}; {sum(demands.by_node.values()):.6f} m³/s,"
+          f" {unmodelled:.6f} of it at nodes outside the model")
     sim = wntr.sim.EpanetSimulator(wn)
     # EPANET's scratch files default to temp.* in the working directory, so
     # the --loop container and a --once run from the console would overwrite
