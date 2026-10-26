@@ -15,6 +15,8 @@ Everything runs in containers; there is no local build and no linter. Syntax-che
 ```bash
 python3 -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/app.py
 python3 -m unittest discover -s model -p 'test_*.py'
+# GIS loader fixtures need PostGIS and a role that can create databases; they skip without one
+WEAVE_TEST_DSN=postgresql://weave:weave@localhost:5432/weave_twin python3 -m unittest discover -s gis -p 'test_*.py'
 bash -n scripts/*.sh
 node --check console/static/app.js
 ```

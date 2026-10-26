@@ -254,6 +254,31 @@ def to_number(val):
         return None
 
 
+def part_ids(pipe_id: str, parts: int | None) -> set[str]:
+    """The asset.pipe ids a feature conformed into `parts` pipes was given."""
+    if not parts:
+        return set()
+    if parts == 1:
+        return {pipe_id}
+    return {f"{pipe_id}:{n}" for n in range(1, parts + 1)}
+
+
+def drop_stale_pipes(cur, stale: list[str]) -> int:
+    """Remove pipes a reloaded feature no longer produces.
+
+    Without this, a feature that changes how many parts it splits into keeps
+    its old pipes next to the new ones, so asset.pipe no longer matches
+    asset.gis_raw. Synthetic meters may point at an old part; they keep their
+    row and lose only the reference, which the seeder sets again. Returns how
+    many meters were released.
+    """
+    cur.execute("UPDATE ref.water_meter SET nearest_pipe = NULL"
+                " WHERE nearest_pipe = ANY(%s)", (stale,))
+    released = cur.rowcount
+    cur.execute("DELETE FROM asset.pipe WHERE pipe_id = ANY(%s)", (stale,))
+    return released
+
+
 def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
                source_id: str, limit: int | None = None) -> int:
     if not (cfg.get("item_id") or cfg.get("wfs_url") or cfg.get("overpass_query")):
@@ -262,6 +287,7 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
 
     target = cfg.get("target", "raw_only")
     count = 0
+    released = 0
 
     with conn.cursor() as cur:
         for feat in layer_features(name, cfg, extent, limit):
@@ -273,15 +299,29 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
             fid = str(feat.get("id") or props.get("OBJECTID") or count)
             geojson = json.dumps(geom)
 
+            # The previous raw geometry says how many pipes this feature was
+            # conformed into last time. Every part of the statement reads the
+            # same snapshot, so `previous` sees the row before it is updated.
             cur.execute(
-                """INSERT INTO asset.gis_raw (layer, source_fid, props, geom)
-                   VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))
-                   ON CONFLICT (layer, source_fid)
-                   DO UPDATE SET props = EXCLUDED.props,
-                                 geom = EXCLUDED.geom,
-                                 loaded_at = now()""",
-                (name, fid, Jsonb(props), geojson),
+                """WITH previous AS (
+                       SELECT CASE WHEN ST_GeometryType(geom) IN
+                                            ('ST_LineString', 'ST_MultiLineString')
+                                   THEN ST_NumGeometries(ST_LineMerge(geom)) END AS parts
+                         FROM asset.gis_raw
+                        WHERE layer = %(layer)s AND source_fid = %(fid)s
+                   ), upsert AS (
+                       INSERT INTO asset.gis_raw (layer, source_fid, props, geom)
+                       VALUES (%(layer)s, %(fid)s, %(props)s,
+                               ST_SetSRID(ST_GeomFromGeoJSON(%(geojson)s), 4326))
+                       ON CONFLICT (layer, source_fid)
+                       DO UPDATE SET props = EXCLUDED.props,
+                                     geom = EXCLUDED.geom,
+                                     loaded_at = now()
+                   )
+                   SELECT (SELECT parts FROM previous)""",
+                {"layer": name, "fid": fid, "props": Jsonb(props), "geojson": geojson},
             )
+            previous_parts = cur.fetchone()[0]
 
             if target == "pipe" and geom.get("type") in ("LineString", "MultiLineString"):
                 # ST_LineMerge leaves a MultiLineString when the parts don't
@@ -304,7 +344,8 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
                          diameter_mm = EXCLUDED.diameter_mm,
                          material = EXCLUDED.material,
                          length_m = EXCLUDED.length_m,
-                         geom = EXCLUDED.geom""",
+                         geom = EXCLUDED.geom
+                       RETURNING pipe_id""",
                     {
                         "pipe_id": f"{name}:{fid}", "layer": name,
                         "owner": cfg.get("owner"),
@@ -314,6 +355,10 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
                         "geojson": geojson, "source": source_id,
                     },
                 )
+                current = {row[0] for row in cur.fetchall()}
+                stale = part_ids(f"{name}:{fid}", previous_parts) - current
+                if stale:
+                    released += drop_stale_pipes(cur, sorted(stale))
 
             elif target == "facility" and geom.get("type") in ("Point", "MultiPoint", "Polygon"):
                 cur.execute(
@@ -339,6 +384,9 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
 
     conn.commit()
     print(f"    {name}: {count} features loaded")
+    if released:
+        print(f"    {released} meters lost their nearest pipe to a re-split feature;"
+              " re-run seed_synthetic_network.py to reassign them")
     return count
 
 
