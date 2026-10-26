@@ -24,6 +24,7 @@ import psycopg
 import wntr
 
 from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
+from residuals import BASELINE_DAYS, MIN_SAMPLES, RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify
 from subgraph import Pipe, element_name, select_supplied_subgraph
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
@@ -212,59 +213,41 @@ def simulate() -> str:
 
 # ------------------------------------------------------------- residual check
 def compute_residuals(run_id: str) -> int:
-    """Compare modelled pressure against observed logger readings per DMA."""
+    """Score each DMA's pressure residual against its own baseline."""
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("""
-            WITH observed AS (
-                SELECT pr.dma_id,
-                       avg(pr.pressure_m) AS observed
-                FROM twin.pressure_reading pr
-                WHERE pr.ts > now() - interval '30 minutes'
-                GROUP BY pr.dma_id
-            ),
-            modelled AS (
-                SELECT d.dma_id, avg(sr.value) AS modelled
-                FROM twin.sim_result sr
-                -- Reservoirs (R...) have pressure results too but no graph
-                -- node, so only junction ids are cast.
-                JOIN asset.node n ON n.node_id = CASE WHEN sr.element_id ~ '^N[0-9]+$'
-                                                      THEN substr(sr.element_id, 2)::bigint END
-                JOIN asset.dma d ON ST_Contains(d.geom, n.geom)
-                WHERE sr.run_id = %s AND sr.variable = 'pressure'
-                GROUP BY d.dma_id
-            )
-            INSERT INTO twin.sim_residual
-                (ts, dma_id, element_id, variable, modelled, observed, residual, z_score, flagged)
-            SELECT now(), o.dma_id, o.dma_id, 'pressure',
-                   m.modelled, o.observed,
-                   m.modelled - o.observed,
-                   (m.modelled - o.observed) / NULLIF(stddev_samp(m.modelled)
-                        OVER (), 0),
-                   abs(m.modelled - o.observed) > 5
-            FROM observed o JOIN modelled m USING (dma_id)
-        """, (run_id,))
-        count = cur.rowcount
+        cur.execute(RESIDUALS_SQL, {"run_id": run_id, "baseline_s": BASELINE_DAYS * 86400})
+        rows = []
+        for dma_id, modelled, observed, n, mean, sd in cur.fetchall():
+            score = classify(modelled - observed, n, mean, sd)
+            rows.append((dma_id, modelled, observed, score))
 
-        cur.execute("""
-            INSERT INTO twin.dma_latest
-                (dma_id, ts, min_pressure_m, status)
-            SELECT dma_id, now(), observed,
-                   CASE WHEN flagged THEN 'SUSPECTED_LEAK'
-                        WHEN abs(residual) > 2 THEN 'WATCH'
-                        ELSE 'OK' END
-            FROM twin.sim_residual
-            -- now() is fixed for the transaction, so this is exactly the
-            -- rows inserted above; a window would also catch a concurrent
-            -- run's rows and upsert the same DMA twice.
-            WHERE ts = now()
-            ON CONFLICT (dma_id) DO UPDATE SET
-                ts = EXCLUDED.ts,
-                min_pressure_m = EXCLUDED.min_pressure_m,
-                status = EXCLUDED.status
-        """)
+        # now() is fixed for the transaction, so every row of this run shares
+        # one timestamp and a concurrent run's rows can't be mistaken for it.
+        cur.executemany(
+            """INSERT INTO twin.sim_residual
+                 (ts, dma_id, element_id, variable, modelled, observed,
+                  residual, z_score, flagged)
+               VALUES (now(), %s, %s, 'pressure', %s, %s, %s, %s, %s)""",
+            [(dma, dma, m, o, s.residual, s.z_score, s.flagged)
+             for dma, m, o, s in rows])
+        cur.executemany(
+            """INSERT INTO twin.dma_latest (dma_id, ts, min_pressure_m, status)
+               VALUES (%s, now(), %s, %s)
+               ON CONFLICT (dma_id) DO UPDATE SET
+                 ts = EXCLUDED.ts,
+                 min_pressure_m = EXCLUDED.min_pressure_m,
+                 status = EXCLUDED.status""",
+            [(dma, o, s.status) for dma, _m, o, s in rows])
         conn.commit()
-    print(f"  {count} DMA residuals")
-    return count
+
+    counts = {}
+    for *_, score in rows:
+        counts[score.status] = counts.get(score.status, 0) + 1
+    print(f"  {len(rows)} DMA residuals: "
+          + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+          + f" (baseline {BASELINE_DAYS:g} days, at least {MIN_SAMPLES} residuals,"
+            f" watch |z| >= {Z_WATCH:g}, flag |z| >= {Z_LEAK:g})")
+    return len(rows)
 
 
 def main() -> int:

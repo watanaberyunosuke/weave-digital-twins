@@ -72,7 +72,7 @@ CREATE TABLE twin.dma_latest (
     consumption_l  DOUBLE PRECISION,
     loss_pct       DOUBLE PRECISION,
     min_pressure_m DOUBLE PRECISION,
-    status         TEXT               -- OK | WATCH | SUSPECTED_LEAK
+    status         TEXT               -- OK | WATCH | SUSPECTED_LEAK | UNKNOWN
 );
 
 -- ========================================================== ELECTRICITY
