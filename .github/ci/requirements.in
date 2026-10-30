@@ -1,0 +1,3 @@
+# Tools CI itself installs, locked like the components so the job that checks
+# the component locks doesn't install anything unverified.
+pip-tools==7.6.2

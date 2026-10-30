@@ -1,5 +1,7 @@
 # Dependabot version updates for the Python images. Each folder below has its
-# own requirements.txt and is built into its own container.
+# own requirements.in, compiled by pip-compile into the hash-locked
+# requirements.txt its container installs; Dependabot bumps the pin in the
+# .in file and recompiles the lock in the same PR.
 #
 # The model has no ignores since wntr 1.5.0 (HDH-144): it needs numpy 2 and
 # no longer imports pkg_resources, so the numpy<2 and setuptools<82 limits
@@ -20,6 +22,12 @@ updates:
 
   - package-ecosystem: "pip"
     directory: "/console"
+    schedule:
+      interval: "weekly"
+
+  # pip-tools for the CI job that checks the locks above.
+  - package-ecosystem: "pip"
+    directory: "/.github/ci"
     schedule:
       interval: "weekly"
 

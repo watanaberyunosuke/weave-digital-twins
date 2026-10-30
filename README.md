@@ -153,6 +153,12 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the syntax checks
 component's `requirements.txt` on Python 3.12 and imports its code. Dependabot patch updates
 merge themselves once CI passes; minor and major updates wait for review.
 
+Dependencies are pinned in each component's `requirements.in`. The `requirements.txt` beside
+it is a hash-locked file generated from it, covering transitive packages too, and the images
+and CI install it with `--require-hashes`. After editing a `requirements.in`, regenerate the
+locks with [scripts/lock-requirements.sh](scripts/lock-requirements.sh) (its header has the
+`docker run` line); CI fails if a lock no longer matches its input.
+
 ## Known limits
 
 - **Topology build is slow** on large networks; use `--limit` to test first
