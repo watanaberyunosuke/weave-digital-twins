@@ -209,8 +209,11 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,git
 
-.claude/
-.cursor/
+# Local agent settings stay out; the Entire hooks each agent reads are shared.
+.claude/*
+!.claude/settings.json
+.cursor/*
+!.cursor/hooks.json
 # CA certificates of an existing Elasticsearch cluster (machine-specific)
 elk/certs/*
 !elk/certs/.gitkeep

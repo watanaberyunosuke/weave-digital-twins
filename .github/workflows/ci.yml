@@ -31,6 +31,22 @@ jobs:
       - run: bash -n scripts/*.sh
       - run: node --check console/static/app.js
 
+  # Each requirements.txt is compiled from its requirements.in. Recompiling
+  # keeps existing pins, so any diff means an input changed without its lock.
+  locks:
+    name: Locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/ci/requirements.txt
+      - run: pip install --require-hashes --only-binary ":all:" -r .github/ci/requirements.txt
+      - run: scripts/lock-requirements.sh
+      - run: git diff --exit-code -- '*requirements.txt'
+
   component:
     name: ${{ matrix.component }}
     runs-on: ubuntu-latest
@@ -50,8 +66,10 @@ jobs:
           cache-dependency-path: ${{ matrix.component }}/requirements.txt
       # Wheels only, so a bumped package can't run its own setup script in a
       # job that feeds the merge. Every current dependency ships a wheel; a
-      # bump to one that doesn't fails here and waits for review.
-      - run: pip install --only-binary ":all:" -r requirements.txt
+      # bump to one that doesn't fails here and waits for review. Hashes
+      # pin every transitive package too, so this job tests exactly what the
+      # image installs.
+      - run: pip install --require-hashes --only-binary ":all:" -r requirements.txt
       # The EPANET test skips when wntr can't be imported, so import it
       # explicitly: a broken wntr must fail the build, not skip a test.
       - if: matrix.component == 'model'
