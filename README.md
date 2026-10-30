@@ -149,6 +149,18 @@ Enable the hook that checks branch names before a push:
 git config core.hooksPath .githooks
 ```
 
+Agent sessions are recorded with [Entire](https://entire.io), which links each Claude Code or
+Cursor session to the commits it produced. `.entire/settings.json` enables it, the agent hooks
+are in `.claude/settings.json` and `.cursor/hooks.json`, and its git hooks are in `.githooks/`
+(the branch-name check is `pre-push.pre-entire` and runs after Entire's `pre-push`). Install the
+CLI (`brew install entireio/tap/entire` or `curl -fsSL https://entire.io/install.sh | bash`) and
+run `entire enable` once per clone; `entire status` shows the state, and `entire checkpoint` and
+`entire search` browse past sessions. Every hook does nothing if the CLI is not installed.
+
+The repository is public, so `push_sessions` is `false` and telemetry is off: checkpoints stay
+as git refs in your clone and are never pushed here. To share them, send them to a separate
+private repository with `entire enable --checkpoint-remote github:<owner>/<private-repo>`.
+
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the syntax checks, installs each
 component's `requirements.txt` on Python 3.12 and imports its code. Dependabot patch updates
 merge themselves once CI passes; minor and major updates wait for review.
