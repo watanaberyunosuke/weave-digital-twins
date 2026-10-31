@@ -450,9 +450,13 @@ def check_admin_login(req: LoginRequest, key: str) -> None:
 
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request):
+    # The role and everything in the cookie come from these constants, never
+    # from the request text itself.
     if req.user == access.ADMIN:
         check_admin_login(req, client_key(request))
+        who = access.ADMIN
     elif req.user == access.DEMO:
+        who = access.DEMO
         if not DEMO_ENABLED:
             raise HTTPException(404, NOT_FOUND)
         if not access.password_matches(req.password, DEMO_PASSWORD):
@@ -462,9 +466,9 @@ def login(req: LoginRequest, request: Request):
     old = session_id(request)
     if old:
         SIM_JOBS.pop(old, None)
-    _sid, cookie = access.new_session(SESSION_SECRET, role=req.user)
-    resp = JSONResponse({"role": req.user})
-    resp.set_cookie(access.SESSION_COOKIE, cookie, max_age=access.SESSION_TTL_S[req.user],
+    _sid, cookie = access.new_session(SESSION_SECRET, role=who)
+    resp = JSONResponse({"role": who})
+    resp.set_cookie(access.SESSION_COOKIE, cookie, max_age=access.SESSION_TTL_S[who],
                     httponly=True, secure=COOKIE_SECURE, samesite="strict")
     return resp
 
