@@ -281,6 +281,25 @@ class PublicAdminLoginTests(unittest.TestCase):
             self.assertEqual(client.get("/api/jobs").json(), [{"id": "j1"}])
         self.assertEqual(relay.await_args.args, ("GET", "/api/relay/admin/jobs"))
 
+    def test_admin_sees_links_and_containers(self):
+        app, client = self.make()
+        relay_body = {"db": {"ok": True}, "containers": {"ok": True, "value": [{"name": "broker"}]}}
+        relay = mock.AsyncMock(return_value=FakeResponse(body=relay_body))
+        with mock.patch.object(app, "relay_request", relay):
+            app._status_cache["body"] = None
+            anon = client.get("/api/status").json()
+            self.assertTrue(anon["containers"]["hidden"])
+            self.assertNotIn("kibana_url", client.get("/api/config").json())
+            self.login(client)
+            self.assertEqual(client.get("/api/status").json()["containers"]["value"],
+                             [{"name": "broker"}])
+            cfg = client.get("/api/config").json()
+            self.assertIn("kibana_url", cfg)
+            self.assertNotIn("gis", cfg)   # connection details stay on the loopback console
+        # Both answers came from one relayed body, so a viewer never shares
+        # the admin's copy.
+        self.assertEqual(relay.await_count, 1)
+
     def test_wrong_password_and_throttle(self):
         _, client = self.make()
         for _ in range(5):
