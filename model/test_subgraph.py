@@ -7,7 +7,9 @@ solves the selection in EPANET when wntr is installed, and skips otherwise.
 """
 
 import random
+import tempfile
 import unittest
+from pathlib import Path
 
 from subgraph import EPANET_MAX_ID, Pipe, element_name, select_supplied_subgraph
 
@@ -128,7 +130,10 @@ class EpanetSolve(unittest.TestCase):
             wn.add_pipe(element_name("P", p.pipe_id), f"N{p.start_node}", f"N{p.end_node}",
                         length=p.length_m, diameter=p.diameter_m, roughness=100)
         wn.options.time.duration = 0
-        results = wntr.sim.EpanetSimulator(wn).run_sim()
+        # EPANET writes temp.* scratch files into the working directory unless
+        # given a prefix, which left them in the repository root.
+        with tempfile.TemporaryDirectory() as tmp:
+            results = wntr.sim.EpanetSimulator(wn).run_sim(file_prefix=str(Path(tmp) / "solve"))
         pressure = results.node["pressure"]
         self.assertEqual(set(pressure.columns) - set(wn.reservoir_name_list),
                          {f"N{n}" for n in sel.nodes})
