@@ -39,6 +39,11 @@ residual calculation — stays the same.
 
 ## Quick start
 
+Needs Docker Compose 2.24.4 or later. Every port is published on
+`127.0.0.1` only, because none of the Kafka, Connect, Flink or monitoring
+endpoints asks for credentials; from another machine, use an SSH tunnel
+(`ssh -L 9021:localhost:9021 <host>`).
+
 ```bash
 # Take Confluent's compose stack into weave-stack, then overlay Weave
 git clone --depth 1 -b 8.2.0-post https://github.com/confluentinc/cp-all-in-one.git
