@@ -251,6 +251,7 @@ def config():
         "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
         "kibana_url": os.environ.get("KIBANA_PUBLIC_URL", "http://localhost:5601"),
         "flink_url": os.environ.get("FLINK_PUBLIC_URL", "http://localhost:9081"),
+        "control_center_url": os.environ.get("CONTROL_CENTER_PUBLIC_URL", "http://localhost:9021"),
         "gis": gis_connections(),
     }
 

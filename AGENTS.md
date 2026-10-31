@@ -6,7 +6,7 @@ This file provides guidance to Codex (claude.ai/code) when working with code in 
 
 Weave is a framework for building digital twins of utility networks (water, electricity, transport). It loads **real** public GIS topology into PostGIS, derives **synthetic** meters onto that real geometry, and runs both real and synthetic telemetry through one Kafka/Flink pipeline into TimescaleDB, where an EPANET model's output is compared against observations to flag anomalies.
 
-This repo is **an overlay, not a standalone stack**. It is copied over `weave-stack/`, a copy of `cp-all-in-one-community/` from Confluent's `cp-all-in-one` (branch `8.2.0-post`), which supplies `broker`, `connect`, `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Running compose from this directory alone will not work. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
+This repo is **an overlay, not a standalone stack**. It is copied over `weave-stack/`, a copy of `cp-all-in-one/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`), which supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Running compose from this directory alone will not work. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
 
 ## Commands
 
@@ -24,7 +24,7 @@ Full bring-up (from inside `weave-stack/` after the overlay is copied in):
 ```bash
 cp .env.example .env                     # then edit for your region
 ./scripts/download-flink-connectors.sh   # populates flink/lib/ (gitignored, must exist before compose up)
-docker compose up -d broker connect flink-jobmanager flink-taskmanager \
+docker compose up -d broker connect control-center flink-jobmanager flink-taskmanager \
     flink-sql-client postgres ingest-market ingest-hydrometry gis-loader simulator console featureserv
 ./scripts/bootstrap.sh                   # topics -> GIS load -> seed synthetic -> connectors -> build model -> ELK
 docker exec -it flink-sql-client sql-client.sh
@@ -56,7 +56,7 @@ curl 'localhost:9200/_cat/indices/twin-*,weave-logs-*?v'
 psql postgresql://weave:weave@localhost:5432/weave_twin
 ```
 
-Console `:8090` and OGC API Features `:9000` (both loopback only), Kibana `:5601` and Elasticsearch `:9200` (the local cluster: security off, loopback only), Flink `:9081`, Connect `:8083`, Postgres `:5432`.
+Every published port binds to `127.0.0.1`: console `:8090`, OGC API Features `:9000`, Kibana `:5601`, Elasticsearch `:9200` (the local cluster: security off), Control Center `:9021`, Flink `:9081`, Connect `:8083`, Schema Registry `:8081`, Postgres `:5432`.
 
 ## Architecture
 
@@ -162,5 +162,6 @@ Expect the first build to be messy: real GIS has fragments, missing diameters an
 - Each component's dependencies are pinned in `requirements.in`; `requirements.txt` is the hash-locked file generated from it by [scripts/lock-requirements.sh](scripts/lock-requirements.sh), and the images and CI install it with `--require-hashes`. Edit the `.in` file and regenerate, never the lock by hand; the CI `Locks` job fails when they disagree.
 - Agent sessions are recorded with Entire: `.entire/settings.json` keeps checkpoints as local git refs and never pushes them (`push_sessions` false), because the repository is public. The agent hooks in `.claude/settings.json` and `.cursor/hooks.json`, and the Entire hooks in `.githooks/`, do nothing when the Entire CLI is not installed.
 - Weave services whose command is a plain process (Python, `sleep`, uvicorn) set `init: true`. As PID 1 they ignore SIGTERM and never reap orphans; a zombie in the console made `docker compose stop` fail and left Docker Desktop holding the stack's ports, so the next start hung until Docker Desktop was restarted.
+- Publish every port on `127.0.0.1`. Upstream services are rebound in the override with `ports: !override` (Docker Compose 2.24.4+), because a plain `ports:` adds a binding beside upstream's open one. None of the Confluent or Flink endpoints asks for credentials.
 - Topic names are `<domain>.<subject>.raw.v1`, created with explicit retention in [scripts/create-topics.sh](scripts/create-topics.sh).
 - Treat this as critical-infrastructure data: public sources still reveal network vulnerability in aggregate, and the region config plus `.env` are the files that identify the target region.
