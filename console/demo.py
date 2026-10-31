@@ -51,7 +51,7 @@ _SAMPLES: dict[str, list[str]] = {
     ],
     "reset_baseline": [
         "Residual baselines reset for {scope} from now.",
-        "DMAs read UNKNOWN until SIM_RESIDUAL_MIN_SAMPLES new residuals exist.",
+        "DMAs show insufficient data until SIM_RESIDUAL_MIN_SAMPLES new residuals exist.",
     ],
     "load_elevation": [
         "Sampling the region DEM onto asset.node ({scope})",

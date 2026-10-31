@@ -1042,7 +1042,7 @@ ACTIONS: dict[str, dict] = {
         "step": None,
         "description": "Starts DMA residual baselines afresh after a lasting change such "
                        "as a model recalibration. Earlier residuals stay in the database "
-                       "but stop counting, so the DMA reads UNKNOWN until it has enough "
+                       "but stop counting, so the DMA shows insufficient data until it has enough "
                        "new ones. Blank resets every DMA.",
         "params": [Param(name="dma", label="DMA id (blank = all)", kind="text", default="")],
     },

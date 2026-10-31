@@ -462,6 +462,9 @@ const layers = {
 // basemap is dark so pipes and markers stay readable on it.
 const mcss = (name) => getComputedStyle($('#map')).getPropertyValue(name).trim();
 const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK: '--leak' }[s] || '--unknown');
+// The stored status stays UNKNOWN (model/residuals.py, twin.dma_latest, Kibana);
+// only the page says what it means, which reads less like a fault.
+const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECTED LEAK' }[s] || 'INSUFFICIENT DATA');
 
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
@@ -513,7 +516,7 @@ async function loadMap() {
         fillColor: statusColour(f.properties.status),
       }),
       onEachFeature: (f, lyr) => {
-        lyr.bindTooltip(`${f.properties.dma_id} · ${f.properties.status}`, { sticky: true });
+        lyr.bindTooltip(`${f.properties.dma_id} · ${statusLabel(f.properties.status)}`, { sticky: true });
         lyr.on('click', () => openDma(f.properties.dma_id));
       },
     }).addTo(layers.dmas);
@@ -578,7 +581,7 @@ async function openDma(dmaId) {
   drawer.replaceChildren(
     el('header', {},
       el('div', {}, el('h3', {}, i.name || i.dma_id, el('span', { class: 'tag syn' }, 'synthetic')),
-        el('span', { class: `status ${i.status || 'UNKNOWN'}`, title: statusMeaning(i.status, d.baseline) }, i.status || 'UNKNOWN')),
+        el('span', { class: `status ${i.status || 'UNKNOWN'}`, title: statusMeaning(i.status, d.baseline) }, statusLabel(i.status))),
       el('button', { class: 'btn ghost', onclick: closeDma, 'aria-label': 'Close' }, '×')),
     el('dl', { class: 'kv' },
       el('dt', {}, 'DMA id'), el('dd', {}, i.dma_id),
@@ -603,14 +606,14 @@ function statusMeaning(status, b) {
   if (!b) return '';
   const rule = `Each solve compares modelled with observed pressure. The DMA is scored against its own last ${fmt.n(b.baseline_days)} days: |z| ≥ ${b.z_watch} is WATCH, ≥ ${b.z_leak} is SUSPECTED_LEAK.`;
   if ((status === 'UNKNOWN' || !status) && b.any_run && !b.in_last_run) {
-    return 'UNKNOWN: the last solve did not score this DMA, so it is not learning a baseline. Either the model '
+    return 'Insufficient data: the last solve did not score this DMA, so it is not learning a baseline. Either the model '
       + 'has no junction inside it (the model keeps the SIM_MAX_PIPES pipes nearest the reservoirs; raising it '
       + `brings more DMAs in), or its loggers sent nothing in the last 30 minutes. ${rule}`;
   }
   if (status === 'UNKNOWN' || !status) {
     const left = Math.max(0, b.min_samples - b.samples);
     const eta = left * b.interval_s / 3600;
-    return `UNKNOWN: still learning what is normal here, ${fmt.n(b.samples)} of ${b.min_samples} residuals so far`
+    return `Insufficient data: still learning what is normal here, ${fmt.n(b.samples)} of ${b.min_samples} residuals so far`
       + (left ? ` (about ${fmt.n(eta, 1)} h more at one solve every ${fmt.n(b.interval_s / 60)} min).` : '; the next solve scores it.')
       + ` ${rule}`;
   }
@@ -780,7 +783,7 @@ async function loadAnomalies() {
     tile('Suspected leak', counts.SUSPECTED_LEAK || 0, 'leak'),
     tile('Watch', counts.WATCH || 0, 'watch'),
     tile('OK', counts.OK || 0, 'ok'),
-    tile('DMAs without status', Math.max(0, (state.status?.db.value?.dmas || 0)
+    tile('Insufficient data', Math.max(0, (state.status?.db.value?.dmas || 0)
       - (counts.SUSPECTED_LEAK || 0) - (counts.WATCH || 0) - (counts.OK || 0)), 'unknown'),
   );
 
@@ -800,7 +803,7 @@ async function loadAnomalies() {
     },
     el('td', {}, fmt.ts(r.ts)),
     el('td', {}, r.name || r.dma_id),
-    el('td', {}, el('span', { class: `status ${r.status || ''}` }, r.status || '—')),
+    el('td', {}, el('span', { class: `status ${r.status || ''}` }, r.status ? statusLabel(r.status) : '—')),
     el('td', { class: 'num' }, fmt.n(r.modelled, 2)),
     el('td', { class: 'num' }, fmt.n(r.observed, 2)),
     el('td', { class: 'num' }, fmt.n(r.residual, 2)),
