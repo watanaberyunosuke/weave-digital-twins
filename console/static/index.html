@@ -136,9 +136,10 @@
   <dialog id="login-dialog">
     <form method="dialog" id="login-form">
       <h3>Demo login</h3>
-      <p class="muted">The demo user can try every pipeline step. Safe steps run on the live
-        stack; the rest are simulated, and a fresh login starts a clean history.</p>
-      <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+      <p class="muted">Open to everyone. The demo user can try every pipeline step: safe steps
+        run on the live stack, the rest are simulated, and a fresh login starts a clean history.</p>
+      <p>Password: <code id="login-hint"></code></p>
+      <label>Password <input type="text" id="login-password" autocomplete="off" required></label>
       <div class="err" id="login-err" hidden></div>
       <div class="row-end">
         <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>

@@ -235,9 +235,9 @@ services:
 
   # --- public console: the same page, read-only, for anyone ------------------
   # Opt-in (profile "public"). No Docker socket and the read-only database
-  # role: it can show the twin but never change it. A demo login, when its
-  # hash and secret are set, simulates every action except the safe ones,
-  # which it relays to the admin console above. Hosted, this runs on another
+  # role: it can show the twin but never change it. Its demo login is open
+  # (password "demo", shown on the form): it simulates every action except
+  # the safe ones, which it relays to the admin console above. Hosted, this runs on another
   # machine with CONSOLE_RELAY_URL pointing back over a private link.
   console-public:
     profiles: ["public"]
@@ -252,8 +252,8 @@ services:
       TWIN_DSN: postgresql://weave_reader:weave_reader@postgres:5432/weave_twin
       GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
       CONSOLE_ALLOWED_HOSTS: ${CONSOLE_PUBLIC_HOSTS:-localhost,127.0.0.1}
-      CONSOLE_DEMO_PASSWORD_HASH: ${CONSOLE_DEMO_PASSWORD_HASH:-}
-      CONSOLE_SESSION_SECRET: ${CONSOLE_SESSION_SECRET:-}
+      CONSOLE_DEMO: ${CONSOLE_DEMO:-1}
+      CONSOLE_DEMO_PASSWORD: ${CONSOLE_DEMO_PASSWORD:-demo}
       CONSOLE_COOKIE_SECURE: ${CONSOLE_COOKIE_SECURE:-0}
       CONSOLE_RELAY_URL: ${CONSOLE_RELAY_URL:-http://console:8090}
       CONSOLE_RELAY_TOKEN: ${CONSOLE_RELAY_TOKEN:-}

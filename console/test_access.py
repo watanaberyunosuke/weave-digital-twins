@@ -21,16 +21,10 @@ import demo  # noqa: E402
 
 
 class PasswordTests(unittest.TestCase):
-    def test_round_trip(self):
-        stored = access.hash_password("correct horse battery")
-        self.assertTrue(stored.startswith("scrypt:"))
-        self.assertNotIn("$", stored)          # compose would read "$" as a variable
-        self.assertTrue(access.verify_password("correct horse battery", stored))
-        self.assertFalse(access.verify_password("wrong", stored))
-
-    def test_malformed_hash_is_rejected(self):
-        for bad in ("", "plain", "md5:1:2:3:a:b", "scrypt:x:8:1:aa:bb"):
-            self.assertFalse(access.verify_password("x", bad))
+    def test_match(self):
+        self.assertTrue(access.password_matches("demo", "demo"))
+        self.assertFalse(access.password_matches("Demo", "demo"))
+        self.assertFalse(access.password_matches("", "demo"))
 
 
 class SessionTests(unittest.TestCase):
@@ -52,21 +46,7 @@ class SessionTests(unittest.TestCase):
         self.assertNotEqual(access.new_session(self.secret)[0], access.new_session(self.secret)[0])
 
 
-class ThrottleTests(unittest.TestCase):
-    def test_per_key_and_window(self):
-        t = access.Throttle(per_key=2, overall=10, window_s=60)
-        t.fail("a", now=0)
-        t.fail("a", now=1)
-        self.assertTrue(t.blocked("a", now=2))
-        self.assertFalse(t.blocked("b", now=2))
-        self.assertFalse(t.blocked("a", now=62))
-
-    def test_global_ceiling_holds_across_keys(self):
-        t = access.Throttle(per_key=5, overall=3, window_s=60)
-        for i in range(3):
-            t.fail(f"k{i}", now=0)
-        self.assertTrue(t.blocked("fresh", now=1))
-
+class CooldownTests(unittest.TestCase):
     def test_cooldown(self):
         c = access.Cooldown(60)
         self.assertEqual(c.wait_s("s", now=0), 0)
@@ -91,7 +71,7 @@ class SimulationTests(unittest.TestCase):
 def load_app(**env):
     base = {"CONSOLE_ALLOWED_HOSTS": "testserver", "CONSOLE_COOKIE_SECURE": "0"}
     with mock.patch.dict(os.environ, {**base, **env}, clear=False):
-        for k in ("CONSOLE_MODE", "CONSOLE_DEMO_PASSWORD_HASH", "CONSOLE_SESSION_SECRET",
+        for k in ("CONSOLE_MODE", "CONSOLE_DEMO", "CONSOLE_DEMO_PASSWORD", "CONSOLE_SESSION_SECRET",
                   "CONSOLE_RELAY_URL", "CONSOLE_RELAY_TOKEN"):
             if k not in env:
                 os.environ.pop(k, None)
@@ -105,17 +85,17 @@ except ImportError:   # the stdlib tests above still run without the console dep
     TestClient = None
 
 HEADERS = {"X-Weave-Console": "1"}
-SECRET = "x" * 40
 TOKEN = "t" * 40
-PASSWORD = "demo password 123"
+PASSWORD = "demo"
 
 
 @unittest.skipIf(TestClient is None, "console requirements not installed")
 class PublicModeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = load_app(CONSOLE_MODE="public", CONSOLE_SESSION_SECRET=SECRET,
-                           CONSOLE_DEMO_PASSWORD_HASH=access.hash_password(PASSWORD))
+        # Defaults only: the demo login is on with password "demo" and a
+        # per-start session secret.
+        cls.app = load_app(CONSOLE_MODE="public")
 
     def setUp(self):
         self.client = TestClient(self.app.app)
@@ -130,7 +110,8 @@ class PublicModeTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
 
     def test_anonymous_is_public_and_cannot_act(self):
-        self.assertEqual(self.client.get("/api/session").json()["role"], "public")
+        session = self.client.get("/api/session").json()
+        self.assertEqual((session["role"], session["demo_password"]), ("public", "demo"))
         r = self.client.post("/api/actions/seed", json={"params": {}}, headers=HEADERS)
         self.assertEqual(r.status_code, 401)
         r = self.client.post("/api/actions/seed/preview", json={"params": {}}, headers=HEADERS)
@@ -176,6 +157,14 @@ class PublicModeTests(unittest.TestCase):
         self.assertEqual(other.get(f"/api/jobs/{r.json()['id']}").status_code, 404)
         self.assertEqual(TestClient(self.app.app).get("/api/jobs").json(), [])
 
+    def test_demo_can_be_switched_off(self):
+        app = load_app(CONSOLE_MODE="public", CONSOLE_DEMO="0")
+        client = TestClient(app.app)
+        self.assertFalse(client.get("/api/session").json()["demo_enabled"])
+        r = client.post("/api/login", json={"password": PASSWORD}, headers=HEADERS)
+        self.assertEqual(r.status_code, 404)
+        type(self).app = load_app(CONSOLE_MODE="public")
+
     def test_post_needs_the_console_header(self):
         r = self.client.post("/api/login", json={"password": PASSWORD})
         self.assertEqual(r.status_code, 403)
@@ -184,9 +173,8 @@ class PublicModeTests(unittest.TestCase):
 @unittest.skipIf(TestClient is None, "console requirements not installed")
 class PublicWithRelayTests(unittest.TestCase):
     def test_only_safe_actions_run_live(self):
-        app = load_app(CONSOLE_MODE="public", CONSOLE_SESSION_SECRET=SECRET,
-                       CONSOLE_DEMO_PASSWORD_HASH=access.hash_password(PASSWORD),
-                       CONSOLE_RELAY_URL="http://admin:8090", CONSOLE_RELAY_TOKEN=TOKEN)
+        app = load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090",
+                       CONSOLE_RELAY_TOKEN=TOKEN)
         client = TestClient(app.app)
         client.post("/api/login", json={"password": PASSWORD}, headers=HEADERS)
         acts = {a["id"]: a["run"] for a in client.get("/api/actions").json()}
@@ -218,7 +206,15 @@ class AdminRelayTests(unittest.TestCase):
         self.assertEqual(self.relay("seed").status_code, 403)
         self.assertEqual(self.relay("start_flink").status_code, 403)
 
+    def test_live_runs_are_limited_across_all_demo_users(self):
+        with mock.patch.object(self.app, "start_job",
+                               mock.AsyncMock(return_value={"id": "abc"})):
+            self.app.RELAY_COOLDOWN._last.clear()
+            self.assertEqual(self.relay("discover").status_code, 200)
+            self.assertEqual(self.relay("run_sim_once").status_code, 429)
+
     def test_safe_action_starts_a_demo_job(self):
+        self.app.RELAY_COOLDOWN._last.clear()
         with mock.patch.object(self.app, "start_job",
                                mock.AsyncMock(return_value={"id": "abc"})) as start:
             r = self.relay("run_sim_once")

@@ -107,7 +107,16 @@ function renderHeader() {
   const badge = el('span', { class: 'pill role' }, session.role === 'demo' ? 'Demo user' : 'Public view');
   const btn = !session.demo_enabled ? null : session.role === 'demo'
     ? el('button', { type: 'button', class: 'btn', onclick: logout }, 'Log out')
-    : el('button', { type: 'button', class: 'btn', onclick: () => { $('#login-err').hidden = true; $('#login-dialog').showModal(); } }, 'Demo login');
+    : el('button', {
+      type: 'button',
+      class: 'btn',
+      onclick: () => {
+        $('#login-err').hidden = true;
+        $('#login-hint').textContent = session.demo_password;
+        $('#login-password').value = session.demo_password;
+        $('#login-dialog').showModal();
+      },
+    }, 'Demo login');
   auth.replaceChildren(badge, btn);
 }
 
@@ -312,7 +321,7 @@ function openRun(action) {
   const simulated = action.run === 'simulated';
   const demoLive = state.session.role === 'demo' && action.run === 'real';
   const note = simulated ? 'Simulated: shows the exact command and sample output. Nothing runs on the live stack.'
-    : demoLive ? 'Runs on the live stack. Demo users can run one live action a minute.'
+    : demoLive ? 'Runs on the live stack. Live demo runs are limited to one a minute across all demo users.'
       : action.destructive;
   $('#run-warn').hidden = !note;
   $('#run-warn').textContent = note || '';

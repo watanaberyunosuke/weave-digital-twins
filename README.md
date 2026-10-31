@@ -93,8 +93,9 @@ same steps as `bootstrap.sh`, one at a time, showing the exact command and its
 output, so you can also bootstrap from there instead of the terminal.
 
 **Public console.** `docker compose --profile public up -d console-public`
-serves the same page read-only on `:8091`, for publishing. A demo login,
-configured in `.env`, can run the safe steps for real and simulates the rest.
+serves the same page read-only on `:8091`, for publishing. Its demo login,
+open to everyone with the password `demo`, runs the safe steps for real and
+simulates the rest.
 
 The map has a basemap picker (OpenStreetMap, CARTO, Esri imagery and
 topographic, OpenTopoMap, and Google Maps when `.env` holds a Map Tiles API

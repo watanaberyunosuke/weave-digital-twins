@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import subprocess
 import time
 import uuid
@@ -57,10 +58,13 @@ MODE = os.environ.get("CONSOLE_MODE", "admin")
 if MODE not in ("admin", "public"):
     raise SystemExit(f"CONSOLE_MODE must be admin or public, not {MODE!r}")
 PUBLIC = MODE == "public"
-# Public mode: the demo login is on only when both are set.
-DEMO_HASH = os.environ.get("CONSOLE_DEMO_PASSWORD_HASH", "")
-SESSION_SECRET = os.environ.get("CONSOLE_SESSION_SECRET", "")
-DEMO_ENABLED = PUBLIC and bool(DEMO_HASH) and len(SESSION_SECRET) >= 32
+# Public mode: the demo login is open to everyone and its password is shown
+# on the form, so it is configuration, not a secret (see access.py).
+DEMO_ENABLED = PUBLIC and os.environ.get("CONSOLE_DEMO", "1") != "0"
+DEMO_PASSWORD = os.environ.get("CONSOLE_DEMO_PASSWORD", "demo")
+# Signs session cookies. Unset, a fresh one per start: a restart then just
+# logs demo users out, which costs nothing because their history is in memory.
+SESSION_SECRET = os.environ.get("CONSOLE_SESSION_SECRET") or secrets.token_urlsafe(32)
 # Plain http on loopback while developing; the hosted console is https only.
 COOKIE_SECURE = os.environ.get("CONSOLE_COOKIE_SECURE", "1") != "0"
 # The public console reaches the admin console through RELAY_URL; both share
@@ -141,10 +145,6 @@ def relay_auth(request: Request):
     if PUBLIC or not access.token_matches(
             request.headers.get("authorization", "").removeprefix("Bearer "), RELAY_TOKEN):
         raise HTTPException(404, "not found")
-
-
-def client_key(request: Request) -> str:
-    return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
 
 
 # --------------------------------------------------------------- db helpers
@@ -351,7 +351,8 @@ def config():
 
 @app.get("/api/session")
 def get_session(request: Request):
-    return {"mode": MODE, "role": role(request), "demo_enabled": DEMO_ENABLED}
+    return {"mode": MODE, "role": role(request), "demo_enabled": DEMO_ENABLED,
+            "demo_password": DEMO_PASSWORD if DEMO_ENABLED else None}
 
 
 class LoginRequest(BaseModel):
@@ -362,13 +363,8 @@ class LoginRequest(BaseModel):
 def login(req: LoginRequest, request: Request):
     if not DEMO_ENABLED:
         raise HTTPException(404, "not found")
-    key = client_key(request)
-    if LOGIN_THROTTLE.blocked(key):
-        raise HTTPException(429, "too many attempts; try again later")
-    if not access.verify_password(req.password, DEMO_HASH):
-        LOGIN_THROTTLE.fail(key)
-        raise HTTPException(401, "wrong password")
-    LOGIN_THROTTLE.succeed(key)
+    if not access.password_matches(req.password, DEMO_PASSWORD):
+        raise HTTPException(401, f"the demo password is {DEMO_PASSWORD!r}")
     old = session_id(request)
     if old:
         SIM_JOBS.pop(old, None)
@@ -974,9 +970,13 @@ _lock = asyncio.Lock()
 # A new login gets a new id, which is what resets a demo user's history.
 SIM_JOBS: dict[str, dict[str, dict]] = {}
 MAX_SESSIONS, MAX_SESSION_JOBS = 500, 20
-LOGIN_THROTTLE = access.Throttle()
-DEMO_COOLDOWN = access.Cooldown(int(os.environ.get("CONSOLE_DEMO_COOLDOWN_S", "60")))
-RELAY_COOLDOWN = access.Cooldown(int(os.environ.get("CONSOLE_DEMO_COOLDOWN_S", "60")))
+# Live demo runs are limited across all demo users, not per session: anyone
+# can log in, so a per-session limit would bound nothing. Both consoles check,
+# so the admin side holds even if the public one is replaced or bypassed.
+DEMO_RUN_INTERVAL_S = int(os.environ.get("CONSOLE_DEMO_COOLDOWN_S", "60"))
+DEMO_COOLDOWN = access.Cooldown(DEMO_RUN_INTERVAL_S)
+RELAY_COOLDOWN = access.Cooldown(DEMO_RUN_INTERVAL_S)
+ALL_DEMO_USERS = "*"
 
 
 def current_job_summary() -> dict | None:
@@ -1019,14 +1019,16 @@ async def demo_action(action: str, params: dict, sid: str) -> dict:
                 "lines": demo.simulated_lines(action, params, cmd)}
         remember_demo_job(sid, job)
         return {"id": job["id"]}
-    wait = DEMO_COOLDOWN.wait_s(sid)
+    wait = DEMO_COOLDOWN.wait_s(ALL_DEMO_USERS)
     if wait:
-        raise HTTPException(429, f"demo users can run one live action a minute; wait {wait} s")
+        raise HTTPException(429, f"another demo run just happened; live runs are limited to one "
+                                 f"every {DEMO_RUN_INTERVAL_S} s across all demo users. "
+                                 f"Try again in {wait} s, or run it simulated.")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(f"{RELAY_URL}/api/relay/actions/{action}",
                                   headers=relay_headers(),
-                                  json={"params": params, "session": sid})
+                                  json={"params": params})
     except httpx.HTTPError as exc:
         raise HTTPException(503, "the live stack is not reachable right now") from exc
     if r.status_code != 200:
@@ -1036,7 +1038,7 @@ async def demo_action(action: str, params: dict, sid: str) -> dict:
             detail = ""
         raise HTTPException(r.status_code if r.status_code in (409, 429) else 503,
                             detail or "the live stack refused the action")
-    DEMO_COOLDOWN.mark(sid)
+    DEMO_COOLDOWN.mark(ALL_DEMO_USERS)
     job |= {"state": "running", "exit_code": None, "finished": None,
             "simulated": False, "remote_id": r.json()["id"]}
     remember_demo_job(sid, job)
@@ -1146,21 +1148,15 @@ async def refresh_relayed(job: dict) -> None:
 # Admin side, reached only by the public console over the private link. The
 # token gates it and the safe list bounds it: a leaked token can at most run a
 # catalogue search or one extra solve, one at a time like every other job.
-class RelayRequest(BaseModel):
-    params: dict = {}
-    session: str = ""
-
-
 @app.post("/api/relay/actions/{action}", dependencies=[Depends(relay_auth)])
-async def relay_action(action: str, req: RelayRequest):
+async def relay_action(action: str, req: RunRequest):
     if action not in access.SAFE_ACTIONS:
         raise HTTPException(403, f"{action} is not a demo action")
-    session = req.session[:64]
-    wait = RELAY_COOLDOWN.wait_s(session or "relay")
+    wait = RELAY_COOLDOWN.wait_s(ALL_DEMO_USERS)
     if wait:
         raise HTTPException(429, f"wait {wait} s before the next demo run")
     started = await start_job(action, validate(action, req.params), origin="demo")
-    RELAY_COOLDOWN.mark(session or "relay")
+    RELAY_COOLDOWN.mark(ALL_DEMO_USERS)
     return started
 
 
