@@ -56,7 +56,7 @@ curl 'localhost:9200/_cat/indices/twin-*,weave-logs-*?v'
 psql postgresql://weave:weave@localhost:5432/weave_twin
 ```
 
-Console `:8090` and OGC API Features `:9000` (both loopback only), Kibana `:5601` and Elasticsearch `:9200` (the local cluster: security off, loopback only), Control Center `:9021`, Flink `:9081`, Connect `:8083`, Postgres `:5432`.
+Every published port binds to `127.0.0.1`: console `:8090`, OGC API Features `:9000`, Kibana `:5601`, Elasticsearch `:9200` (the local cluster: security off), Control Center `:9021`, Flink `:9081`, Connect `:8083`, Schema Registry `:8081`, Postgres `:5432`.
 
 ## Architecture
 
@@ -162,5 +162,6 @@ Expect the first build to be messy: real GIS has fragments, missing diameters an
 - Each component's dependencies are pinned in `requirements.in`; `requirements.txt` is the hash-locked file generated from it by [scripts/lock-requirements.sh](scripts/lock-requirements.sh), and the images and CI install it with `--require-hashes`. Edit the `.in` file and regenerate, never the lock by hand; the CI `Locks` job fails when they disagree.
 - Agent sessions are recorded with Entire: `.entire/settings.json` keeps checkpoints as local git refs and never pushes them (`push_sessions` false), because the repository is public. The agent hooks in `.claude/settings.json` and `.cursor/hooks.json`, and the Entire hooks in `.githooks/`, do nothing when the Entire CLI is not installed.
 - Weave services whose command is a plain process (Python, `sleep`, uvicorn) set `init: true`. As PID 1 they ignore SIGTERM and never reap orphans; a zombie in the console made `docker compose stop` fail and left Docker Desktop holding the stack's ports, so the next start hung until Docker Desktop was restarted.
+- Publish every port on `127.0.0.1`. Upstream services are rebound in the override with `ports: !override` (Docker Compose 2.24.4+), because a plain `ports:` adds a binding beside upstream's open one. None of the Confluent or Flink endpoints asks for credentials.
 - Topic names are `<domain>.<subject>.raw.v1`, created with explicit retention in [scripts/create-topics.sh](scripts/create-topics.sh).
 - Treat this as critical-infrastructure data: public sources still reveal network vulnerability in aggregate, and the region config plus `.env` are the files that identify the target region.
