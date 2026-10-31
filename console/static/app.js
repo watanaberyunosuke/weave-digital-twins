@@ -145,7 +145,7 @@ async function reloadSession() {
   $('#job-log').textContent = '';
   renderHeader();
   if (state.status) renderSteps(state.status);
-  if (state.tab === 'jobs') loadJobs();
+  if (state.tab === 'jobs') await loadJobs();
 }
 
 async function logout() {

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -32,6 +33,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import access
 import demo
@@ -86,6 +88,10 @@ for _name, _tok in (("CONSOLE_RELAY_TOKEN", RELAY_TOKEN),
         raise SystemExit(f"{_name} must be at least 32 characters")
 if RELAY_TOKEN and RELAY_TOKEN == RELAY_ADMIN_TOKEN:
     raise SystemExit("CONSOLE_RELAY_TOKEN and CONSOLE_RELAY_ADMIN_TOKEN must differ")
+NOT_FOUND, NO_SUCH_JOB = "not found", "no such job"
+# Job ids are uuid4 hex prefixes; anything else is refused before it can
+# become part of a relayed path.
+JOB_ID = re.compile(r"[0-9a-f]{1,32}")
 ADMIN_ENABLED = PUBLIC and bool(ADMIN_HASH) and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)
 
 # The six topics create-topics.sh makes; a step is done when all exist.
@@ -164,7 +170,7 @@ def admin_only():
     # Not routed in public mode at all, so the public console can't leak
     # database connection details or anything else meant for the operator.
     if PUBLIC:
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, NOT_FOUND)
 
 
 def _bearer(request: Request) -> str:
@@ -173,23 +179,28 @@ def _bearer(request: Request) -> str:
 
 def relay_auth(request: Request):
     if PUBLIC or not access.token_matches(_bearer(request), RELAY_TOKEN):
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, NOT_FOUND)
 
 
 def relay_admin_auth(request: Request):
     if PUBLIC or not access.token_matches(_bearer(request), RELAY_ADMIN_TOKEN):
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, NOT_FOUND)
 
 
 def relay_any_auth(request: Request):
     tok = _bearer(request)
     if PUBLIC or not (access.token_matches(tok, RELAY_TOKEN)
                       or access.token_matches(tok, RELAY_ADMIN_TOKEN)):
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, NOT_FOUND)
 
 
 def client_key(request: Request) -> str:
     return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
+
+
+def relay_path(prefix: str, ident: str) -> str:
+    """A relay route with one caller-supplied segment, escaped so it stays one."""
+    return f"{prefix}/{quote(ident, safe='')}"
 
 
 async def relay_request(method: str, path: str, admin: bool = False, **kwargs) -> httpx.Response:
@@ -424,23 +435,26 @@ class LoginRequest(BaseModel):
     code: str = ""
 
 
+def check_admin_login(req: LoginRequest, key: str) -> None:
+    if not ADMIN_ENABLED:
+        raise HTTPException(404, NOT_FOUND)
+    if ADMIN_THROTTLE.blocked(key):
+        raise HTTPException(429, "too many attempts; try again later")
+    ok = access.verify_password(req.password, ADMIN_HASH) and (
+        not ADMIN_TOTP or access.verify_totp(req.code, ADMIN_TOTP))
+    if not ok:
+        ADMIN_THROTTLE.fail(key)
+        raise HTTPException(401, "wrong password or code")
+    ADMIN_THROTTLE.succeed(key)
+
+
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request):
     if req.user == access.ADMIN:
-        if not ADMIN_ENABLED:
-            raise HTTPException(404, "not found")
-        key = client_key(request)
-        if ADMIN_THROTTLE.blocked(key):
-            raise HTTPException(429, "too many attempts; try again later")
-        ok = access.verify_password(req.password, ADMIN_HASH) and (
-            not ADMIN_TOTP or access.verify_totp(req.code, ADMIN_TOTP))
-        if not ok:
-            ADMIN_THROTTLE.fail(key)
-            raise HTTPException(401, "wrong password or code")
-        ADMIN_THROTTLE.succeed(key)
+        check_admin_login(req, client_key(request))
     elif req.user == access.DEMO:
         if not DEMO_ENABLED:
-            raise HTTPException(404, "not found")
+            raise HTTPException(404, NOT_FOUND)
         if not access.password_matches(req.password, DEMO_PASSWORD):
             raise HTTPException(401, f"the demo password is {DEMO_PASSWORD!r}")
     else:
@@ -1080,7 +1094,7 @@ async def run_action(action: str, req: RunRequest, request: Request):
     if who == access.DEMO:
         return await demo_action(action, params, session_id(request))
     if PUBLIC:   # the admin, signed in on the public page
-        r = await relay_request("POST", f"/api/relay/admin/actions/{action}", admin=True,
+        r = await relay_request("POST", relay_path("/api/relay/admin/actions", action), admin=True,
                                 json={"params": params})
         if r.status_code != 200:
             raise relay_error(r)
@@ -1113,7 +1127,8 @@ async def demo_action(action: str, params: dict, sid: str) -> dict:
         raise HTTPException(429, f"another demo run just happened; live runs are limited to one "
                                  f"every {DEMO_RUN_INTERVAL_S} s across all demo users. "
                                  f"Try again in {wait} s, or run it simulated.")
-    r = await relay_request("POST", f"/api/relay/actions/{action}", json={"params": params})
+    r = await relay_request("POST", relay_path("/api/relay/actions", action),
+                            json={"params": params})
     if r.status_code != 200:
         raise relay_error(r)
     DEMO_COOLDOWN.mark(ALL_DEMO_USERS)
@@ -1201,28 +1216,36 @@ async def list_jobs(request: Request):
 @app.get("/api/jobs/{jid}")
 async def get_job(jid: str, request: Request, since: int = Query(0, ge=0)):
     if remote_admin(request):
-        r = await relay_request("GET", f"/api/relay/admin/jobs/{jid}", admin=True,
-                                params={"since": since})
-        if r.status_code != 200:
-            raise relay_error(r) if r.status_code != 404 else HTTPException(404, "no such job")
-        return r.json()
+        return await remote_admin_job(jid, since)
     if PUBLIC:
         job = SIM_JOBS.get(session_id(request) or "", {}).get(jid)
         if not job:
-            raise HTTPException(404, "no such job")
+            raise HTTPException(404, NO_SUCH_JOB)
         if job.get("remote_id") and job["state"] == "running":
             await refresh_relayed(job)
     else:
         job = JOBS.get(jid)
         if not job:
-            raise HTTPException(404, "no such job")
+            raise HTTPException(404, NO_SUCH_JOB)
     return {k: v for k, v in job.items() if k != "remote_id"} | {
         "offset": len(job["lines"]), "lines": job["lines"][since:]}
 
 
+async def remote_admin_job(jid: str, since: int) -> dict:
+    if not JOB_ID.fullmatch(jid):
+        raise HTTPException(404, NO_SUCH_JOB)
+    r = await relay_request("GET", relay_path("/api/relay/admin/jobs", jid), admin=True,
+                            params={"since": since})
+    if r.status_code == 404:
+        raise HTTPException(404, NO_SUCH_JOB)
+    if r.status_code != 200:
+        raise relay_error(r)
+    return r.json()
+
+
 async def refresh_relayed(job: dict) -> None:
     try:
-        r = await relay_request("GET", f"/api/relay/jobs/{job['remote_id']}",
+        r = await relay_request("GET", relay_path("/api/relay/jobs", job["remote_id"]),
                                 params={"since": len(job["lines"])})
         r.raise_for_status()
     except (HTTPException, httpx.HTTPError):
@@ -1252,7 +1275,7 @@ async def relay_action(action: str, req: RunRequest):
 def relay_job(jid: str, since: int = Query(0, ge=0)):
     job = JOBS.get(jid)
     if not job or job.get("origin") != "demo":
-        raise HTTPException(404, "no such job")
+        raise HTTPException(404, NO_SUCH_JOB)
     return {"state": job["state"], "exit_code": job["exit_code"], "finished": job["finished"],
             "lines": job["lines"][since:]}
 
@@ -1281,7 +1304,7 @@ def relay_admin_jobs():
 def relay_admin_job(jid: str, since: int = Query(0, ge=0)):
     job = JOBS.get(jid)
     if not job:
-        raise HTTPException(404, "no such job")
+        raise HTTPException(404, NO_SUCH_JOB)
     return {k: v for k, v in job.items() if k != "remote_id"} | {
         "offset": len(job["lines"]), "lines": job["lines"][since:]}
 

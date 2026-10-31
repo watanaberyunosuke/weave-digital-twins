@@ -52,7 +52,9 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(access.unsign("garbage", self.secret))
 
     def test_each_login_gets_a_new_session(self):
-        self.assertNotEqual(access.new_session(self.secret)[0], access.new_session(self.secret)[0])
+        first, _ = access.new_session(self.secret)
+        second, _ = access.new_session(self.secret)
+        self.assertNotEqual(first, second)
 
 
 class AdminCredentialTests(unittest.TestCase):

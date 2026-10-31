@@ -88,7 +88,9 @@ def totp(secret_b32: str, at: float | None = None, step: int = 30) -> str:
     """RFC 6238 code, as authenticator apps compute it (SHA-1, 6 digits)."""
     key = base64.b32decode(secret_b32.upper() + "=" * (-len(secret_b32) % 8))
     counter = int((time.time() if at is None else at) // step)
-    mac = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    # HMAC-SHA1 is what RFC 6238 and authenticator apps use; HMAC does not
+    # depend on SHA-1's collision resistance, so it is not the weak use.
+    mac = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()  # NOSONAR
     offset = mac[-1] & 0x0F
     value = struct.unpack(">I", mac[offset:offset + 4])[0] & 0x7FFFFFFF
     return f"{value % 1_000_000:06d}"
