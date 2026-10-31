@@ -17,10 +17,9 @@ open to anyone, read-only, with two logins on the same page:
   with an authenticator code. Admin actions are relayed to the private admin
   console, which alone holds the Docker socket.
 
-Create the admin hash, and optionally an authenticator secret, for .env with:
-
-    python3 console/access.py admin-hash
-    python3 console/access.py totp-secret
+scripts/init-secrets.sh fills .env with the hash (asking for the password
+through `python3 console/access.py admin-hash`), the relay tokens, the session
+secret and optionally the authenticator secret.
 """
 
 from __future__ import annotations
@@ -206,13 +205,7 @@ def _main(argv: list[str]) -> int:
             return 1
         print(f"CONSOLE_ADMIN_PASSWORD_HASH={hash_password(pw)}")
         return 0
-    if argv[1:] == ["totp-secret"]:
-        secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
-        print(f"CONSOLE_ADMIN_TOTP_SECRET={secret}")
-        print(f"Add to an authenticator app: otpauth://totp/Weave:admin?secret={secret}"
-              "&issuer=Weave", file=sys.stderr)
-        return 0
-    print("usage: python3 console/access.py admin-hash | totp-secret", file=sys.stderr)
+    print("usage: python3 console/access.py admin-hash", file=sys.stderr)
     return 2
 
 

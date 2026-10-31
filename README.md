@@ -57,6 +57,7 @@ cd weave-stack
 
 # Point it at a region
 cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
+./scripts/init-secrets.sh     # console tokens; asks for the admin password
 
 # Download Flink connectors
 ./scripts/download-flink-connectors.sh
@@ -96,8 +97,8 @@ output, so you can also bootstrap from there instead of the terminal.
 serves the same page read-only on `:8091`, for publishing. Its demo login,
 open to everyone with the password `demo`, runs the safe steps for real and
 simulates the rest. The admin login on the same page runs every step live
-once `CONSOLE_ADMIN_PASSWORD_HASH` and `CONSOLE_RELAY_ADMIN_TOKEN` are set
-(see `.env.example`).
+once `./scripts/init-secrets.sh` has filled the console secrets into `.env`
+(it asks for the admin password and keeps only its hash).
 
 The map has a basemap picker (OpenStreetMap, CARTO, Esri imagery and
 topographic, OpenTopoMap, and Google Maps when `.env` holds a Map Tiles API
