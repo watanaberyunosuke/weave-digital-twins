@@ -614,7 +614,7 @@ GIS = {
     "ogcapi_url": os.environ.get("FEATURESERV_PUBLIC_URL", "http://localhost:9000"),
 }
 FEATURESERV_URL = os.environ.get("FEATURESERV_URL", "http://featureserv:9000")
-# Must not exceed featureserv's PGFS_PAGING_LIMITMAX in the compose overlay.
+# Must not exceed featureserv's PGFS_PAGING_LIMITMAX in docker-compose.override.yml.
 OGCAPI_PAGE_SIZE = int(os.environ.get("FEATURESERV_PAGE_SIZE", "50000"))
 
 
