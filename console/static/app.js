@@ -97,28 +97,45 @@ function renderHeader() {
   $('#region').textContent = config.region_config || 'GIS_REGION_CONFIG not set';
   // The public console has no admin tools to link to; the server leaves them out.
   const links = [['Kibana', config.kibana_url], ['Flink', config.flink_url],
-    ['Control Center', config.control_center_url],
-    [config.mode === 'public' ? 'Admin' : 'Public view', config.switch_url]].filter(([, href]) => href);
+    ['Control Center', config.control_center_url]].filter(([, href]) => href);
   $('#links').replaceChildren(...links.map(([label, href]) => el('a', { href, target: '_blank', rel: 'noopener' }, label)));
   const auth = $('#auth');
   if (session.mode !== 'public') {
     auth.replaceChildren();
     return;
   }
-  const badge = el('span', { class: 'pill role' }, session.role === 'demo' ? 'Demo user' : 'Public view');
-  const btn = !session.demo_enabled ? null : session.role === 'demo'
-    ? el('button', { type: 'button', class: 'btn', onclick: logout }, 'Log out')
-    : el('button', {
-      type: 'button',
-      class: 'btn',
-      onclick: () => {
-        $('#login-err').hidden = true;
-        $('#login-hint').textContent = session.demo_password;
-        $('#login-password').value = session.demo_password;
-        $('#login-dialog').showModal();
-      },
-    }, 'Demo login');
-  auth.replaceChildren(badge, btn);
+  const names = { demo: 'Demo user', admin: 'Admin', public: 'Public view' };
+  const badge = el('span', { class: 'pill role' }, names[session.role] || names.public);
+  const loginBtn = (user, label) => el('button', { type: 'button', class: 'btn', onclick: () => openLogin(user) }, label);
+  const buttons = session.role !== 'public'
+    ? [el('button', { type: 'button', class: 'btn', onclick: logout }, 'Log out')]
+    : [session.demo_enabled && loginBtn('demo', 'Demo login'),
+      session.admin_enabled && loginBtn('admin', 'Admin login')].filter(Boolean);
+  auth.replaceChildren(badge, ...buttons);
+}
+
+// One dialog for both logins. The demo password is not a secret, so it is
+// shown and filled in; the admin one is masked and never pre-filled.
+function openLogin(user) {
+  const { session } = state;
+  const demo = user === 'demo';
+  const form = $('#login-form');
+  form.dataset.user = user;
+  $('#login-title').textContent = demo ? 'Demo login' : 'Admin login';
+  $('#login-demo-text').hidden = !demo;
+  $('#login-admin-text').hidden = demo;
+  $('#login-hint').textContent = demo ? session.demo_password : '';
+  const pw = $('#login-password');
+  pw.type = demo ? 'text' : 'password';
+  pw.autocomplete = demo ? 'off' : 'current-password';
+  pw.value = demo ? session.demo_password : '';
+  const code = $('#login-code');
+  const needCode = !demo && session.admin_code;
+  $('#login-code-row').hidden = !needCode;
+  code.required = needCode;
+  code.value = '';
+  $('#login-err').hidden = true;
+  $('#login-dialog').showModal();
 }
 
 async function reloadSession() {
@@ -140,8 +157,10 @@ $('#login-form').addEventListener('submit', async (ev) => {
   if (ev.submitter?.value !== 'login') return;
   ev.preventDefault();
   try {
-    await post('/api/login', { password: $('#login-password').value });
+    const user = $('#login-form').dataset.user || 'demo';
+    await post('/api/login', { user, password: $('#login-password').value, code: $('#login-code').value });
     $('#login-password').value = '';
+    $('#login-code').value = '';
     $('#login-dialog').close();
     await reloadSession();
   } catch (err) {

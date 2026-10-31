@@ -15,8 +15,9 @@ Nothing here names a place. The map fits to whatever geometry is loaded, and
 the only region input is the layer list read from GIS_REGION_CONFIG.
 
 CONSOLE_MODE=public serves the same page to anyone, read-only and without the
-Docker socket, with an optional demo login (see access.py). Admin mode, the
-default, is unchanged; on the hosted stack Cloudflare Access guards it.
+Docker socket, with demo and admin logins (see access.py); the admin login
+acts through the admin console's relay routes. Admin mode, the default, is
+the loopback console and is unchanged.
 """
 
 from __future__ import annotations
@@ -62,19 +63,30 @@ PUBLIC = MODE == "public"
 # on the form, so it is configuration, not a secret (see access.py).
 DEMO_ENABLED = PUBLIC and os.environ.get("CONSOLE_DEMO", "1") != "0"
 DEMO_PASSWORD = os.environ.get("CONSOLE_DEMO_PASSWORD", "demo")
+# The admin login on the public page: the operator's password as a scrypt
+# hash, optionally with an authenticator secret. It is on only when the relay
+# to the admin console is configured, since that is the only way it can act.
+ADMIN_HASH = os.environ.get("CONSOLE_ADMIN_PASSWORD_HASH", "")
+ADMIN_TOTP = os.environ.get("CONSOLE_ADMIN_TOTP_SECRET", "")
 # Signs session cookies. Unset, a fresh one per start: a restart then just
-# logs demo users out, which costs nothing because their history is in memory.
+# logs everyone out, which costs nothing because their history is in memory.
 SESSION_SECRET = os.environ.get("CONSOLE_SESSION_SECRET") or secrets.token_urlsafe(32)
 # Plain http on loopback while developing; the hosted console is https only.
 COOKIE_SECURE = os.environ.get("CONSOLE_COOKIE_SECURE", "1") != "0"
-# The public console reaches the admin console through RELAY_URL; both share
-# RELAY_TOKEN. On the admin side the token alone turns the relay routes on.
+# The public console reaches the admin console through RELAY_URL. Two tokens,
+# both shared by the two consoles: RELAY_TOKEN admits demo users' safe actions
+# only; RELAY_ADMIN_TOKEN admits every action, for the admin login. On the
+# admin side each token alone turns its routes on.
 RELAY_URL = os.environ.get("CONSOLE_RELAY_URL", "").rstrip("/")
 RELAY_TOKEN = os.environ.get("CONSOLE_RELAY_TOKEN", "")
-# The other console's address, for the header link between them.
-SWITCH_URL = os.environ.get("CONSOLE_ADMIN_URL" if PUBLIC else "CONSOLE_PUBLIC_URL", "")
-if PUBLIC and RELAY_URL and len(RELAY_TOKEN) < 32:
-    raise SystemExit("CONSOLE_RELAY_TOKEN must be at least 32 characters")
+RELAY_ADMIN_TOKEN = os.environ.get("CONSOLE_RELAY_ADMIN_TOKEN", "")
+for _name, _tok in (("CONSOLE_RELAY_TOKEN", RELAY_TOKEN),
+                    ("CONSOLE_RELAY_ADMIN_TOKEN", RELAY_ADMIN_TOKEN)):
+    if _tok and len(_tok) < 32:
+        raise SystemExit(f"{_name} must be at least 32 characters")
+if RELAY_TOKEN and RELAY_TOKEN == RELAY_ADMIN_TOKEN:
+    raise SystemExit("CONSOLE_RELAY_TOKEN and CONSOLE_RELAY_ADMIN_TOKEN must differ")
+ADMIN_ENABLED = PUBLIC and bool(ADMIN_HASH) and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)
 
 # The six topics create-topics.sh makes; a step is done when all exist.
 TOPICS = [
@@ -121,19 +133,31 @@ async def guard(request: Request, call_next):
     return response
 
 
+def _session(request: Request) -> dict | None:
+    return access.unsign(request.cookies.get(access.SESSION_COOKIE, ""), SESSION_SECRET) \
+        if PUBLIC else None
+
+
 def role(request: Request) -> str:
     if not PUBLIC:
         return access.ADMIN
-    if DEMO_ENABLED and access.unsign(request.cookies.get(access.SESSION_COOKIE, ""),
-                                      SESSION_SECRET):
+    who = (_session(request) or {}).get("role")
+    # A login that has since been switched off stops counting at once.
+    if who == access.DEMO and DEMO_ENABLED:
         return access.DEMO
+    if who == access.ADMIN and ADMIN_ENABLED:
+        return access.ADMIN
     return access.PUBLIC
 
 
 def session_id(request: Request) -> str | None:
-    payload = access.unsign(request.cookies.get(access.SESSION_COOKIE, ""), SESSION_SECRET) \
-        if DEMO_ENABLED else None
+    payload = _session(request)
     return payload["sid"] if payload else None
+
+
+def remote_admin(request: Request) -> bool:
+    """An admin signed in on the public console, acting through the relay."""
+    return PUBLIC and role(request) == access.ADMIN
 
 
 def admin_only():
@@ -143,10 +167,51 @@ def admin_only():
         raise HTTPException(404, "not found")
 
 
+def _bearer(request: Request) -> str:
+    return request.headers.get("authorization", "").removeprefix("Bearer ")
+
+
 def relay_auth(request: Request):
-    if PUBLIC or not access.token_matches(
-            request.headers.get("authorization", "").removeprefix("Bearer "), RELAY_TOKEN):
+    if PUBLIC or not access.token_matches(_bearer(request), RELAY_TOKEN):
         raise HTTPException(404, "not found")
+
+
+def relay_admin_auth(request: Request):
+    if PUBLIC or not access.token_matches(_bearer(request), RELAY_ADMIN_TOKEN):
+        raise HTTPException(404, "not found")
+
+
+def relay_any_auth(request: Request):
+    tok = _bearer(request)
+    if PUBLIC or not (access.token_matches(tok, RELAY_TOKEN)
+                      or access.token_matches(tok, RELAY_ADMIN_TOKEN)):
+        raise HTTPException(404, "not found")
+
+
+def client_key(request: Request) -> str:
+    return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
+
+
+async def relay_request(method: str, path: str, admin: bool = False, **kwargs) -> httpx.Response:
+    """A call to the admin console; the token decides what it may do there."""
+    token = RELAY_ADMIN_TOKEN if admin else RELAY_TOKEN
+    headers = {"Authorization": f"Bearer {token}", "X-Weave-Console": "1"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            return await client.request(method, f"{RELAY_URL}{path}", headers=headers, **kwargs)
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "the live stack is not reachable right now") from exc
+
+
+def relay_error(r: httpx.Response) -> HTTPException:
+    try:
+        detail = r.json().get("detail", "")
+    except ValueError:
+        detail = ""
+    # Refusals the user can act on keep their status; anything else is the
+    # admin console being unavailable, whatever it said.
+    code = r.status_code if r.status_code in (409, 422, 429) else 503
+    return HTTPException(code, detail or "the live stack refused the action")
 
 
 # --------------------------------------------------------------- db helpers
@@ -307,24 +372,19 @@ async def public_status() -> dict:
     reports what it can see and marks the rest unavailable.
     """
     hidden = {"ok": True, "value": [], "hidden": True}
-    if RELAY_URL:
+    if RELAY_URL and (RELAY_TOKEN or RELAY_ADMIN_TOKEN):
         try:
-            async with httpx.AsyncClient(timeout=6) as client:
-                r = await client.get(f"{RELAY_URL}/api/relay/status", headers=relay_headers())
+            r = await relay_request("GET", "/api/relay/status", admin=not RELAY_TOKEN)
             r.raise_for_status()
             body = r.json()
             body["containers"] = hidden
             return body
-        except Exception as exc:  # noqa: BLE001 — falls back to local probes
-            print(f"! relay status failed: {exc}")
+        except (HTTPException, httpx.HTTPError, ValueError) as exc:
+            print(f"! relay status failed: {exc}")   # falls back to local probes
     gone = {"ok": False, "error": "not visible from the public console", "value": None}
     return {"db": await asyncio.to_thread(safe, probe_db), "topics": gone,
             "connectors": gone, "flink": gone, "containers": hidden,
             "model": gone, "schemas": gone, "expected_topics": TOPICS, "job": None}
-
-
-def relay_headers() -> dict:
-    return {"Authorization": f"Bearer {RELAY_TOKEN}", "X-Weave-Console": "1"}
 
 
 @app.get("/api/config")
@@ -339,10 +399,6 @@ def config():
         "basemap_default": default if default in ids else "none",
         "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
         "mode": MODE,
-        # One click between the two consoles. The admin address is shown on
-        # the public page on purpose: Cloudflare Access, not obscurity, is
-        # what keeps everyone but the operator out of it.
-        "switch_url": SWITCH_URL,
         # The admin tools and the GIS connection details are the operator's;
         # the public page leaves them out rather than showing dead links.
         **({} if PUBLIC else {
@@ -358,25 +414,43 @@ def config():
 @app.get("/api/session")
 def get_session(request: Request):
     return {"mode": MODE, "role": role(request), "demo_enabled": DEMO_ENABLED,
-            "demo_password": DEMO_PASSWORD if DEMO_ENABLED else None}
+            "demo_password": DEMO_PASSWORD if DEMO_ENABLED else None,
+            "admin_enabled": ADMIN_ENABLED, "admin_code": ADMIN_ENABLED and bool(ADMIN_TOTP)}
 
 
 class LoginRequest(BaseModel):
     password: str
+    user: str = access.DEMO
+    code: str = ""
 
 
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request):
-    if not DEMO_ENABLED:
-        raise HTTPException(404, "not found")
-    if not access.password_matches(req.password, DEMO_PASSWORD):
-        raise HTTPException(401, f"the demo password is {DEMO_PASSWORD!r}")
+    if req.user == access.ADMIN:
+        if not ADMIN_ENABLED:
+            raise HTTPException(404, "not found")
+        key = client_key(request)
+        if ADMIN_THROTTLE.blocked(key):
+            raise HTTPException(429, "too many attempts; try again later")
+        ok = access.verify_password(req.password, ADMIN_HASH) and (
+            not ADMIN_TOTP or access.verify_totp(req.code, ADMIN_TOTP))
+        if not ok:
+            ADMIN_THROTTLE.fail(key)
+            raise HTTPException(401, "wrong password or code")
+        ADMIN_THROTTLE.succeed(key)
+    elif req.user == access.DEMO:
+        if not DEMO_ENABLED:
+            raise HTTPException(404, "not found")
+        if not access.password_matches(req.password, DEMO_PASSWORD):
+            raise HTTPException(401, f"the demo password is {DEMO_PASSWORD!r}")
+    else:
+        raise HTTPException(422, "user must be demo or admin")
     old = session_id(request)
     if old:
         SIM_JOBS.pop(old, None)
-    _sid, cookie = access.new_session(SESSION_SECRET)
-    resp = JSONResponse({"role": access.DEMO})
-    resp.set_cookie(access.SESSION_COOKIE, cookie, max_age=access.SESSION_TTL_S,
+    _sid, cookie = access.new_session(SESSION_SECRET, role=req.user)
+    resp = JSONResponse({"role": req.user})
+    resp.set_cookie(access.SESSION_COOKIE, cookie, max_age=access.SESSION_TTL_S[req.user],
                     httponly=True, secure=COOKIE_SECURE, samesite="strict")
     return resp
 
@@ -938,7 +1012,8 @@ def run_mode(action: str, who: str) -> str:
     if who == access.ADMIN:
         return "real"
     if who == access.DEMO:
-        return "real" if action in access.SAFE_ACTIONS and RELAY_URL else "simulated"
+        live = RELAY_URL and RELAY_TOKEN
+        return "real" if action in access.SAFE_ACTIONS and live else "simulated"
     return "none"
 
 
@@ -983,6 +1058,7 @@ DEMO_RUN_INTERVAL_S = int(os.environ.get("CONSOLE_DEMO_COOLDOWN_S", "60"))
 DEMO_COOLDOWN = access.Cooldown(DEMO_RUN_INTERVAL_S)
 RELAY_COOLDOWN = access.Cooldown(DEMO_RUN_INTERVAL_S)
 ALL_DEMO_USERS = "*"
+ADMIN_THROTTLE = access.Throttle()
 
 
 def current_job_summary() -> dict | None:
@@ -1003,6 +1079,13 @@ async def run_action(action: str, req: RunRequest, request: Request):
     params = validate(action, req.params)
     if who == access.DEMO:
         return await demo_action(action, params, session_id(request))
+    if PUBLIC:   # the admin, signed in on the public page
+        r = await relay_request("POST", f"/api/relay/admin/actions/{action}", admin=True,
+                                json={"params": params})
+        if r.status_code != 200:
+            raise relay_error(r)
+        _status_cache["body"] = None
+        return r.json()
     return await start_job(action, params, origin="admin")
 
 
@@ -1030,20 +1113,9 @@ async def demo_action(action: str, params: dict, sid: str) -> dict:
         raise HTTPException(429, f"another demo run just happened; live runs are limited to one "
                                  f"every {DEMO_RUN_INTERVAL_S} s across all demo users. "
                                  f"Try again in {wait} s, or run it simulated.")
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(f"{RELAY_URL}/api/relay/actions/{action}",
-                                  headers=relay_headers(),
-                                  json={"params": params})
-    except httpx.HTTPError as exc:
-        raise HTTPException(503, "the live stack is not reachable right now") from exc
+    r = await relay_request("POST", f"/api/relay/actions/{action}", json={"params": params})
     if r.status_code != 200:
-        try:
-            detail = r.json().get("detail", "")
-        except ValueError:
-            detail = ""
-        raise HTTPException(r.status_code if r.status_code in (409, 429) else 503,
-                            detail or "the live stack refused the action")
+        raise relay_error(r)
     DEMO_COOLDOWN.mark(ALL_DEMO_USERS)
     job |= {"state": "running", "exit_code": None, "finished": None,
             "simulated": False, "remote_id": r.json()["id"]}
@@ -1114,7 +1186,12 @@ def _summary(job: dict) -> dict:
 
 
 @app.get("/api/jobs")
-def list_jobs(request: Request):
+async def list_jobs(request: Request):
+    if remote_admin(request):
+        r = await relay_request("GET", "/api/relay/admin/jobs", admin=True)
+        if r.status_code != 200:
+            raise relay_error(r)
+        return r.json()
     if PUBLIC:
         sid = session_id(request)
         return [_summary(j) for j in reversed(SIM_JOBS.get(sid, {}).values())] if sid else []
@@ -1123,6 +1200,12 @@ def list_jobs(request: Request):
 
 @app.get("/api/jobs/{jid}")
 async def get_job(jid: str, request: Request, since: int = Query(0, ge=0)):
+    if remote_admin(request):
+        r = await relay_request("GET", f"/api/relay/admin/jobs/{jid}", admin=True,
+                                params={"since": since})
+        if r.status_code != 200:
+            raise relay_error(r) if r.status_code != 404 else HTTPException(404, "no such job")
+        return r.json()
     if PUBLIC:
         job = SIM_JOBS.get(session_id(request) or "", {}).get(jid)
         if not job:
@@ -1139,11 +1222,10 @@ async def get_job(jid: str, request: Request, since: int = Query(0, ge=0)):
 
 async def refresh_relayed(job: dict) -> None:
     try:
-        async with httpx.AsyncClient(timeout=6) as client:
-            r = await client.get(f"{RELAY_URL}/api/relay/jobs/{job['remote_id']}",
-                                 headers=relay_headers(), params={"since": len(job["lines"])})
+        r = await relay_request("GET", f"/api/relay/jobs/{job['remote_id']}",
+                                params={"since": len(job["lines"])})
         r.raise_for_status()
-    except httpx.HTTPError:
+    except (HTTPException, httpx.HTTPError):
         return   # shown as still running; the next poll tries again
     body = r.json()
     job["lines"].extend(body["lines"])
@@ -1175,9 +1257,33 @@ def relay_job(jid: str, since: int = Query(0, ge=0)):
             "lines": job["lines"][since:]}
 
 
-@app.get("/api/relay/status", dependencies=[Depends(relay_auth)])
+@app.get("/api/relay/status", dependencies=[Depends(relay_any_auth)])
 async def relay_status():
     return await status()
+
+
+# The admin login's routes. Its token admits every action, so it is kept
+# separate from the demo token, and the public console holds it only when
+# the admin login is configured there.
+@app.post("/api/relay/admin/actions/{action}", dependencies=[Depends(relay_admin_auth)])
+async def relay_admin_action(action: str, req: RunRequest):
+    if action not in ACTIONS:
+        raise HTTPException(404, f"no action {action}")
+    return await start_job(action, validate(action, req.params), origin="admin")
+
+
+@app.get("/api/relay/admin/jobs", dependencies=[Depends(relay_admin_auth)])
+def relay_admin_jobs():
+    return [_summary(JOBS[j]) for j in reversed(JOB_ORDER) if j in JOBS]
+
+
+@app.get("/api/relay/admin/jobs/{jid}", dependencies=[Depends(relay_admin_auth)])
+def relay_admin_job(jid: str, since: int = Query(0, ge=0)):
+    job = JOBS.get(jid)
+    if not job:
+        raise HTTPException(404, "no such job")
+    return {k: v for k, v in job.items() if k != "remote_id"} | {
+        "offset": len(job["lines"]), "lines": job["lines"][since:]}
 
 
 # ---------------------------------------------------------------------- page

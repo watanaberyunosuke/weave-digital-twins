@@ -1,4 +1,4 @@
-"""Roles, the demo session and the relay token for the public console.
+"""Roles, logins and the relay tokens for the public console.
 
 Standard library only, so it is testable without FastAPI and adds nothing to
 the hash-locked requirements.
@@ -6,22 +6,35 @@ the hash-locked requirements.
 The console runs in one of two modes. In admin mode (the default) it is the
 existing loopback console: whoever reaches it is the admin, and on the hosted
 stack Cloudflare Access is what decides who reaches it. In public mode it is
-open to anyone, read-only, with a demo login whose password ("demo" unless
-set otherwise) is printed on the login form. The password is not a secret: it
-only marks the switch from looking to trying, so nothing here guards it. What
-guards the live stack is that a demo user's real runs are limited to
-SAFE_ACTIONS and to one per interval across all demo users; every other
-action is simulated.
+open to anyone, read-only, with two logins on the same page:
+
+- demo: the password ("demo" unless set otherwise) is printed on the form. It
+  is not a secret; it only marks the switch from looking to trying. What
+  guards the live stack is that a demo user's real runs are limited to
+  SAFE_ACTIONS and to one per interval across all demo users; every other
+  action is simulated.
+- admin: the operator's own password, stored as a scrypt hash, optionally
+  with an authenticator code. Admin actions are relayed to the private admin
+  console, which alone holds the Docker socket.
+
+Create the admin hash, and optionally an authenticator secret, for .env with:
+
+    python3 console/access.py admin-hash
+    python3 console/access.py totp-secret
 """
 
 from __future__ import annotations
 
 import base64
+import getpass
 import hashlib
 import hmac
 import json
 import secrets
+import struct
+import sys
 import time
+from collections import defaultdict, deque
 
 PUBLIC, DEMO, ADMIN = "public", "demo", "admin"
 
@@ -31,8 +44,13 @@ PUBLIC, DEMO, ADMIN = "public", "demo", "admin"
 # viewers see, so a demo user only ever gets a simulation of it.
 SAFE_ACTIONS = frozenset({"discover", "run_sim_once"})
 
-SESSION_COOKIE = "weave_demo"
-SESSION_TTL_S = 8 * 3600
+SESSION_COOKIE = "weave_session"
+# An admin session can change the live stack, so it lapses sooner.
+SESSION_TTL_S = {DEMO: 8 * 3600, ADMIN: 3600}
+
+# scrypt at these costs takes tens of milliseconds and 16 MiB, which keeps a
+# guessing run slow without letting a burst of logins exhaust memory.
+_SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
 
 
 def _b64(data: bytes) -> str:
@@ -45,6 +63,42 @@ def _unb64(text: str) -> bytes:
 
 def password_matches(given: str, expected: str) -> bool:
     return hmac.compare_digest(given.encode(), expected.encode())
+
+
+def hash_password(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, dklen=32, **_SCRYPT)
+    # Colon-separated: a "$" in .env would be read by compose as a variable.
+    return f"scrypt:{_SCRYPT['n']}:{_SCRYPT['r']}:{_SCRYPT['p']}:{_b64(salt)}:{_b64(digest)}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        scheme, n, r, p, salt, digest = stored.split(":")
+        if scheme != "scrypt":
+            return False
+        got = hashlib.scrypt(password.encode(), salt=_unb64(salt), dklen=32,
+                             n=int(n), r=int(r), p=int(p))
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(got, _unb64(digest))
+
+
+def totp(secret_b32: str, at: float | None = None, step: int = 30) -> str:
+    """RFC 6238 code, as authenticator apps compute it (SHA-1, 6 digits)."""
+    key = base64.b32decode(secret_b32.upper() + "=" * (-len(secret_b32) % 8))
+    counter = int((time.time() if at is None else at) // step)
+    mac = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = mac[-1] & 0x0F
+    value = struct.unpack(">I", mac[offset:offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
+
+
+def verify_totp(code: str, secret_b32: str, now: float | None = None) -> bool:
+    # One step either side covers a phone clock that is a little off.
+    now = time.time() if now is None else now
+    code = (code or "").strip()
+    return any(hmac.compare_digest(code, totp(secret_b32, now + d * 30)) for d in (-1, 0, 1))
 
 
 def sign(payload: dict, secret: str) -> str:
@@ -72,20 +126,52 @@ def unsign(token: str, secret: str, now: float | None = None) -> dict | None:
     return payload
 
 
-def new_session(secret: str, now: float | None = None) -> tuple[str, str]:
+def new_session(secret: str, role: str = DEMO, now: float | None = None) -> tuple[str, str]:
     """A fresh session id and its signed cookie value.
 
     Every login gets a new id, and simulated history is kept per id, so a
     login always starts from a clean slate. The cookie is signed so a visitor
-    can't pick another session's id and read its history.
+    can't pick another session's id or raise its own role.
     """
     now = time.time() if now is None else now
     sid = secrets.token_hex(12)
-    return sid, sign({"sid": sid, "exp": int(now + SESSION_TTL_S)}, secret)
+    return sid, sign({"sid": sid, "role": role, "exp": int(now + SESSION_TTL_S[role])}, secret)
 
 
 def token_matches(given: str | None, expected: str) -> bool:
     return bool(expected) and bool(given) and hmac.compare_digest(given, expected)
+
+
+class Throttle:
+    """Failed admin logins per client, plus a global ceiling.
+
+    The client key comes from a header Cloudflare sets, which anyone could
+    forge on a direct connection; the global ceiling still holds then, and the
+    hosted console is reachable only through the tunnel anyway.
+    """
+
+    def __init__(self, per_key: int = 5, overall: int = 30, window_s: int = 900):
+        self.per_key, self.overall, self.window_s = per_key, overall, window_s
+        self._fails: dict[str, deque] = defaultdict(deque)
+        self._all: deque = deque()
+
+    def _trim(self, q: deque, now: float) -> None:
+        while q and now - q[0] > self.window_s:
+            q.popleft()
+
+    def blocked(self, key: str, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        self._trim(self._fails[key], now)
+        self._trim(self._all, now)
+        return len(self._fails[key]) >= self.per_key or len(self._all) >= self.overall
+
+    def fail(self, key: str, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self._fails[key].append(now)
+        self._all.append(now)
+
+    def succeed(self, key: str) -> None:
+        self._fails.pop(key, None)
 
 
 class Cooldown:
@@ -108,3 +194,25 @@ class Cooldown:
 
     def mark(self, key: str, now: float | None = None) -> None:
         self._last[key] = time.time() if now is None else now
+
+
+def _main(argv: list[str]) -> int:
+    if argv[1:] == ["admin-hash"]:
+        pw = getpass.getpass("Admin password: ")
+        if len(pw) < 14 or pw != getpass.getpass("Again: "):
+            print("passwords differ or are shorter than 14 characters", file=sys.stderr)
+            return 1
+        print(f"CONSOLE_ADMIN_PASSWORD_HASH={hash_password(pw)}")
+        return 0
+    if argv[1:] == ["totp-secret"]:
+        secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+        print(f"CONSOLE_ADMIN_TOTP_SECRET={secret}")
+        print(f"Add to an authenticator app: otpauth://totp/Weave:admin?secret={secret}"
+              "&issuer=Weave", file=sys.stderr)
+        return 0
+    print("usage: python3 console/access.py admin-hash | totp-secret", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv))

@@ -8,6 +8,7 @@ FastAPI app, reloading it per mode because the mode is read at import.
 
 from __future__ import annotations
 
+import base64
 import importlib
 import os
 import sys
@@ -33,7 +34,15 @@ class SessionTests(unittest.TestCase):
     def test_sign_and_expiry(self):
         sid, token = access.new_session(self.secret, now=1000)
         self.assertEqual(access.unsign(token, self.secret, now=1001)["sid"], sid)
-        self.assertIsNone(access.unsign(token, self.secret, now=1000 + access.SESSION_TTL_S + 1))
+        self.assertIsNone(access.unsign(token, self.secret,
+                                        now=1000 + access.SESSION_TTL_S[access.DEMO] + 1))
+
+    def test_role_is_signed_in(self):
+        _, token = access.new_session(self.secret, role=access.ADMIN, now=1000)
+        payload = access.unsign(token, self.secret, now=1001)
+        self.assertEqual(payload["role"], access.ADMIN)
+        self.assertIsNone(access.unsign(token, self.secret,
+                                        now=1000 + access.SESSION_TTL_S[access.ADMIN] + 1))
 
     def test_forged_or_other_secret(self):
         _, token = access.new_session(self.secret)
@@ -44,6 +53,33 @@ class SessionTests(unittest.TestCase):
 
     def test_each_login_gets_a_new_session(self):
         self.assertNotEqual(access.new_session(self.secret)[0], access.new_session(self.secret)[0])
+
+
+class AdminCredentialTests(unittest.TestCase):
+    def test_hash_roundtrip(self):
+        stored = access.hash_password("correct horse battery")
+        self.assertTrue(access.verify_password("correct horse battery", stored))
+        self.assertFalse(access.verify_password("correct horse batterY", stored))
+        self.assertFalse(access.verify_password("x", "not-a-hash"))
+        self.assertNotIn("$", stored)   # compose would interpolate it
+
+    def test_totp_rfc6238_vector(self):
+        # RFC 6238 appendix B, SHA-1: key "12345678901234567890" at T=59 -> 94287082.
+        secret = base64.b32encode(b"12345678901234567890").decode()
+        self.assertEqual(access.totp(secret, at=59), "287082")
+        self.assertTrue(access.verify_totp("287082", secret, now=59 + 30))
+        self.assertFalse(access.verify_totp("287082", secret, now=59 + 90))
+        self.assertFalse(access.verify_totp("", secret, now=59))
+
+    def test_throttle(self):
+        t = access.Throttle(per_key=2, overall=3, window_s=60)
+        t.fail("a", now=0)
+        t.fail("a", now=1)
+        self.assertTrue(t.blocked("a", now=2))
+        self.assertFalse(t.blocked("b", now=2))
+        t.fail("b", now=2)
+        self.assertTrue(t.blocked("c", now=3))    # the global ceiling
+        self.assertFalse(t.blocked("a", now=200))
 
 
 class CooldownTests(unittest.TestCase):
@@ -72,8 +108,8 @@ def load_app(**env):
     base = {"CONSOLE_ALLOWED_HOSTS": "testserver", "CONSOLE_COOKIE_SECURE": "0"}
     with mock.patch.dict(os.environ, {**base, **env}, clear=False):
         for k in ("CONSOLE_MODE", "CONSOLE_DEMO", "CONSOLE_DEMO_PASSWORD", "CONSOLE_SESSION_SECRET",
-                  "CONSOLE_RELAY_URL", "CONSOLE_RELAY_TOKEN", "CONSOLE_ADMIN_URL",
-                  "CONSOLE_PUBLIC_URL"):
+                  "CONSOLE_RELAY_URL", "CONSOLE_RELAY_TOKEN", "CONSOLE_RELAY_ADMIN_TOKEN",
+                  "CONSOLE_ADMIN_PASSWORD_HASH", "CONSOLE_ADMIN_TOTP_SECRET"):
             if k not in env:
                 os.environ.pop(k, None)
         import app  # noqa: PLC0415
@@ -87,7 +123,11 @@ except ImportError:   # the stdlib tests above still run without the console dep
 
 HEADERS = {"X-Weave-Console": "1"}
 TOKEN = "t" * 40
+ADMIN_TOKEN = "a" * 40
 PASSWORD = "demo"
+ADMIN_PASSWORD = "a long admin password"
+ADMIN_HASH = access.hash_password(ADMIN_PASSWORD)
+TOTP_SECRET = base64.b32encode(b"12345678901234567890").decode()
 
 
 @unittest.skipIf(TestClient is None, "console requirements not installed")
@@ -158,14 +198,11 @@ class PublicModeTests(unittest.TestCase):
         self.assertEqual(other.get(f"/api/jobs/{r.json()['id']}").status_code, 404)
         self.assertEqual(TestClient(self.app.app).get("/api/jobs").json(), [])
 
-    def test_switch_links(self):
-        app = load_app(CONSOLE_MODE="public", CONSOLE_ADMIN_URL="https://admin.example")
-        self.assertEqual(TestClient(app.app).get("/api/config").json()["switch_url"],
-                         "https://admin.example")
-        app = load_app(CONSOLE_MODE="admin", CONSOLE_PUBLIC_URL="https://twin.example")
-        self.assertEqual(TestClient(app.app).get("/api/config").json()["switch_url"],
-                         "https://twin.example")
-        type(self).app = load_app(CONSOLE_MODE="public")
+    def test_admin_login_is_off_without_its_settings(self):
+        self.assertFalse(self.client.get("/api/session").json()["admin_enabled"])
+        r = self.client.post("/api/login", json={"user": "admin", "password": ADMIN_PASSWORD},
+                             headers=HEADERS)
+        self.assertEqual(r.status_code, 404)
 
     def test_demo_can_be_switched_off(self):
         app = load_app(CONSOLE_MODE="public", CONSOLE_DEMO="0")
@@ -191,11 +228,91 @@ class PublicWithRelayTests(unittest.TestCase):
         self.assertEqual({k for k, v in acts.items() if v == "real"}, set(access.SAFE_ACTIONS))
 
 
+class FakeResponse:
+    def __init__(self, status_code=200, body=None):
+        self.status_code, self._body = status_code, body if body is not None else {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise AssertionError("unexpected relay failure")
+
+
+@unittest.skipIf(TestClient is None, "console requirements not installed")
+class PublicAdminLoginTests(unittest.TestCase):
+    def make(self, **extra):
+        app = load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090",
+                       CONSOLE_RELAY_TOKEN=TOKEN, CONSOLE_RELAY_ADMIN_TOKEN=ADMIN_TOKEN,
+                       CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH, **extra)
+        app.ADMIN_THROTTLE = access.Throttle()
+        return app, TestClient(app.app)
+
+    def login(self, client, password=ADMIN_PASSWORD, code=""):
+        return client.post("/api/login", json={"user": "admin", "password": password, "code": code},
+                           headers=HEADERS)
+
+    def test_admin_login_runs_everything_through_the_admin_relay(self):
+        app, client = self.make()
+        self.assertTrue(client.get("/api/session").json()["admin_enabled"])
+        self.assertEqual(self.login(client).status_code, 200)
+        self.assertEqual(client.get("/api/session").json()["role"], "admin")
+        self.assertEqual({a["run"] for a in client.get("/api/actions").json()}, {"real"})
+        relay = mock.AsyncMock(return_value=FakeResponse(body={"id": "j1"}))
+        with mock.patch.object(app, "relay_request", relay), \
+             mock.patch("asyncio.create_subprocess_exec",
+                        side_effect=AssertionError("public mode ran a process")):
+            r = client.post("/api/actions/seed", json={"params": {"dmas": 4}}, headers=HEADERS)
+        self.assertEqual(r.json(), {"id": "j1"})
+        method, path = relay.await_args.args
+        self.assertEqual((method, path), ("POST", "/api/relay/admin/actions/seed"))
+        self.assertTrue(relay.await_args.kwargs["admin"])
+        # Admin-only tools still need the loopback console.
+        self.assertEqual(client.get("/api/gis/collections").status_code, 404)
+
+    def test_admin_jobs_come_from_the_admin_console(self):
+        app, client = self.make()
+        self.login(client)
+        relay = mock.AsyncMock(return_value=FakeResponse(body=[{"id": "j1"}]))
+        with mock.patch.object(app, "relay_request", relay):
+            self.assertEqual(client.get("/api/jobs").json(), [{"id": "j1"}])
+        self.assertEqual(relay.await_args.args, ("GET", "/api/relay/admin/jobs"))
+
+    def test_wrong_password_and_throttle(self):
+        _, client = self.make()
+        for _ in range(5):
+            self.assertEqual(self.login(client, password="wrong").status_code, 401)
+        self.assertEqual(self.login(client).status_code, 429)
+        self.assertEqual(client.get("/api/session").json()["role"], "public")
+
+    def test_authenticator_code(self):
+        app, client = self.make(CONSOLE_ADMIN_TOTP_SECRET=TOTP_SECRET)
+        self.assertTrue(client.get("/api/session").json()["admin_code"])
+        self.assertEqual(self.login(client).status_code, 401)
+        self.assertEqual(self.login(client, code=access.totp(TOTP_SECRET)).status_code, 200)
+
+    def test_demo_cookie_cannot_claim_admin(self):
+        app, client = self.make()
+        client.post("/api/login", json={"password": PASSWORD}, headers=HEADERS)
+        self.assertEqual(client.get("/api/session").json()["role"], "demo")
+        # A cookie signed by another secret is not a session at all.
+        _, forged = access.new_session("x" * 40, role=access.ADMIN)
+        client.cookies.set(access.SESSION_COOKIE, forged)
+        self.assertEqual(client.get("/api/session").json()["role"], "public")
+
+    def test_tokens_must_differ(self):
+        with self.assertRaises(SystemExit):
+            load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090",
+                     CONSOLE_RELAY_TOKEN=TOKEN, CONSOLE_RELAY_ADMIN_TOKEN=TOKEN)
+
+
 @unittest.skipIf(TestClient is None, "console requirements not installed")
 class AdminRelayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = load_app(CONSOLE_MODE="admin", CONSOLE_RELAY_TOKEN=TOKEN)
+        cls.app = load_app(CONSOLE_MODE="admin", CONSOLE_RELAY_TOKEN=TOKEN,
+                           CONSOLE_RELAY_ADMIN_TOKEN=ADMIN_TOKEN)
 
     def setUp(self):
         self.client = TestClient(self.app.app)
@@ -211,6 +328,21 @@ class AdminRelayTests(unittest.TestCase):
     def test_bad_token_looks_like_no_route(self):
         self.assertEqual(self.relay("discover", token="wrong").status_code, 404)
         self.assertEqual(self.client.get("/api/relay/status").status_code, 404)
+
+    def test_demo_token_cannot_use_admin_routes(self):
+        r = self.client.post("/api/relay/admin/actions/seed", json={"params": {}},
+                             headers={**HEADERS, "Authorization": f"Bearer {TOKEN}"})
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self.client.get("/api/relay/admin/jobs",
+                                         headers={"Authorization": f"Bearer {TOKEN}"}).status_code, 404)
+
+    def test_admin_token_runs_any_action(self):
+        with mock.patch.object(self.app, "start_job",
+                               mock.AsyncMock(return_value={"id": "abc"})) as start:
+            r = self.client.post("/api/relay/admin/actions/seed", json={"params": {}},
+                                 headers={**HEADERS, "Authorization": f"Bearer {ADMIN_TOKEN}"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(start.await_args.kwargs["origin"], "admin")
 
     def test_unsafe_action_refused(self):
         self.assertEqual(self.relay("seed").status_code, 403)
