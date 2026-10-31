@@ -808,7 +808,15 @@ def baseline_progress(dma_id: str) -> dict:
           AND NOT (coalesce(flagged, false) AND ts > now() - make_interval(secs => %(relearn_s)s))
     """, {"d": dma_id, "baseline_s": r["baseline_days"] * 86400,
           "relearn_s": r["relearn_hours"] * 3600})
-    return {"samples": n or 0, **r}
+    # A DMA the model does not reach gets no residual at all, so it would stay
+    # UNKNOWN for good; the page must not promise it a status in a few hours.
+    # Every DMA scored in one solve shares that solve's ts.
+    last = query("""
+        SELECT EXISTS (SELECT 1 FROM twin.sim_residual) AS any_run,
+               EXISTS (SELECT 1 FROM twin.sim_residual
+                       WHERE dma_id = %(d)s AND ts = (SELECT max(ts) FROM twin.sim_residual)) AS in_last_run
+    """, {"d": dma_id})[0]
+    return {"samples": n or 0, "any_run": last["any_run"], "in_last_run": last["in_last_run"], **r}
 
 
 DEVICES = {

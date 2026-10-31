@@ -159,8 +159,10 @@ async function logout() {
   await reloadSession();
 }
 
+// Cancel is type="button": as the form's first submit button it was also its
+// default, so Enter in the password field cancelled instead of logging in.
+$('#login-cancel').addEventListener('click', () => $('#login-dialog').close());
 $('#login-form').addEventListener('submit', async (ev) => {
-  if (ev.submitter?.value !== 'login') return;
   ev.preventDefault();
   try {
     const user = $('#login-form').dataset.user || 'demo';
@@ -201,7 +203,8 @@ function renderHealth(st) {
     pill('Kafka', st.topics, `${(st.topics.value || []).length} topics`),
     pill('Connect', st.connectors, `${(st.connectors.value || []).length} connectors`),
     pill('Flink', st.flink, `${(st.flink.value || []).length} jobs`),
-    st.containers.hidden ? null : pill('Docker', st.containers, 'socket reachable'),
+    // replaceChildren() would print a null as the text "null".
+    ...(st.containers.hidden ? [] : [pill('Docker', st.containers, 'socket reachable')]),
   );
 }
 
@@ -443,6 +446,11 @@ async function pollJob() {
 // -------------------------------------------------------------------- map
 const map = L.map('map', { zoomControl: true, preferCanvas: true, attributionControl: true });
 map.setView([0, 0], 2);
+// Points get their own pane and canvas above the overlay pane. On one shared
+// canvas a click goes to the last shape drawn under the cursor, and the DMA
+// polygons are drawn after the meters, so a meter click opened its DMA.
+map.createPane('points').style.zIndex = 450;
+const pointRenderer = L.canvas({ pane: 'points' });
 const layers = {
   pipes: L.layerGroup().addTo(map),
   dmas: L.layerGroup().addTo(map),
@@ -477,7 +485,6 @@ async function loadMap() {
     api('/api/geo/gauges').catch(() => null),
     api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
-  drawMeters(meters);
 
   layers.pipes.clearLayers();
   if (pipes) {
@@ -516,6 +523,7 @@ async function loadMap() {
   if (facilities) {
     L.geoJSON(facilities, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
+        renderer: pointRenderer,
         radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
@@ -528,6 +536,7 @@ async function loadMap() {
   if (gauges) {
     L.geoJSON(gauges, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
+        renderer: pointRenderer,
         radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
@@ -535,6 +544,8 @@ async function loadMap() {
       ])),
     }).addTo(layers.gauges);
   }
+  // Last, so a meter beside a facility or gauge stays clickable on the shared points canvas.
+  drawMeters(meters);
 
   const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities, layers.gauges].flatMap((g) => g.getLayers()));
   const empty = !all.getLayers().length;
@@ -567,7 +578,7 @@ async function openDma(dmaId) {
   drawer.replaceChildren(
     el('header', {},
       el('div', {}, el('h3', {}, i.name || i.dma_id, el('span', { class: 'tag syn' }, 'synthetic')),
-        el('span', { class: `status ${i.status || ''}`, title: statusMeaning(i.status, d.baseline) }, i.status || 'NO STATUS')),
+        el('span', { class: `status ${i.status || 'UNKNOWN'}`, title: statusMeaning(i.status, d.baseline) }, i.status || 'UNKNOWN')),
       el('button', { class: 'btn ghost', onclick: closeDma, 'aria-label': 'Close' }, '×')),
     el('dl', { class: 'kv' },
       el('dt', {}, 'DMA id'), el('dd', {}, i.dma_id),
@@ -591,6 +602,11 @@ async function openDma(dmaId) {
 function statusMeaning(status, b) {
   if (!b) return '';
   const rule = `Each solve compares modelled with observed pressure. The DMA is scored against its own last ${fmt.n(b.baseline_days)} days: |z| ≥ ${b.z_watch} is WATCH, ≥ ${b.z_leak} is SUSPECTED_LEAK.`;
+  if ((status === 'UNKNOWN' || !status) && b.any_run && !b.in_last_run) {
+    return 'UNKNOWN: the last solve did not score this DMA, so it is not learning a baseline. Either the model '
+      + 'has no junction inside it (the model keeps the SIM_MAX_PIPES pipes nearest the reservoirs; raising it '
+      + `brings more DMAs in), or its loggers sent nothing in the last 30 minutes. ${rule}`;
+  }
   if (status === 'UNKNOWN' || !status) {
     const left = Math.max(0, b.min_samples - b.samples);
     const eta = left * b.interval_s / 3600;
@@ -612,6 +628,7 @@ function drawMeters(fc) {
   if (!fc) return;
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
+      renderer: pointRenderer,
       radius: f.properties.kind === 'logger' ? 5 : 3,
       color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
