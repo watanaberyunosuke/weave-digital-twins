@@ -6,6 +6,11 @@ This is what stops the synthetic telemetry being noise: every generated meter
 sits inside a DMA derived from the real mains of the loaded region, and every
 generated reading references an id that exists in asset.dma / ref.water_meter.
 
+DMAs and meters use only the pipes the hydraulic model keeps (the same
+selection run_sim.py --build makes, from model/modelled_network.py), so every
+DMA has modelled junctions and gets a residual. Seeded across the whole
+network, most DMAs fell outside the capped model and never got a status.
+
     python scripts/seed_synthetic_network.py --dmas 40 --meters-per-dma 25
 """
 
@@ -19,19 +24,47 @@ import sys
 
 import psycopg
 
+# model/ is mounted beside scripts/ in the gis-loader container and sits beside
+# it in the repository, so the seeder shares the model's pipe selection.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model"))
+from modelled_network import MAX_PIPES, select_modelled  # noqa: E402
+
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@localhost:5432/weave_twin")
 NAMESPACE = os.environ.get("SCHEMA_NAMESPACE", "weave")
 SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "schemas")
 
 
-def build_dmas(conn, n_dmas: int) -> list[str]:
-    """Cluster real pipes into synthetic District Metered Areas."""
+def load_modelled_pipes(conn) -> None:
+    """Fill a session table with the pipes the model keeps; seeding uses only those.
+
+    With no supplied network yet (no reservoir, or topology not built) it falls
+    back to every pipe, as before, rather than refusing to seed: the meters
+    still exercise the pipeline, they just get no residual.
+    """
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM asset.pipe")
-        pipe_count = cur.fetchone()[0]
-        if pipe_count == 0:
+        if cur.fetchone()[0] == 0:
             print("! asset.pipe is empty — run gis/load_gis.py --all first")
             sys.exit(1)
+        selected = select_modelled(cur).selection.pipes
+        cur.execute("CREATE TEMP TABLE modelled_pipe (pipe_id TEXT PRIMARY KEY)")
+        if selected:
+            with cur.copy("COPY modelled_pipe (pipe_id) FROM STDIN") as copy:
+                for pipe in selected:
+                    copy.write_row((pipe.pipe_id,))
+            print(f"seeding on the {len(selected)} pipes the model keeps (SIM_MAX_PIPES={MAX_PIPES})")
+        else:
+            cur.execute("INSERT INTO modelled_pipe SELECT pipe_id FROM asset.pipe")
+            print("! no supplied network to model (no reservoir in reach, or topology not built);"
+                  " seeding on every pipe, so DMAs will get no residuals")
+    conn.commit()
+
+
+def build_dmas(conn, n_dmas: int) -> list[str]:
+    """Cluster the modelled pipes into synthetic District Metered Areas."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM modelled_pipe")
+        pipe_count = cur.fetchone()[0]
         print(f"clustering {pipe_count} real pipes into {n_dmas} DMAs ...")
 
         cur.execute("TRUNCATE asset.dma CASCADE")
@@ -40,7 +73,7 @@ def build_dmas(conn, n_dmas: int) -> list[str]:
             WITH clustered AS (
                 SELECT pipe_id, geom,
                        ST_ClusterKMeans(ST_Centroid(geom), %s) OVER () AS cid
-                FROM asset.pipe
+                FROM asset.pipe JOIN modelled_pipe USING (pipe_id)
                 WHERE geom IS NOT NULL
             ),
             grouped AS (
@@ -70,7 +103,7 @@ def build_dmas(conn, n_dmas: int) -> list[str]:
 
 
 def build_meters(conn, dma_ids: list[str], per_dma: int) -> list[str]:
-    """Place synthetic meters along real pipes inside each DMA."""
+    """Place synthetic meters along modelled pipes inside each DMA."""
     print(f"placing {per_dma} meters per DMA along real mains ...")
     with conn.cursor() as cur:
         cur.execute("TRUNCATE ref.water_meter CASCADE")
@@ -89,7 +122,7 @@ def build_meters(conn, dma_ids: list[str], per_dma: int) -> list[str]:
                            ST_LineMerge(p.geom), random())
                 FROM generate_series(1, %s) gs
                 CROSS JOIN LATERAL (
-                    SELECT pipe_id, geom FROM asset.pipe
+                    SELECT pipe_id, geom FROM asset.pipe JOIN modelled_pipe USING (pipe_id)
                     WHERE ST_Intersects(geom, (SELECT geom FROM asset.dma WHERE dma_id = %s))
                       AND ST_GeometryType(ST_LineMerge(geom)) = 'ST_LineString'
                     ORDER BY random() LIMIT 1
@@ -231,6 +264,7 @@ def main() -> int:
     random.seed(args.seed)
 
     with psycopg.connect(DSN) as conn:
+        load_modelled_pipes(conn)
         dma_ids = build_dmas(conn, args.dmas)
         meter_sample = build_meters(conn, dma_ids, args.meters_per_dma)
         elec_sample = build_electricity_meters(conn, args.meters_per_substation)

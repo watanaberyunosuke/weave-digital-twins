@@ -80,6 +80,8 @@ jobs:
         # gis/ runs in the ingest image, so its decoder is checked here too.
         run: |
           python -c "import common, hydrometry_poller, market_poller"
+          # The seeder runs in this image and shares the model's pipe selection.
+          python -c "import sys; sys.path.insert(0, '../scripts'); import seed_synthetic_network"
           python -c "import imagecodecs, numpy; imagecodecs.lerc_decode"
       # The loader's conforming happens in PostGIS, so its fixtures run against
       # the image the stack's postgres service uses. It is started here rather
