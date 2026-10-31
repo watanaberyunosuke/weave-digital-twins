@@ -218,6 +218,9 @@ services:
       GOOGLE_MAPS_LANGUAGE: ${GOOGLE_MAPS_LANGUAGE:-en}
       FEATURESERV_URL: http://featureserv:9000
       FEATURESERV_PUBLIC_URL: ${FEATURESERV_PUBLIC_URL:-http://localhost:9000}
+      # "console" lets the public console reach the relay routes by service name.
+      CONSOLE_ALLOWED_HOSTS: ${CONSOLE_ALLOWED_HOSTS:-localhost,127.0.0.1,console}
+      CONSOLE_RELAY_TOKEN: ${CONSOLE_RELAY_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts:/weave/scripts:ro
@@ -225,6 +228,41 @@ services:
       - ./schemas:/weave/schemas:ro
       - ./gis/regions:/weave/gis/regions:ro
       - siminp:/sim:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- public console: the same page, read-only, for anyone ------------------
+  # Opt-in (profile "public"). No Docker socket and the read-only database
+  # role: it can show the twin but never change it. A demo login, when its
+  # hash and secret are set, simulates every action except the safe ones,
+  # which it relays to the admin console above. Hosted, this runs on another
+  # machine with CONSOLE_RELAY_URL pointing back over a private link.
+  console-public:
+    profiles: ["public"]
+    logging: *json-logs
+    build: ./console
+    container_name: weave-console-public
+    init: true
+    ports:
+      - "127.0.0.1:${CONSOLE_PUBLIC_PORT:-8091}:8090"
+    environment:
+      CONSOLE_MODE: public
+      TWIN_DSN: postgresql://weave_reader:weave_reader@postgres:5432/weave_twin
+      GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
+      CONSOLE_ALLOWED_HOSTS: ${CONSOLE_PUBLIC_HOSTS:-localhost,127.0.0.1}
+      CONSOLE_DEMO_PASSWORD_HASH: ${CONSOLE_DEMO_PASSWORD_HASH:-}
+      CONSOLE_SESSION_SECRET: ${CONSOLE_SESSION_SECRET:-}
+      CONSOLE_COOKIE_SECURE: ${CONSOLE_COOKIE_SECURE:-0}
+      CONSOLE_RELAY_URL: ${CONSOLE_RELAY_URL:-http://console:8090}
+      CONSOLE_RELAY_TOKEN: ${CONSOLE_RELAY_TOKEN:-}
+      CONSOLE_TILE_URL: ${CONSOLE_TILE_URL:-}
+      CONSOLE_TILE_ATTRIBUTION: ${CONSOLE_TILE_ATTRIBUTION:-}
+      CONSOLE_TILE_STYLE: ${CONSOLE_TILE_STYLE:-auto}
+      CONSOLE_BASEMAP: ${CONSOLE_BASEMAP:-}
+    volumes:
+      - ./gis/regions:/weave/gis/regions:ro
     depends_on:
       postgres:
         condition: service_healthy

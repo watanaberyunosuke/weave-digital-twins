@@ -16,6 +16,7 @@
     <div class="region muted" id="region"></div>
     <div class="health" id="health"></div>
     <nav class="links" id="links"></nav>
+    <div class="auth" id="auth"></div>
     <button type="button" class="theme-btn" id="theme-btn" aria-label="Colour theme"></button>
   </header>
 
@@ -30,7 +31,7 @@
         <h2>Tools</h2>
         <div id="tools"></div>
       </section>
-      <section>
+      <section id="containers-section">
         <h2>Containers</h2>
         <ul class="containers" id="containers"></ul>
       </section>
@@ -128,6 +129,20 @@
       <div class="row-end">
         <button value="cancel" class="btn ghost">Cancel</button>
         <button value="run" class="btn primary" id="run-go">Run</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="login-dialog">
+    <form method="dialog" id="login-form">
+      <h3>Demo login</h3>
+      <p class="muted">The demo user can try every pipeline step. Safe steps run on the live
+        stack; the rest are simulated, and a fresh login starts a clean history.</p>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+      <div class="err" id="login-err" hidden></div>
+      <div class="row-end">
+        <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
+        <button value="login" class="btn primary">Log in</button>
       </div>
     </form>
   </dialog>

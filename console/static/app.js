@@ -43,6 +43,7 @@ const css = (name) => getComputedStyle(document.documentElement).getPropertyValu
 
 const state = {
   config: null,
+  session: { mode: 'admin', role: 'admin', demo_enabled: false },
   actions: [],
   status: null,
   selectedDma: null,
@@ -92,14 +93,52 @@ darkQuery.addEventListener('change', () => onThemeChange());
 applyTheme(readTheme());
 
 function renderHeader() {
-  const { config } = state;
+  const { config, session } = state;
   $('#region').textContent = config.region_config || 'GIS_REGION_CONFIG not set';
-  $('#links').replaceChildren(
-    el('a', { href: config.kibana_url, target: '_blank', rel: 'noopener' }, 'Kibana'),
-    el('a', { href: config.flink_url, target: '_blank', rel: 'noopener' }, 'Flink'),
-    el('a', { href: config.control_center_url, target: '_blank', rel: 'noopener' }, 'Control Center'),
-  );
+  // The public console has no admin tools to link to; the server leaves them out.
+  const links = [['Kibana', config.kibana_url], ['Flink', config.flink_url],
+    ['Control Center', config.control_center_url]].filter(([, href]) => href);
+  $('#links').replaceChildren(...links.map(([label, href]) => el('a', { href, target: '_blank', rel: 'noopener' }, label)));
+  const auth = $('#auth');
+  if (session.mode !== 'public') {
+    auth.replaceChildren();
+    return;
+  }
+  const badge = el('span', { class: 'pill role' }, session.role === 'demo' ? 'Demo user' : 'Public view');
+  const btn = !session.demo_enabled ? null : session.role === 'demo'
+    ? el('button', { type: 'button', class: 'btn', onclick: logout }, 'Log out')
+    : el('button', { type: 'button', class: 'btn', onclick: () => { $('#login-err').hidden = true; $('#login-dialog').showModal(); } }, 'Demo login');
+  auth.replaceChildren(badge, btn);
 }
+
+async function reloadSession() {
+  [state.session, state.actions] = await Promise.all([api('/api/session'), api('/api/actions')]);
+  state.selectedJob = null;
+  state.jobOffset = 0;
+  $('#job-log').textContent = '';
+  renderHeader();
+  if (state.status) renderSteps(state.status);
+  if (state.tab === 'jobs') loadJobs();
+}
+
+async function logout() {
+  await post('/api/logout', {}).catch(() => {});
+  await reloadSession();
+}
+
+$('#login-form').addEventListener('submit', async (ev) => {
+  if (ev.submitter?.value !== 'login') return;
+  ev.preventDefault();
+  try {
+    await post('/api/login', { password: $('#login-password').value });
+    $('#login-password').value = '';
+    $('#login-dialog').close();
+    await reloadSession();
+  } catch (err) {
+    $('#login-err').textContent = err.message;
+    $('#login-err').hidden = false;
+  }
+});
 
 function renderHealth(st) {
   const pill = (label, probe, okText) => el(
@@ -113,7 +152,7 @@ function renderHealth(st) {
     pill('Kafka', st.topics, `${(st.topics.value || []).length} topics`),
     pill('Connect', st.connectors, `${(st.connectors.value || []).length} connectors`),
     pill('Flink', st.flink, `${(st.flink.value || []).length} jobs`),
-    pill('Docker', st.containers, 'socket reachable'),
+    st.containers.hidden ? null : pill('Docker', st.containers, 'socket reachable'),
   );
 }
 
@@ -153,6 +192,20 @@ function stepStates(st) {
   };
 }
 
+// What each role sees on an action button. Public viewers can look but not
+// run; a demo user's simulated actions say so before anything is clicked.
+function runButton(a, busy, job) {
+  const label = { real: 'Run', simulated: 'Try (simulated)', none: 'Run' }[a.run] || 'Run';
+  const title = a.run === 'none' ? 'Log in as the demo user to try actions'
+    : busy && a.run === 'real' ? `${job.label} is running` : a.description;
+  return el('button', {
+    class: 'btn',
+    disabled: a.run === 'none' || (busy && a.run === 'real'),
+    title,
+    onclick: () => openRun(a),
+  }, label);
+}
+
 function renderSteps(st) {
   const states = stepStates(st);
   const busy = !!st.job;
@@ -162,22 +215,19 @@ function renderSteps(st) {
     return el('li', { class: `step ${s.cls}` },
       el('span', { class: 'n' }, s.cls === 'done' ? '✓' : a.step),
       el('div', {}, el('div', { class: 't' }, a.label), el('div', { class: 's' }, s.text)),
-      el('button', {
-        class: 'btn',
-        disabled: busy,
-        title: busy ? `${st.job.label} is running` : a.description,
-        onclick: () => openRun(a),
-      }, 'Run'));
+      runButton(a, busy, st.job));
   }));
   $('#tools').replaceChildren(el('div', { class: 'tools' }, ...state.actions.filter((a) => !a.step).map((a) => el(
     'div', { class: 'step' },
     el('span', { class: 'n' }, '·'),
     el('div', {}, el('div', { class: 't' }, a.label), el('div', { class: 's' }, a.description)),
-    el('button', { class: 'btn', disabled: busy, onclick: () => openRun(a) }, 'Run'),
+    runButton(a, busy, st.job),
   ))));
 }
 
 function renderContainers(st) {
+  $('#containers-section').hidden = !!st.containers.hidden;
+  if (st.containers.hidden) return;
   const rows = st.containers.value || [];
   if (!st.containers.ok) {
     $('#containers').replaceChildren(el('li', { class: 'muted' }, st.containers.error));
@@ -259,10 +309,16 @@ function openRun(action) {
   $('#run-desc').textContent = action.description;
   $('#run-params').replaceChildren(...action.params.map(paramInput));
   $('#run-params').oninput = updatePreview;
-  $('#run-warn').hidden = !action.destructive;
-  $('#run-warn').textContent = action.destructive || '';
-  $('#run-go').className = `btn ${action.destructive ? 'danger' : 'primary'}`;
-  $('#run-go').textContent = action.destructive ? 'Run (destructive)' : 'Run';
+  const simulated = action.run === 'simulated';
+  const demoLive = state.session.role === 'demo' && action.run === 'real';
+  const note = simulated ? 'Simulated: shows the exact command and sample output. Nothing runs on the live stack.'
+    : demoLive ? 'Runs on the live stack. Demo users can run one live action a minute.'
+      : action.destructive;
+  $('#run-warn').hidden = !note;
+  $('#run-warn').textContent = note || '';
+  const danger = !simulated && action.destructive;
+  $('#run-go').className = `btn ${danger ? 'danger' : 'primary'}`;
+  $('#run-go').textContent = simulated ? 'Simulate' : danger ? 'Run (destructive)' : 'Run';
   $('#run-err').hidden = true;
   updatePreview();
   dlg.showModal();
@@ -321,6 +377,7 @@ async function pollJob() {
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
   $('#job-head').replaceChildren(
     el('strong', {}, job.label), ' ',
+    job.simulated ? el('span', { class: 'pill' }, 'simulated') : null, ' ',
     el('span', { class: 'muted small' },
       `${job.state}${job.exit_code !== null ? ` (exit ${job.exit_code})` : ''} · started ${fmt.ts(job.started)}`),
     el('pre', { class: 'cmd' }, job.command.join(' ')),
@@ -744,6 +801,9 @@ function steps(...items) {
 
 function renderGis() {
   const g = state.config.gis;
+  // Not offered on the public console: it hands out database connection details.
+  $('[data-tab="gis"]').hidden = !g;
+  if (!g) return;
   const pgUri = `postgresql://${g.db_user}@${g.db_host}:${g.db_port}/${g.db_name}`;
   $('#gis-cards').replaceChildren(
     el('div', { class: 'card gis' },
@@ -808,7 +868,8 @@ async function loadGisLayers() {
 // ------------------------------------------------------------------- boot
 async function boot() {
   try {
-    [state.config, state.actions] = await Promise.all([api('/api/config'), api('/api/actions')]);
+    [state.config, state.session, state.actions] = await Promise.all(
+      [api('/api/config'), api('/api/session'), api('/api/actions')]);
   } catch (err) {
     $('#health').replaceChildren(el('span', { class: 'pill' }, el('i', { class: 'dot bad' }), `console API: ${err.message}`));
     return;

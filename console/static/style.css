@@ -106,6 +106,9 @@ a { color: var(--accent); }
 .region { font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .health { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 .links { display: flex; gap: 12px; font-size: 13px; align-items: center; }
+.auth { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.auth:empty { display: none; }
+.auth .btn { padding: 3px 10px; font-size: 12px; }
 .theme-btn { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
 .theme-btn:hover { border-color: var(--accent); }
