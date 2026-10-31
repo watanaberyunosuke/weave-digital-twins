@@ -97,7 +97,8 @@ function renderHeader() {
   $('#region').textContent = config.region_config || 'GIS_REGION_CONFIG not set';
   // The public console has no admin tools to link to; the server leaves them out.
   const links = [['Kibana', config.kibana_url], ['Flink', config.flink_url],
-    ['Control Center', config.control_center_url]].filter(([, href]) => href);
+    ['Control Center', config.control_center_url],
+    [config.mode === 'public' ? 'Admin' : 'Public view', config.switch_url]].filter(([, href]) => href);
   $('#links').replaceChildren(...links.map(([label, href]) => el('a', { href, target: '_blank', rel: 'noopener' }, label)));
   const auth = $('#auth');
   if (session.mode !== 'public') {

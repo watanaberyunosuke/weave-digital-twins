@@ -71,6 +71,8 @@ COOKIE_SECURE = os.environ.get("CONSOLE_COOKIE_SECURE", "1") != "0"
 # RELAY_TOKEN. On the admin side the token alone turns the relay routes on.
 RELAY_URL = os.environ.get("CONSOLE_RELAY_URL", "").rstrip("/")
 RELAY_TOKEN = os.environ.get("CONSOLE_RELAY_TOKEN", "")
+# The other console's address, for the header link between them.
+SWITCH_URL = os.environ.get("CONSOLE_ADMIN_URL" if PUBLIC else "CONSOLE_PUBLIC_URL", "")
 if PUBLIC and RELAY_URL and len(RELAY_TOKEN) < 32:
     raise SystemExit("CONSOLE_RELAY_TOKEN must be at least 32 characters")
 
@@ -337,6 +339,10 @@ def config():
         "basemap_default": default if default in ids else "none",
         "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
         "mode": MODE,
+        # One click between the two consoles. The admin address is shown on
+        # the public page on purpose: Cloudflare Access, not obscurity, is
+        # what keeps everyone but the operator out of it.
+        "switch_url": SWITCH_URL,
         # The admin tools and the GIS connection details are the operator's;
         # the public page leaves them out rather than showing dead links.
         **({} if PUBLIC else {

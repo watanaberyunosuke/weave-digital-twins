@@ -221,6 +221,7 @@ services:
       # "console" lets the public console reach the relay routes by service name.
       CONSOLE_ALLOWED_HOSTS: ${CONSOLE_ALLOWED_HOSTS:-localhost,127.0.0.1,console}
       CONSOLE_RELAY_TOKEN: ${CONSOLE_RELAY_TOKEN:-}
+      CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts:/weave/scripts:ro
@@ -254,6 +255,7 @@ services:
       CONSOLE_ALLOWED_HOSTS: ${CONSOLE_PUBLIC_HOSTS:-localhost,127.0.0.1}
       CONSOLE_DEMO: ${CONSOLE_DEMO:-1}
       CONSOLE_DEMO_PASSWORD: ${CONSOLE_DEMO_PASSWORD:-demo}
+      CONSOLE_ADMIN_URL: ${CONSOLE_ADMIN_URL:-}
       CONSOLE_COOKIE_SECURE: ${CONSOLE_COOKIE_SECURE:-0}
       CONSOLE_RELAY_URL: ${CONSOLE_RELAY_URL:-http://console:8090}
       CONSOLE_RELAY_TOKEN: ${CONSOLE_RELAY_TOKEN:-}

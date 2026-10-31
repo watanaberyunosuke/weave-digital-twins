@@ -72,7 +72,8 @@ def load_app(**env):
     base = {"CONSOLE_ALLOWED_HOSTS": "testserver", "CONSOLE_COOKIE_SECURE": "0"}
     with mock.patch.dict(os.environ, {**base, **env}, clear=False):
         for k in ("CONSOLE_MODE", "CONSOLE_DEMO", "CONSOLE_DEMO_PASSWORD", "CONSOLE_SESSION_SECRET",
-                  "CONSOLE_RELAY_URL", "CONSOLE_RELAY_TOKEN"):
+                  "CONSOLE_RELAY_URL", "CONSOLE_RELAY_TOKEN", "CONSOLE_ADMIN_URL",
+                  "CONSOLE_PUBLIC_URL"):
             if k not in env:
                 os.environ.pop(k, None)
         import app  # noqa: PLC0415
@@ -156,6 +157,15 @@ class PublicModeTests(unittest.TestCase):
         other.post("/api/login", json={"password": PASSWORD}, headers=HEADERS)
         self.assertEqual(other.get(f"/api/jobs/{r.json()['id']}").status_code, 404)
         self.assertEqual(TestClient(self.app.app).get("/api/jobs").json(), [])
+
+    def test_switch_links(self):
+        app = load_app(CONSOLE_MODE="public", CONSOLE_ADMIN_URL="https://admin.example")
+        self.assertEqual(TestClient(app.app).get("/api/config").json()["switch_url"],
+                         "https://admin.example")
+        app = load_app(CONSOLE_MODE="admin", CONSOLE_PUBLIC_URL="https://twin.example")
+        self.assertEqual(TestClient(app.app).get("/api/config").json()["switch_url"],
+                         "https://twin.example")
+        type(self).app = load_app(CONSOLE_MODE="public")
 
     def test_demo_can_be_switched_off(self):
         app = load_app(CONSOLE_MODE="public", CONSOLE_DEMO="0")
