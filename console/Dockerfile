@@ -16,7 +16,7 @@ RUN mkdir -p /app/static/vendor && \
       | tar -xz -C /app/static/vendor package/dist && \
     mv /app/static/vendor/package/dist /app/static/vendor/leaflet && \
     rm -rf /app/static/vendor/package
-COPY app.py .
+COPY app.py access.py demo.py ./
 COPY static/ /app/static/
 EXPOSE 8090
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8090"]

@@ -57,6 +57,7 @@ cd weave-stack
 
 # Point it at a region
 cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
+./scripts/init-secrets.sh     # console tokens; asks for the admin password
 
 # Download Flink connectors
 ./scripts/download-flink-connectors.sh
@@ -91,6 +92,13 @@ facilities and gauges), telemetry freshness with each table labelled real or
 synthetic, the real feeds, and flagged residuals. Its pipeline panel runs the
 same steps as `bootstrap.sh`, one at a time, showing the exact command and its
 output, so you can also bootstrap from there instead of the terminal.
+
+**Public console.** `docker compose --profile public up -d console-public`
+serves the same page read-only on `:8091`, for publishing. Its demo login,
+open to everyone with the password `demo`, runs the safe steps for real and
+simulates the rest. The admin login on the same page runs every step live
+once `./scripts/init-secrets.sh` has filled the console secrets into `.env`
+(it asks for the admin password and keeps only its hash).
 
 The map has a basemap picker (OpenStreetMap, CARTO, Esri imagery and
 topographic, OpenTopoMap, and Google Maps when `.env` holds a Map Tiles API

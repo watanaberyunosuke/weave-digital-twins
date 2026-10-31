@@ -43,6 +43,7 @@ const css = (name) => getComputedStyle(document.documentElement).getPropertyValu
 
 const state = {
   config: null,
+  session: { mode: 'admin', role: 'admin', demo_enabled: false },
   actions: [],
   status: null,
   selectedDma: null,
@@ -92,13 +93,100 @@ darkQuery.addEventListener('change', () => onThemeChange());
 applyTheme(readTheme());
 
 function renderHeader() {
-  const { config } = state;
+  const { config, session } = state;
   $('#region').textContent = config.region_config || 'GIS_REGION_CONFIG not set';
-  $('#links').replaceChildren(
-    el('a', { href: config.kibana_url, target: '_blank', rel: 'noopener' }, 'Kibana'),
-    el('a', { href: config.flink_url, target: '_blank', rel: 'noopener' }, 'Flink'),
-    el('a', { href: config.control_center_url, target: '_blank', rel: 'noopener' }, 'Control Center'),
-  );
+  // The public console has no admin tools to link to; the server leaves them out.
+  const links = [['Kibana', config.kibana_url], ['Flink', config.flink_url],
+    ['Control Center', config.control_center_url]].filter(([, href]) => href);
+  $('#links').replaceChildren(...links.map(([label, href]) => el('a', { href, target: '_blank', rel: 'noopener' }, label)));
+  const auth = $('#auth');
+  if (session.mode !== 'public') {
+    auth.replaceChildren();
+    return;
+  }
+  const names = { demo: 'Demo user', admin: 'Admin · live', public: 'Public view' };
+  const badge = el('span', {
+    class: `pill role ${session.role}`,
+    title: session.role === 'admin' ? 'Every step runs on the live stack.' : '',
+  }, names[session.role] || names.public);
+  const loginBtn = (user, label) => el('button', { type: 'button', class: 'btn', onclick: () => openLogin(user) }, label);
+  const buttons = session.role !== 'public'
+    ? [el('button', { type: 'button', class: 'btn', onclick: logout }, 'Log out')]
+    : [session.demo_enabled && loginBtn('demo', 'Demo login'),
+      session.admin_enabled && loginBtn('admin', 'Admin login')].filter(Boolean);
+  auth.replaceChildren(badge, ...buttons);
+}
+
+// One dialog for both logins. The demo password is not a secret, so it is
+// shown and filled in; the admin one is masked and never pre-filled.
+function openLogin(user) {
+  const { session } = state;
+  const demo = user === 'demo';
+  const form = $('#login-form');
+  form.dataset.user = user;
+  $('#login-title').textContent = demo ? 'Demo login' : 'Admin login';
+  $('#login-demo-text').hidden = !demo;
+  $('#login-admin-text').hidden = demo;
+  $('#login-hint').textContent = demo ? session.demo_password : '';
+  const pw = $('#login-password');
+  pw.type = demo ? 'text' : 'password';
+  pw.autocomplete = demo ? 'off' : 'current-password';
+  pw.value = demo ? session.demo_password : '';
+  const code = $('#login-code');
+  const needCode = !demo && session.admin_code;
+  $('#login-code-row').hidden = !needCode;
+  code.required = needCode;
+  code.value = '';
+  $('#login-err').hidden = true;
+  $('#login-dialog').showModal();
+}
+
+// The role changes what the server sends (admin links, container names), so
+// a login or logout re-reads all three rather than just the session.
+async function reloadSession() {
+  [state.config, state.session, state.actions] = await Promise.all(
+    [api('/api/config'), api('/api/session'), api('/api/actions')]);
+  state.selectedJob = null;
+  state.jobOffset = 0;
+  $('#job-log').textContent = '';
+  renderHeader();
+  await refreshStatus();
+  if (state.tab === 'jobs') await loadJobs();
+}
+
+async function logout() {
+  await post('/api/logout', {}).catch(() => {});
+  await reloadSession();
+}
+
+$('#login-form').addEventListener('submit', async (ev) => {
+  if (ev.submitter?.value !== 'login') return;
+  ev.preventDefault();
+  try {
+    const user = $('#login-form').dataset.user || 'demo';
+    await post('/api/login', { user, password: $('#login-password').value, code: $('#login-code').value });
+    $('#login-password').value = '';
+    $('#login-code').value = '';
+    $('#login-dialog').close();
+    await reloadSession();
+    notify(user === 'admin'
+      ? 'Signed in as admin. Every step now runs on the live stack.'
+      : 'Signed in as the demo user. Safe steps run live; the rest are simulated.');
+  } catch (err) {
+    $('#login-err').textContent = err.message;
+    $('#login-err').hidden = false;
+  }
+});
+
+// A short note at the top of the page that clears itself: a login otherwise
+// changes little on screen, and a silent change reads as nothing happening.
+let noticeTimer = null;
+function notify(text) {
+  const box = $('#notice');
+  box.textContent = text;
+  box.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { box.hidden = true; }, 6000);
 }
 
 function renderHealth(st) {
@@ -113,7 +201,7 @@ function renderHealth(st) {
     pill('Kafka', st.topics, `${(st.topics.value || []).length} topics`),
     pill('Connect', st.connectors, `${(st.connectors.value || []).length} connectors`),
     pill('Flink', st.flink, `${(st.flink.value || []).length} jobs`),
-    pill('Docker', st.containers, 'socket reachable'),
+    st.containers.hidden ? null : pill('Docker', st.containers, 'socket reachable'),
   );
 }
 
@@ -153,6 +241,20 @@ function stepStates(st) {
   };
 }
 
+// What each role sees on an action button. Public viewers can look but not
+// run; a demo user's simulated actions say so before anything is clicked.
+function runButton(a, busy, job) {
+  const label = { real: 'Run', simulated: 'Try (simulated)', none: 'Log in to run' }[a.run] || 'Run';
+  const title = a.run === 'none' ? 'Log in as the demo user to try actions'
+    : busy && a.run === 'real' ? `${job.label} is running` : a.description;
+  return el('button', {
+    class: 'btn',
+    disabled: a.run === 'none' || (busy && a.run === 'real'),
+    title,
+    onclick: () => openRun(a),
+  }, label);
+}
+
 function renderSteps(st) {
   const states = stepStates(st);
   const busy = !!st.job;
@@ -162,22 +264,19 @@ function renderSteps(st) {
     return el('li', { class: `step ${s.cls}` },
       el('span', { class: 'n' }, s.cls === 'done' ? '✓' : a.step),
       el('div', {}, el('div', { class: 't' }, a.label), el('div', { class: 's' }, s.text)),
-      el('button', {
-        class: 'btn',
-        disabled: busy,
-        title: busy ? `${st.job.label} is running` : a.description,
-        onclick: () => openRun(a),
-      }, 'Run'));
+      runButton(a, busy, st.job));
   }));
   $('#tools').replaceChildren(el('div', { class: 'tools' }, ...state.actions.filter((a) => !a.step).map((a) => el(
     'div', { class: 'step' },
     el('span', { class: 'n' }, '·'),
     el('div', {}, el('div', { class: 't' }, a.label), el('div', { class: 's' }, a.description)),
-    el('button', { class: 'btn', disabled: busy, onclick: () => openRun(a) }, 'Run'),
+    runButton(a, busy, st.job),
   ))));
 }
 
 function renderContainers(st) {
+  $('#containers-section').hidden = !!st.containers.hidden;
+  if (st.containers.hidden) return;
   const rows = st.containers.value || [];
   if (!st.containers.ok) {
     $('#containers').replaceChildren(el('li', { class: 'muted' }, st.containers.error));
@@ -259,10 +358,16 @@ function openRun(action) {
   $('#run-desc').textContent = action.description;
   $('#run-params').replaceChildren(...action.params.map(paramInput));
   $('#run-params').oninput = updatePreview;
-  $('#run-warn').hidden = !action.destructive;
-  $('#run-warn').textContent = action.destructive || '';
-  $('#run-go').className = `btn ${action.destructive ? 'danger' : 'primary'}`;
-  $('#run-go').textContent = action.destructive ? 'Run (destructive)' : 'Run';
+  const simulated = action.run === 'simulated';
+  const demoLive = state.session.role === 'demo' && action.run === 'real';
+  const note = simulated ? 'Simulated: shows the exact command and sample output. Nothing runs on the live stack.'
+    : demoLive ? 'Runs on the live stack. Live demo runs are limited to one a minute across all demo users.'
+      : action.destructive;
+  $('#run-warn').hidden = !note;
+  $('#run-warn').textContent = note || '';
+  const danger = !simulated && action.destructive;
+  $('#run-go').className = `btn ${danger ? 'danger' : 'primary'}`;
+  $('#run-go').textContent = simulated ? 'Simulate' : danger ? 'Run (destructive)' : 'Run';
   $('#run-err').hidden = true;
   updatePreview();
   dlg.showModal();
@@ -321,6 +426,7 @@ async function pollJob() {
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
   $('#job-head').replaceChildren(
     el('strong', {}, job.label), ' ',
+    job.simulated ? el('span', { class: 'pill' }, 'simulated') : null, ' ',
     el('span', { class: 'muted small' },
       `${job.state}${job.exit_code !== null ? ` (exit ${job.exit_code})` : ''} · started ${fmt.ts(job.started)}`),
     el('pre', { class: 'cmd' }, job.command.join(' ')),
@@ -744,6 +850,9 @@ function steps(...items) {
 
 function renderGis() {
   const g = state.config.gis;
+  // Not offered on the public console: it hands out database connection details.
+  $('[data-tab="gis"]').hidden = !g;
+  if (!g) return;
   const pgUri = `postgresql://${g.db_user}@${g.db_host}:${g.db_port}/${g.db_name}`;
   $('#gis-cards').replaceChildren(
     el('div', { class: 'card gis' },
@@ -808,7 +917,8 @@ async function loadGisLayers() {
 // ------------------------------------------------------------------- boot
 async function boot() {
   try {
-    [state.config, state.actions] = await Promise.all([api('/api/config'), api('/api/actions')]);
+    [state.config, state.session, state.actions] = await Promise.all(
+      [api('/api/config'), api('/api/session'), api('/api/actions')]);
   } catch (err) {
     $('#health').replaceChildren(el('span', { class: 'pill' }, el('i', { class: 'dot bad' }), `console API: ${err.message}`));
     return;
