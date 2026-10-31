@@ -170,3 +170,8 @@ Expect the first build to be messy: real GIS has fragments, missing diameters an
 - Publish every port on `127.0.0.1`. Upstream services are rebound in the override with `ports: !override` (Docker Compose 2.24.4+), because a plain `ports:` adds a binding beside upstream's open one. None of the Confluent or Flink endpoints asks for credentials.
 - Topic names are `<domain>.<subject>.raw.v1`, created with explicit retention in [scripts/create-topics.sh](scripts/create-topics.sh).
 - Treat this as critical-infrastructure data: public sources still reveal network vulnerability in aggregate, and the region config plus `.env` are the files that identify the target region.
+
+<!-- entire-agent:begin -->
+Read .entire/agent-guide.md for this repository's workflow, source inspection, and verification guidance.
+@.entire/agent-guide.md
+<!-- entire-agent:end -->
