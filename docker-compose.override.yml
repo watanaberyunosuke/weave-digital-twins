@@ -1,4 +1,4 @@
-# Weave — layered onto Confluent's cp-all-in-one-community compose file,
+# Weave — layered onto Confluent's cp-all-in-one compose file,
 # copied into a directory of its own (weave-stack in the README).
 # Region settings come from .env (see .env.example); nothing here names a place.
 
@@ -18,23 +18,58 @@ x-logging: &json-logs
 
 services:
 
-  # Upstream services, listed only to set their logging.
+  # Upstream services, listed to set their logging and to publish their
+  # ports on loopback only. None of them asks for credentials, so on every
+  # interface anyone on the same network could manage topics, connectors
+  # and Flink jobs. `!override` replaces upstream's port list (a plain
+  # `ports:` here would add a binding beside the open one) and needs
+  # Docker Compose 2.24.4 or later. Reach them from another machine
+  # through an SSH tunnel rather than reopening them.
   broker:
     logging: *json-logs
+    ports: !override
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:9101:9101"
   schema-registry:
     logging: *json-logs
+    ports: !override
+      - "127.0.0.1:8081:8081"
   ksqldb-server:
     logging: *json-logs
+    ports: !override
+      - "127.0.0.1:8088:8088"
   rest-proxy:
     logging: *json-logs
+    ports: !override
+      - "127.0.0.1:8082:8082"
+  # Control Center manages the broker, topics, Connect and Schema Registry;
+  # Prometheus and Alertmanager back its metrics and alerts. Flink is not
+  # visible in it (that needs Confluent Manager for Apache Flink), so the
+  # Flink UI on :9081 stays the place to manage jobs.
+  control-center:
+    logging: *json-logs
+    ports: !override
+      - "127.0.0.1:9021:9021"
+  prometheus:
+    logging: *json-logs
+    ports: !override
+      - "127.0.0.1:9090:9090"
+  alertmanager:
+    logging: *json-logs
+    ports: !override
+      - "127.0.0.1:9093:9093"
 
   connect:
     logging: *json-logs
+    ports: !override
+      - "127.0.0.1:8083:8083"
     volumes:
       - ./schemas:/schemas:ro
 
   flink-jobmanager:
     logging: *json-logs
+    ports: !override
+      - "127.0.0.1:9081:9081"
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
       - ./flink/sql:/sql:ro
@@ -61,8 +96,10 @@ services:
     # TimescaleDB). Other services reach this one by hostname, not by name.
     container_name: weave-postgres
     hostname: postgres
+    # Loopback like everything else: desktop GIS and psql on this machine
+    # still reach it, and the default password never faces the network.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: weave_twin
       POSTGRES_USER: weave
@@ -171,6 +208,7 @@ services:
       FLINK_URL: ${FLINK_URL:-http://flink-jobmanager:9081}
       KIBANA_PUBLIC_URL: ${KIBANA_PUBLIC_URL:-http://localhost:5601}
       FLINK_PUBLIC_URL: ${FLINK_PUBLIC_URL:-http://localhost:9081}
+      CONTROL_CENTER_PUBLIC_URL: ${CONTROL_CENTER_PUBLIC_URL:-http://localhost:9021}
       CONSOLE_TILE_URL: ${CONSOLE_TILE_URL:-}
       CONSOLE_TILE_ATTRIBUTION: ${CONSOLE_TILE_ATTRIBUTION:-}
       CONSOLE_TILE_STYLE: ${CONSOLE_TILE_STYLE:-auto}

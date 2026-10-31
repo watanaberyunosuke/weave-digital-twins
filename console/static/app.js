@@ -97,6 +97,7 @@ function renderHeader() {
   $('#links').replaceChildren(
     el('a', { href: config.kibana_url, target: '_blank', rel: 'noopener' }, 'Kibana'),
     el('a', { href: config.flink_url, target: '_blank', rel: 'noopener' }, 'Flink'),
+    el('a', { href: config.control_center_url, target: '_blank', rel: 'noopener' }, 'Control Center'),
   );
 }
 
