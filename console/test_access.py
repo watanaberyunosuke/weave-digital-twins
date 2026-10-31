@@ -386,5 +386,38 @@ class AdminRelayTests(unittest.TestCase):
         self.assertEqual(start.await_args.kwargs["origin"], "demo")
 
 
+@unittest.skipIf(TestClient is None, "console requirements not installed")
+class DeviceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = load_app(CONSOLE_MODE="public")
+
+    def setUp(self):
+        self.client = TestClient(self.app.app)
+
+    def test_unknown_kind_is_refused_before_any_query(self):
+        with mock.patch.object(self.app, "query", side_effect=AssertionError("queried")):
+            self.assertEqual(self.client.get("/api/device/pump/x").status_code, 404)
+
+    def test_meter_reading_shape(self):
+        rows = [[{"id": "M1", "meter_id": "M1", "dma_id": "D1", "meter_type": "residential",
+                  "geom": "x"}],
+                [{"ts": "2026-10-31T12:00:00Z", "litres": 4.0, "flow_lpm": 2.0, "battery_pct": 90}],
+                [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}]]
+        with mock.patch.object(self.app, "query", side_effect=rows) as q:
+            body = self.client.get("/api/device/meter/M1").json()
+        self.assertEqual(body["latest"]["litres"], 4.0)
+        self.assertEqual(body["series"][0]["readings"], 3)
+        self.assertNotIn("geom", body["info"])
+        # Table names come from the server's own map, and the id only ever
+        # travels as a bound parameter.
+        self.assertIn("FROM ref.water_meter WHERE meter_id = %s", q.call_args_list[0].args[0])
+        self.assertEqual(q.call_args_list[0].args[1], ("M1",))
+
+    def test_missing_device_is_404(self):
+        with mock.patch.object(self.app, "query", return_value=[]):
+            self.assertEqual(self.client.get("/api/device/logger/nope").status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

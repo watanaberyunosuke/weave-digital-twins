@@ -567,7 +567,7 @@ async function openDma(dmaId) {
   drawer.replaceChildren(
     el('header', {},
       el('div', {}, el('h3', {}, i.name || i.dma_id, el('span', { class: 'tag syn' }, 'synthetic')),
-        el('span', { class: `status ${i.status || ''}` }, i.status || 'NO STATUS')),
+        el('span', { class: `status ${i.status || ''}`, title: statusMeaning(i.status, d.baseline) }, i.status || 'NO STATUS')),
       el('button', { class: 'btn ghost', onclick: closeDma, 'aria-label': 'Close' }, '×')),
     el('dl', { class: 'kv' },
       el('dt', {}, 'DMA id'), el('dd', {}, i.dma_id),
@@ -581,8 +581,24 @@ async function openDma(dmaId) {
       { name: 'modelled', colour: css('--derived'), points: d.residuals.map((r) => [r.ts, r.modelled]) },
       { name: 'observed', colour: css('--syn'), points: d.residuals.map((r) => [r.ts, r.observed]) },
     ]),
-    el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic. Flagged when |modelled − observed| > 5 m; watch above 2 m.'),
+    el('p', { class: 'hint' }, statusMeaning(i.status, d.baseline)),
+    el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic.'),
   );
+}
+
+// What a DMA's status means, in the terms model/residuals.py scores it by:
+// against the DMA's own history, not one threshold for every DMA.
+function statusMeaning(status, b) {
+  if (!b) return '';
+  const rule = `Each solve compares modelled with observed pressure. The DMA is scored against its own last ${fmt.n(b.baseline_days)} days: |z| ≥ ${b.z_watch} is WATCH, ≥ ${b.z_leak} is SUSPECTED_LEAK.`;
+  if (status === 'UNKNOWN' || !status) {
+    const left = Math.max(0, b.min_samples - b.samples);
+    const eta = left * b.interval_s / 3600;
+    return `UNKNOWN: still learning what is normal here, ${fmt.n(b.samples)} of ${b.min_samples} residuals so far`
+      + (left ? ` (about ${fmt.n(eta, 1)} h more at one solve every ${fmt.n(b.interval_s / 60)} min).` : '; the next solve scores it.')
+      + ` ${rule}`;
+  }
+  return rule;
 }
 
 function closeDma() {
@@ -600,8 +616,38 @@ function drawMeters(fc) {
       color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
     }),
-    onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`),
+    onEachFeature: (f, lyr) => {
+      lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`);
+      // Read on click, not with the layer: thousands of points, few opened.
+      lyr.bindPopup(() => devicePopup(f.properties.kind, f.properties.id), { maxWidth: 380, minWidth: 300 });
+    },
   }).addTo(layers.meters);
+}
+
+function devicePopup(kind, id) {
+  const box = el('div', { class: 'device' }, el('strong', {}, id), el('div', { class: 'muted small' }, 'Loading ...'));
+  api(`/api/device/${kind}/${encodeURIComponent(id)}`).then((d) => {
+    const l = d.latest;
+    const rows = kind === 'meter'
+      ? [['Type', d.info.meter_type], ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
+        ['Litres (last reading)', l && fmt.n(l.litres, 1)], ['Flow', l && `${fmt.n(l.flow_lpm, 1)} L/min`],
+        ['Battery', l && l.battery_pct !== null ? `${l.battery_pct}%` : null],
+        [`Used, last ${d.hours} h`, `${fmt.n(d.series.reduce((t, r) => t + (r.litres || 0), 0))} L`]]
+      : [['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
+        ['Pressure', l && `${fmt.n(l.pressure_m, 1)} m`], ['Flow', l && `${fmt.n(l.flow_ls, 2)} L/s`]];
+    const series = kind === 'meter'
+      ? [{ name: 'litres', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.litres]) }]
+      : [{ name: 'pressure', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.pressure_m]) }];
+    box.replaceChildren(
+      el('strong', {}, id, el('span', { class: 'tag syn' }, 'synthetic')),
+      el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+      d.series.length
+        ? chart(kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)', series, { height: 110 })
+        : el('p', { class: 'muted small' }, `No readings in the last ${d.hours} h.`),
+    );
+  }).catch((err) => box.replaceChildren(el('strong', {}, id), el('div', { class: 'err' }, err.message)));
+  return box;
 }
 
 // ----------------------------------------------------------------- charts
