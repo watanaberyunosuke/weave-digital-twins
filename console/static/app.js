@@ -104,8 +104,11 @@ function renderHeader() {
     auth.replaceChildren();
     return;
   }
-  const names = { demo: 'Demo user', admin: 'Admin', public: 'Public view' };
-  const badge = el('span', { class: 'pill role' }, names[session.role] || names.public);
+  const names = { demo: 'Demo user', admin: 'Admin · live', public: 'Public view' };
+  const badge = el('span', {
+    class: `pill role ${session.role}`,
+    title: session.role === 'admin' ? 'Every step runs on the live stack.' : '',
+  }, names[session.role] || names.public);
   const loginBtn = (user, label) => el('button', { type: 'button', class: 'btn', onclick: () => openLogin(user) }, label);
   const buttons = session.role !== 'public'
     ? [el('button', { type: 'button', class: 'btn', onclick: logout }, 'Log out')]
@@ -138,13 +141,16 @@ function openLogin(user) {
   $('#login-dialog').showModal();
 }
 
+// The role changes what the server sends (admin links, container names), so
+// a login or logout re-reads all three rather than just the session.
 async function reloadSession() {
-  [state.session, state.actions] = await Promise.all([api('/api/session'), api('/api/actions')]);
+  [state.config, state.session, state.actions] = await Promise.all(
+    [api('/api/config'), api('/api/session'), api('/api/actions')]);
   state.selectedJob = null;
   state.jobOffset = 0;
   $('#job-log').textContent = '';
   renderHeader();
-  if (state.status) renderSteps(state.status);
+  await refreshStatus();
   if (state.tab === 'jobs') await loadJobs();
 }
 
@@ -163,11 +169,25 @@ $('#login-form').addEventListener('submit', async (ev) => {
     $('#login-code').value = '';
     $('#login-dialog').close();
     await reloadSession();
+    notify(user === 'admin'
+      ? 'Signed in as admin. Every step now runs on the live stack.'
+      : 'Signed in as the demo user. Safe steps run live; the rest are simulated.');
   } catch (err) {
     $('#login-err').textContent = err.message;
     $('#login-err').hidden = false;
   }
 });
+
+// A short note at the top of the page that clears itself: a login otherwise
+// changes little on screen, and a silent change reads as nothing happening.
+let noticeTimer = null;
+function notify(text) {
+  const box = $('#notice');
+  box.textContent = text;
+  box.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { box.hidden = true; }, 6000);
+}
 
 function renderHealth(st) {
   const pill = (label, probe, okText) => el(
@@ -224,7 +244,7 @@ function stepStates(st) {
 // What each role sees on an action button. Public viewers can look but not
 // run; a demo user's simulated actions say so before anything is clicked.
 function runButton(a, busy, job) {
-  const label = { real: 'Run', simulated: 'Try (simulated)', none: 'Run' }[a.run] || 'Run';
+  const label = { real: 'Run', simulated: 'Try (simulated)', none: 'Log in to run' }[a.run] || 'Run';
   const title = a.run === 'none' ? 'Log in as the demo user to try actions'
     : busy && a.run === 'real' ? `${job.label} is running` : a.description;
   return el('button', {

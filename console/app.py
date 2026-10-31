@@ -355,7 +355,19 @@ _status_cache: dict = {"at": 0.0, "body": None}
 
 
 @app.get("/api/status")
-async def status():
+async def status(request: Request):
+    body = await shared_status()
+    # Container names are the operator's: the public page shows them only to
+    # the admin login, from the same cached body everyone else gets.
+    if PUBLIC and not remote_admin(request):
+        body = body | {"containers": PUBLIC_CONTAINERS}
+    return body
+
+
+PUBLIC_CONTAINERS = {"ok": True, "value": [], "hidden": True}
+
+
+async def shared_status():
     # Probes have multi-second timeouts when a service is down, so they run
     # concurrently and the result is shared for a few seconds between tabs.
     if _status_cache["body"] and time.monotonic() - _status_cache["at"] < 5:
@@ -375,31 +387,29 @@ async def status():
 
 
 async def public_status() -> dict:
-    """The admin console's view, without container names.
+    """The admin console's view; status() hides its container names from all
+    but the admin login.
 
     The public console has no Docker socket, no schemas/ and no model file,
     and the Kafka, Connect and Flink endpoints are on the other host, so its
     own probes would misreport every step. With no relay configured it
     reports what it can see and marks the rest unavailable.
     """
-    hidden = {"ok": True, "value": [], "hidden": True}
     if RELAY_URL and (RELAY_TOKEN or RELAY_ADMIN_TOKEN):
         try:
             r = await relay_request("GET", "/api/relay/status", admin=not RELAY_TOKEN)
             r.raise_for_status()
-            body = r.json()
-            body["containers"] = hidden
-            return body
+            return r.json()
         except (HTTPException, httpx.HTTPError, ValueError) as exc:
             print(f"! relay status failed: {exc}")   # falls back to local probes
     gone = {"ok": False, "error": "not visible from the public console", "value": None}
     return {"db": await asyncio.to_thread(safe, probe_db), "topics": gone,
-            "connectors": gone, "flink": gone, "containers": hidden,
+            "connectors": gone, "flink": gone, "containers": PUBLIC_CONTAINERS,
             "model": gone, "schemas": gone, "expected_topics": TOPICS, "job": None}
 
 
 @app.get("/api/config")
-def config():
+def config(request: Request):
     providers = basemaps()
     ids = [b["id"] for b in providers]
     default = os.environ.get("CONSOLE_BASEMAP") or ("custom" if "custom" in ids else "none")
@@ -410,15 +420,20 @@ def config():
         "basemap_default": default if default in ids else "none",
         "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
         "mode": MODE,
-        # The admin tools and the GIS connection details are the operator's;
-        # the public page leaves them out rather than showing dead links.
-        **({} if PUBLIC else {
-            "kibana_url": os.environ.get("KIBANA_PUBLIC_URL", "http://localhost:5601"),
-            "flink_url": os.environ.get("FLINK_PUBLIC_URL", "http://localhost:9081"),
-            "control_center_url": os.environ.get("CONTROL_CENTER_PUBLIC_URL",
-                                                 "http://localhost:9021"),
-            "gis": gis_connections(),
-        }),
+        # The admin tools are the operator's, so the public page shows their
+        # links only to the admin login. The GIS connection details stay on
+        # the loopback console: they name the database host and its password.
+        **(admin_links() if role(request) == access.ADMIN else {}),
+        **({} if PUBLIC else {"gis": gis_connections()}),
+    }
+
+
+def admin_links() -> dict:
+    return {
+        "kibana_url": os.environ.get("KIBANA_PUBLIC_URL", "http://localhost:5601"),
+        "flink_url": os.environ.get("FLINK_PUBLIC_URL", "http://localhost:9081"),
+        "control_center_url": os.environ.get("CONTROL_CENTER_PUBLIC_URL",
+                                             "http://localhost:9021"),
     }
 
 
@@ -1286,7 +1301,7 @@ def relay_job(jid: str, since: int = Query(0, ge=0)):
 
 @app.get("/api/relay/status", dependencies=[Depends(relay_any_auth)])
 async def relay_status():
-    return await status()
+    return await shared_status()
 
 
 # The admin login's routes. Its token admits every action, so it is kept
