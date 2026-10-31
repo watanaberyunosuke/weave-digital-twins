@@ -217,6 +217,9 @@ pyrightconfig.json
 # CA certificates of an existing Elasticsearch cluster (machine-specific)
 elk/certs/*
 !elk/certs/.gitkeep
+# Confluent's compose stack, put in place by scripts/fetch-confluent-stack.sh
+/docker-compose.yml
+/vol/
 # Authenticator enrolment link from scripts/init-secrets.sh --totp; delete after scanning
 .weave-totp-enrol.txt
 # Session handoff notes from local tooling
