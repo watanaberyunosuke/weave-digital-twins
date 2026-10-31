@@ -40,9 +40,9 @@ residual calculation — stays the same.
 ## Quick start
 
 ```bash
-# Take Confluent's community compose stack into weave-stack, then overlay Weave
+# Take Confluent's compose stack into weave-stack, then overlay Weave
 git clone --depth 1 -b 8.2.0-post https://github.com/confluentinc/cp-all-in-one.git
-cp -R cp-all-in-one/cp-all-in-one-community weave-stack
+cp -R cp-all-in-one/cp-all-in-one weave-stack
 git clone https://github.com/watanaberyunosuke/weave-digital-twins.git
 # rsync rather than cp -r weave/*, which skips dotfiles such as .env.example.
 # .env is excluded so overlaying from a working copy never carries its
@@ -57,9 +57,9 @@ cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
 ./scripts/download-flink-connectors.sh
 
 # Start the stack
-docker compose up -d broker connect flink-jobmanager flink-taskmanager \
-    flink-sql-client postgres ingest-market ingest-hydrometry \
-    gis-loader simulator console featureserv
+docker compose up -d broker connect control-center flink-jobmanager \
+    flink-taskmanager flink-sql-client postgres ingest-market \
+    ingest-hydrometry gis-loader simulator console featureserv
 
 # Bootstrap (load GIS, derive synthetic assets, start generators, bring up ELK)
 ./scripts/bootstrap.sh
@@ -71,7 +71,15 @@ docker exec -it flink-sql-client sql-client.sh
   SOURCE '/sql/03_pipelines.sql';
 ```
 
-Visit the console at `http://localhost:8090`, Kibana at `http://localhost:5601` and Flink at `http://localhost:9081`.
+Visit the console at `http://localhost:8090`, Kibana at `http://localhost:5601`, Control Center at `http://localhost:9021` and Flink at `http://localhost:9081`.
+
+**Control Center** manages Kafka: the broker, topics, consumer lag, the
+Datagen connectors and Schema Registry subjects. It does not show Flink,
+which needs Confluent Manager for Apache Flink on Kubernetes; manage Flink
+jobs in the Flink UI. Control Center and Confluent Server are under the
+Confluent Enterprise License: without a key they run a 30-day trial, and a
+free developer licence covers a single-broker cluster such as this one
+indefinitely ([licences](https://docs.confluent.io/platform/current/installation/license.html)).
 
 The console shows the twin on a map (DMAs coloured by status, real pipes,
 facilities and gauges), telemetry freshness with each table labelled real or
