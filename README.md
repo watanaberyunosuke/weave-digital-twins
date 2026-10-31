@@ -45,15 +45,11 @@ endpoints asks for credentials; from another machine, use an SSH tunnel
 (`ssh -L 9021:localhost:9021 <host>`).
 
 ```bash
-# Take Confluent's compose stack into weave-stack, then overlay Weave
-git clone --depth 1 -b 8.2.0-post https://github.com/confluentinc/cp-all-in-one.git
-cp -R cp-all-in-one/cp-all-in-one weave-stack
+# The clone is the stack: Weave's override layers onto Confluent's compose
+# file, which the fetch puts in the root (git-ignored, re-run to refresh)
 git clone https://github.com/watanaberyunosuke/weave-digital-twins.git
-# rsync rather than cp -r weave/*, which skips dotfiles such as .env.example.
-# .env is excluded so overlaying from a working copy never carries its
-# credentials across, and re-running the overlay keeps the stack's own .env.
-rsync -a --exclude .git --exclude .env weave-digital-twins/ weave-stack/
-cd weave-stack
+cd weave-digital-twins
+./scripts/fetch-confluent-stack.sh
 
 # Point it at a region
 cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG

@@ -1,5 +1,5 @@
-# Weave — layered onto Confluent's cp-all-in-one compose file,
-# copied into a directory of its own (weave-stack in the README).
+# Weave — layered onto Confluent's cp-all-in-one compose file, which
+# scripts/fetch-confluent-stack.sh puts in the repository root (git-ignored).
 # Region settings come from .env (see .env.example); nothing here names a place.
 
 # Pinned so volume, network and image names don't follow whatever the
