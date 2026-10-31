@@ -32,6 +32,13 @@ from subgraph import element_name
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
 INTERVAL_S = int(os.environ.get("SIM_INTERVAL_S", "900"))
+# Only the latest run is read (residuals.py joins on run_id), so older results
+# are pruned each solve. Unpruned, a whole-network model writes about 240,000
+# rows a solve, several GB a day, and the table never shrank.
+RESULT_RETENTION_HOURS = float(os.environ.get("SIM_RESULT_RETENTION_HOURS", "24"))
+# Volumes initialised before 03_telemetry.sql indexed ts need it for the prune;
+# the primary key leads with run_id, so it can't serve a ts range.
+RESULT_TS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS sim_result_ts_idx ON twin.sim_result (ts)"
 # A reservoir's head is the ground level at its node plus this depth of
 # water. A fixed head only worked while every node sat at the same default
 # elevation; with a DEM, anything above it came out at negative pressure.
@@ -150,6 +157,7 @@ def simulate() -> str:
     print(f"  demands: {demands.meters} meters, {demands.silent} with no reading"
           f" in the last {DEMAND_WINDOW}; {sum(demands.by_node.values()):.6f} m³/s,"
           f" {unmodelled:.6f} of it at nodes outside the model")
+    started = time.monotonic()
     sim = wntr.sim.EpanetSimulator(wn)
     # EPANET's scratch files default to temp.* in the working directory, so
     # the --loop container and a --once run from the console would overwrite
@@ -170,14 +178,22 @@ def simulate() -> str:
         rows.append((run_id, now, "link", link_name, "flow",
                      float(flow[link_name].iloc[-1])))
 
+    solve_s = time.monotonic() - started
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
         cur.executemany(
             """INSERT INTO twin.sim_result
                  (run_id, ts, element_type, element_id, variable, value)
                VALUES (%s, %s, %s, %s, %s, %s)
                ON CONFLICT DO NOTHING""", rows)
+        cur.execute(RESULT_TS_INDEX_SQL)
+        cur.execute("DELETE FROM twin.sim_result WHERE ts < now() - make_interval(secs => %s)",
+                    (RESULT_RETENTION_HOURS * 3600,))
+        pruned = cur.rowcount
         conn.commit()
-    print(f"run {run_id}: wrote {len(rows)} simulated values")
+    # The solve time is logged because SIM_MAX_PIPES trades coverage for it:
+    # a solve longer than SIM_INTERVAL_S stretches the loop's cadence.
+    print(f"run {run_id}: solved in {solve_s:.0f} s, wrote {len(rows)} simulated values,"
+          f" pruned {pruned} older than {RESULT_RETENTION_HOURS:g} h")
     return run_id
 
 
@@ -277,11 +293,18 @@ def main() -> int:
 
     if args.loop:
         while True:
+            # Sleep the rest of the interval, not a whole one, so a larger
+            # model keeps the 15-minute cadence the baseline counts assume.
+            started = time.monotonic()
             try:
                 compute_residuals(simulate())
             except Exception as exc:
                 print(f"! simulation failed: {exc}")
-            time.sleep(INTERVAL_S)
+            elapsed = time.monotonic() - started
+            if elapsed > INTERVAL_S:
+                print(f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"
+                      " lower SIM_MAX_PIPES or raise the interval")
+            time.sleep(max(0.0, INTERVAL_S - elapsed))
 
     ap.error("pass --build, --once, --loop or --reset-baseline")
     return 1

@@ -142,6 +142,9 @@ CREATE TABLE twin.sim_result (
     value        DOUBLE PRECISION,
     PRIMARY KEY (run_id, ts, element_type, element_id, variable)
 );
+-- run_sim.py prunes by ts each solve (SIM_RESULT_RETENTION_HOURS), and the
+-- primary key leads with run_id, so ts needs its own index.
+CREATE INDEX sim_result_ts_idx ON twin.sim_result (ts);
 
 -- A row here makes a DMA's residual baseline start afresh from reset_at
 -- (run_sim.py --reset-baseline); '*' resets every DMA. run_sim.py creates it

@@ -19,7 +19,11 @@ from subgraph import Pipe, Selection, select_supplied_subgraph
 
 # Both the simulator and the seeder read these, so compose passes them to both
 # from .env; different values would seed DMAs the model does not reach.
-MAX_PIPES = int(os.environ.get("SIM_MAX_PIPES", "10000"))
+# 200,000 is above the whole network of the region loaded so far (156,180
+# pipes), so every DMA is modelled. Lower it on a small host: solves grow
+# faster than linearly (a 160,000-pipe test grid took about 3.5 minutes on two
+# cores, against 1 second for 10,000).
+MAX_PIPES = int(os.environ.get("SIM_MAX_PIPES", "200000"))
 # Reservoirs further than this from any node are left out. Snapping a
 # catchment dam onto whatever main is nearest, kilometres away, would put a
 # fixed head where there is none.
