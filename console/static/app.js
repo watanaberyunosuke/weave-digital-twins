@@ -641,15 +641,22 @@ function closeDma() {
 }
 
 const METER_CAP = 20000;
+// Two customer categories: residential, and everything else. The seeder's
+// 'bulk' meters are large non-residential users, so they count as commercial;
+// the tooltip and popup still give the stored type.
+const meterCategory = (type) => (type === 'residential' ? 'residential' : 'commercial');
+
 function drawMeters(fc) {
   layers.meters.clearLayers();
   if (!fc) return;
   L.geoJSON(fc, {
-    pointToLayer: (f, ll) => L.circleMarker(ll, {
-      radius: f.properties.kind === 'logger' ? 5 : 3,
-      color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
-      fillOpacity: 0.9, weight: 1.2,
-    }),
+    pointToLayer: (f, ll) => {
+      if (f.properties.kind === 'logger') {
+        return L.circleMarker(ll, { radius: 5, color: mcss('--syn'), fillColor: '#fff', fillOpacity: 0.9, weight: 1.2 });
+      }
+      const colour = mcss(meterCategory(f.properties.meter_type) === 'residential' ? '--syn' : '--meter-com');
+      return L.circleMarker(ll, { radius: 3, color: colour, fillColor: colour, fillOpacity: 0.9, weight: 1.2 });
+    },
     onEachFeature: (f, lyr) => {
       lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`);
       // Read on click, not with the layer: thousands of points, few opened.
@@ -663,7 +670,8 @@ function devicePopup(kind, id) {
   api(`/api/device/${kind}/${encodeURIComponent(id)}`).then((d) => {
     const l = d.latest;
     const rows = kind === 'meter'
-      ? [['Type', d.info.meter_type], ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
+      ? [['Customer', `${meterCategory(d.info.meter_type)}${d.info.meter_type !== meterCategory(d.info.meter_type) ? ` (${d.info.meter_type})` : ''}`],
+        ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
         ['Litres (last reading)', l && fmt.n(l.litres, 1)], ['Flow', l && `${fmt.n(l.flow_lpm, 1)} L/min`],
         ['Battery', l && l.battery_pct !== null ? `${l.battery_pct}%` : null],
         [`Used, last ${d.hours} h`, `${fmt.n(d.series.reduce((t, r) => t + (r.litres || 0), 0))} L`]]
