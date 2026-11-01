@@ -726,13 +726,35 @@ def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
 
 @app.get("/api/geo/facilities")
 def geo_facilities():
-    return geojson("""
+    """Facilities, each with the storage gauges matched to it and their latest
+    daily volume, so the asset's popup carries its level. Several gauges can
+    match one asset (a basin's separate cells), hence a list."""
+    if not db_or_503(storage_loaded):
+        storages = "'[]'::json"
+        join = ""
+    else:
+        storages = "COALESCE(g.storages, '[]'::json)"
+        join = """
+        LEFT JOIN (
+            SELECT s.facility_id, json_agg(json_build_object(
+                       'station_no', s.station_no, 'name', s.storage_name,
+                       'match_m', round(s.match_m), 'source', s.source,
+                       'ts', l.ts, 'volume_ml', l.volume_ml, 'percent_full', l.percent_full)
+                   ORDER BY s.storage_name) AS storages
+            FROM ref.storage_site s
+            LEFT JOIN LATERAL (
+                SELECT ts, volume_ml, percent_full FROM twin.storage_level
+                WHERE station_no = s.station_no ORDER BY ts DESC LIMIT 1) l ON true
+            WHERE s.facility_id IS NOT NULL
+            GROUP BY s.facility_id) g USING (facility_id)"""
+    return geojson(f"""
         SELECT json_build_object('type', 'Feature',
-               'geometry', ST_AsGeoJSON(geom, 6)::json,
+               'geometry', ST_AsGeoJSON(f.geom, 6)::json,
                'properties', json_build_object(
-                   'facility_id', facility_id, 'facility_type', facility_type,
-                   'name', name, 'capacity_ml', capacity_ml)) AS feature
-        FROM asset.facility
+                   'facility_id', f.facility_id, 'facility_type', f.facility_type,
+                   'name', f.name, 'capacity_ml', f.capacity_ml,
+                   'storages', {storages})) AS feature
+        FROM asset.facility f{join}
     """)
 
 
@@ -756,23 +778,21 @@ def storage_loaded() -> bool:
 
 @app.get("/api/geo/storages")
 def geo_storages():
-    """Real storage gauges with their latest daily volume, for the map."""
+    """Real storage gauges no asset matched, with their latest daily volume.
+    A matched gauge is reported with its asset by /api/geo/facilities."""
     if not db_or_503(storage_loaded):
         return JSONResponse({"type": "FeatureCollection", "features": []})
     return geojson("""
         SELECT json_build_object('type', 'Feature',
                'geometry', ST_AsGeoJSON(s.geom, 6)::json,
                'properties', json_build_object(
-                   'station_no', s.station_no, 'name', s.storage_name,
-                   'facility_id', s.facility_id, 'facility_name', f.name,
-                   'match_m', round(s.match_m), 'source', s.source,
+                   'station_no', s.station_no, 'name', s.storage_name, 'source', s.source,
                    'ts', l.ts, 'volume_ml', l.volume_ml, 'percent_full', l.percent_full)) AS feature
         FROM ref.storage_site s
-        LEFT JOIN asset.facility f USING (facility_id)
         LEFT JOIN LATERAL (
             SELECT ts, volume_ml, percent_full FROM twin.storage_level
             WHERE station_no = s.station_no ORDER BY ts DESC LIMIT 1) l ON true
-        WHERE s.geom IS NOT NULL
+        WHERE s.geom IS NOT NULL AND s.facility_id IS NULL
     """)
 
 

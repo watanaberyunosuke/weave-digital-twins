@@ -545,12 +545,17 @@ async function loadMap() {
   layers.facilities.clearLayers();
   if (facilities) {
     L.geoJSON(facilities, {
-      pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
-      }),
-      onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
-        ['Type', f.properties.facility_type], ['Capacity', f.properties.capacity_ml && `${fmt.n(f.properties.capacity_ml)} ML`],
-      ])),
+      // An asset with a storage gauge gets a ring in the real-data colour,
+      // since its level is now only in its popup.
+      pointToLayer: (f, ll) => (f.properties.storages.length
+        ? L.circleMarker(ll, {
+          radius: 7, color: mcss('--real'), weight: 2.5, fillColor: mcss('--facility'), fillOpacity: 0.9,
+        })
+        : L.circleMarker(ll, {
+          radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
+        })),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => facilityPopup(f.properties),
+        f.properties.storages.length ? { maxWidth: 380, minWidth: 300 } : {}),
     }).addTo(layers.facilities);
   }
 
@@ -568,6 +573,7 @@ async function loadMap() {
   layers.storages.clearLayers();
   if (storages) {
     L.geoJSON(storages, {
+      // Only gauges no asset matched; a matched one is in its asset's popup.
       // On the shared canvas like everything else, so meters still draw over
       // it; larger than a facility, with a heavy white ring, to read apart.
       pointToLayer: (f, ll) => L.circleMarker(ll, {
@@ -684,35 +690,50 @@ function drawMeters(fc) {
   }).addTo(layers.meters);
 }
 
+function facilityPopup(p) {
+  const box = popupHtml(p.name || p.facility_id, [
+    ['Type', p.facility_type], ['Capacity', p.capacity_ml && `${fmt.n(p.capacity_ml)} ML`],
+  ]);
+  p.storages.forEach((s) => box.append(
+    el('div', { class: 'small' }, el('strong', {}, `Storage level: ${s.name}`), el('span', { class: 'tag real' }, 'real')),
+    storageLevel(s, `${s.station_no}, ${fmt.n(s.match_m)} m away`,
+      'Percent full needs this asset to publish a capacity.'),
+  ));
+  return box;
+}
+
+// A gauge no asset matched, so it has no capacity and its own marker.
 function storagePopup(p) {
-  const box = el('div', { class: 'device' }, el('strong', {}, p.name), el('div', { class: 'muted small' }, 'Loading ...'));
-  const rows = [
-    ['Latest', p.volume_ml === null ? null : `${fmt.n(p.volume_ml)} ML`],
-    ['Full', p.percent_full === null ? null : `${fmt.n(p.percent_full, 1)}%`],
+  return el('div', {},
+    el('strong', {}, p.name, el('span', { class: 'tag real' }, 'real')),
+    storageLevel(p, p.station_no, 'No matching asset, so no capacity for percent full.'));
+}
+
+// One gauge's latest daily volume and its recent series, filled in when the
+// series arrives so the popup opens at once.
+function storageLevel(s, gauge, noPercentNote) {
+  const kv = el('dl', { class: 'kv' }, ...[
+    ['Latest', s.volume_ml === null ? null : `${fmt.n(s.volume_ml)} ML`],
+    ['Full', s.percent_full === null ? null : `${fmt.n(s.percent_full, 1)}%`],
     // Daily means: the day is the reading, the time of day is meaningless.
-    ['As of', p.ts && fmt.date(p.ts)],
-    ['Asset', p.facility_id && `${p.facility_name || p.facility_id} (${fmt.n(p.match_m)} m away)`],
-    ['Gauge', p.station_no],
-    ['Source', p.source],
-  ];
-  api(`/api/storage/${encodeURIComponent(p.station_no)}`).then((d) => {
+    ['As of', s.ts && fmt.date(s.ts)],
+    ['Gauge', gauge],
+    ['Source', s.source],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
+  const box = el('div', {}, kv, el('div', { class: 'muted small' }, 'Loading ...'));
+  api(`/api/storage/${encodeURIComponent(s.station_no)}`).then((d) => {
     box.replaceChildren(
-      el('strong', {}, p.name, el('span', { class: 'tag real' }, 'real')),
-      el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
-        .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+      kv,
       d.series.length
         ? chart(`Daily volume, last ${d.days} days (ML)`,
           [{ name: 'volume', colour: css('--real'), points: d.series.map((r) => [r.ts, r.volume_ml]) }], { height: 110 })
         : el('p', { class: 'muted small' }, `No values in the last ${d.days} days.`),
       // Percent full needs a capacity, which only some asset layers publish.
       // (Spread, because replaceChildren() would print a null as "null".)
-      ...(p.percent_full === null
-        ? [el('p', { class: 'muted small' }, p.facility_id
-          ? 'Percent full needs the matched asset to publish a capacity.'
-          : 'No matching asset, so no capacity for percent full.')]
-        : []),
+      ...(s.percent_full === null ? [el('p', { class: 'muted small' }, noPercentNote)] : []),
     );
-  }).catch((err) => box.replaceChildren(el('strong', {}, p.name), el('div', { class: 'err' }, err.message)));
+  }).catch((err) => box.replaceChildren(kv, el('div', { class: 'err' }, err.message)));
   return box;
 }
 
