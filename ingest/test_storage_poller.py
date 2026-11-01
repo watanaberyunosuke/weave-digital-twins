@@ -4,7 +4,8 @@ service's (header row, then rows; values as ts_id blocks)."""
 import unittest
 from datetime import datetime, timezone
 
-from storage_poller import Series, parse_bbox, parse_series_list, parse_values
+from storage_poller import (Series, choose_match, name_words, parse_bbox, parse_series_list,
+                            parse_values)
 
 NOW = datetime(2026, 11, 1, tzinfo=timezone.utc)
 HEADER = ["station_name", "station_no", "ts_id", "station_latitude", "station_longitude", "from", "to"]
@@ -57,6 +58,31 @@ class ValuesTest(unittest.TestCase):
         payload = [{"ts_id": "9", "columns": "Value, Timestamp",
                     "data": [[5.0, "2026-10-31T00:00:00.000+10:00"]]}]
         self.assertEqual(parse_values(payload)["9"][0][1], 5.0)
+
+
+class MatchTest(unittest.TestCase):
+    # (facility_id, name, capacity_ml, distance_m), nearest first
+    def test_name_beats_nearness_and_reaches_a_mid_lake_point(self):
+        cands = [("basin", "Gauge Hill Basin", None, 300.0),
+                 ("dam", "THOMSON RESERVOIR", 1123089, 7712.0)]
+        self.assertEqual(choose_match("THOMSON RESERVOIR HG", cands, 738410)[0], "dam")
+
+    def test_small_asset_below_the_volume_is_skipped(self):
+        cands = [("basin", "Melton RWP Irrigation Storage No.2", 143, 1489.0)]
+        self.assertIsNone(choose_match("WERRIBEE R MELTON RS", cands, 14424))
+
+    def test_nearest_within_the_short_distance_without_a_name(self):
+        cands = [("sr", "Hilltop tank", None, 2.0)]
+        self.assertEqual(choose_match("MITCHAM MR WR10", cands, 171)[0], "sr")
+
+    def test_far_asset_without_a_shared_name_is_not_matched(self):
+        cands = [("other", "TOOROURRONG RESERVOIR", None, 9066.0)]
+        self.assertIsNone(choose_match("YAN YEAN RES HG", cands, 20000))
+
+    def test_generic_words_do_not_count(self):
+        self.assertEqual(name_words("YARRA RIV-UY RES HG"), {"YARRA"})
+        self.assertEqual(name_words("O'SHANNASSY RESERVOIR"), {"OSHANNASSY"})
+        self.assertEqual(name_words("Upper Stony Creek No. 1 Dam"), {"STONY"})
 
 
 class BboxTest(unittest.TestCase):

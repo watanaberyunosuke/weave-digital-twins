@@ -377,7 +377,8 @@ def load_layer(conn, name: str, cfg: dict, extent: dict | None, hints: dict,
                                ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)),
                                %s)
                        ON CONFLICT (facility_id) DO UPDATE SET
-                         name = EXCLUDED.name, geom = EXCLUDED.geom""",
+                         name = EXCLUDED.name, geom = EXCLUDED.geom,
+                         capacity_ml = EXCLUDED.capacity_ml, props = EXCLUDED.props""",
                     (
                         f"{name}:{fid}", cfg.get("facility_type", name),
                         pick(props, hints["asset_name"]),

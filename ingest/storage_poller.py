@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -53,6 +54,17 @@ BACKFILL_DAYS = int(os.environ.get("STORAGE_BACKFILL_DAYS", "90"))
 MATCH_M = float(os.environ.get("STORAGE_MATCH_M", "1500"))
 # Series whose last value is older than this are retired gauges.
 STALE_DAYS = int(os.environ.get("STORAGE_STALE_DAYS", "30"))
+# A gauge and an asset whose names share a distinctive word are matched up to
+# this far apart: a dam's point often sits mid-lake, kilometres from the
+# gauge on its wall.
+NAME_MATCH_M = float(os.environ.get("STORAGE_NAME_MATCH_M", "15000"))
+# Words too common in storage names to identify one.
+GENERIC_WORDS = {
+    "RES", "RESERVOIR", "RESERV", "DAM", "RIV", "RIVER", "LAKE", "STORAGE", "BASIN",
+    "CREEK", "WEIR", "SERVICE", "EMBANKMENT", "MAIN", "SADDLE", "SECONDARY",
+    "SUBSIDIARY", "UPPER", "LOWER", "EAST", "WEST", "NORTH", "SOUTH", "NEW", "OLD",
+    "LEVEL", "TANK", "TANKS", "PRIMARY", "IRRIGATION",
+}
 # Volume above this share of the matched asset's capacity rejects the match;
 # a little over 100% is normal when a storage spills.
 OVER_CAPACITY = 1.05
@@ -126,6 +138,33 @@ def parse_values(payload) -> dict[str, list[tuple[datetime, float]]]:
     return out
 
 
+def name_words(name: str | None) -> set[str]:
+    """The distinctive words of a storage or asset name."""
+    words = re.findall(r"[A-Z]+", (name or "").upper().replace("'", ""))
+    return {w for w in words if len(w) > 2 and w not in GENERIC_WORDS}
+
+
+def choose_match(gauge_name: str, candidates: list[tuple], max_volume: float | None):
+    """The asset a gauge measures, or None.
+
+    candidates are (facility_id, name, capacity_ml, distance_m), nearest first.
+    A shared distinctive word within NAME_MATCH_M beats mere nearness, which
+    picks a small basin beside a big dam; otherwise the nearest asset within
+    MATCH_M. Either way an asset whose capacity is below the storage's volume
+    is skipped: it is not the storage.
+    """
+    def fits(c):
+        return not (c[2] and max_volume and max_volume > OVER_CAPACITY * float(c[2]))
+    words = name_words(gauge_name)
+    for c in candidates:
+        if c[3] <= NAME_MATCH_M and words & name_words(c[1]) and fits(c):
+            return c
+    for c in candidates:
+        if c[3] <= MATCH_M and fits(c):
+            return c
+    return None
+
+
 def parse_ts(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
@@ -194,16 +233,20 @@ SCHEMA_SQL = """
     CREATE INDEX IF NOT EXISTS storage_level_station_idx ON twin.storage_level (station_no, ts DESC);
 """
 
-# Nearest supply asset of any storage kind. Capacity comes from the asset
-# layer when it publishes one; percent full is left empty otherwise rather
-# than guessed.
-MATCH_SQL = """
-    SELECT f.facility_id, f.capacity_ml,
-           ST_Distance(f.geom::geography, ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography)
-    FROM asset.facility f
-    WHERE f.facility_type IN ('service_reservoir', 'storage_dam', 'osm_storage', 'registered_storage')
-    ORDER BY f.geom <-> ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326), f.facility_id
-    LIMIT 1
+# Storage-type assets near a gauge, nearest first, for choose_match().
+# Capacity comes from the asset layer when it publishes one; percent full is
+# left empty otherwise rather than guessed.
+CANDIDATES_SQL = """
+    SELECT facility_id, name, capacity_ml, dist FROM (
+        SELECT f.facility_id, f.name, f.capacity_ml,
+               ST_Distance(f.geom::geography,
+                           ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography) AS dist
+        FROM asset.facility f
+        WHERE f.facility_type IN ('service_reservoir', 'storage_dam', 'osm_storage', 'registered_storage')
+        ORDER BY f.geom <-> ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326), f.facility_id
+        LIMIT 30) near
+    WHERE dist <= %(m)s
+    ORDER BY dist, facility_id
 """
 
 
@@ -226,20 +269,21 @@ def run_once(list_only: bool = False) -> int:
         since = {no: ts for no, ts in cur.fetchall()}
         values = fetch_values(series, since)
 
-        written = unmatched = rejected = 0
+        written = unmatched = 0
         for s in series:
-            cur.execute(MATCH_SQL, {"lat": s.lat, "lon": s.lon})
-            hit = cur.fetchone()
-            matched = bool(hit) and hit[2] <= MATCH_M
+            cur.execute(CANDIDATES_SQL, {"lat": s.lat, "lon": s.lon,
+                                         "m": max(MATCH_M, NAME_MATCH_M)})
             vols = [v for _, v in values.get(s.ts_id, [])]
-            # A storage holding more than its asset's capacity is not that
-            # asset: the nearest one was a smaller storage beside it (a gauge
-            # matched to a recycled-water basin read 10,000% full). The link
-            # is dropped rather than kept with a wrong percentage.
-            if matched and hit[1] and vols and max(vols) > OVER_CAPACITY * float(hit[1]):
-                matched = False
-                rejected += 1
-            facility_id, capacity = (hit[0], hit[1]) if matched else (None, None)
+            # Without this run's values (a gauge already up to date), the
+            # latest stored volume decides whether an asset is big enough.
+            if not vols:
+                cur.execute("SELECT max(volume_ml) FROM twin.storage_level WHERE station_no = %s",
+                            (s.station_no,))
+                stored = cur.fetchone()[0]
+                vols = [stored] if stored is not None else []
+            hit = choose_match(s.name, cur.fetchall(), max(vols) if vols else None)
+            matched = hit is not None
+            facility_id, capacity = (hit[0], hit[2]) if matched else (None, None)
             unmatched += not matched
             # The gauge is the site of record; the asset link is a best guess
             # by distance, kept with its distance so it can be judged.
@@ -250,7 +294,7 @@ def run_once(list_only: bool = False) -> int:
                 ON CONFLICT (station_no) DO UPDATE SET
                     storage_name = EXCLUDED.storage_name, facility_id = EXCLUDED.facility_id,
                     match_m = EXCLUDED.match_m, source = EXCLUDED.source, geom = EXCLUDED.geom
-            """, (s.station_no, s.name, facility_id, hit[2] if matched else None,
+            """, (s.station_no, s.name, facility_id, hit[3] if matched else None,
                   source, s.lon, s.lat))
             rows = [(ts, s.name, vol, capacity,
                      100.0 * vol / float(capacity) if capacity else None, s.station_no)
@@ -274,9 +318,9 @@ def run_once(list_only: bool = False) -> int:
             """, {"c": capacity, "s": s.station_no})
             written += len(rows)
         conn.commit()
-    log.info("wrote %s daily values; %s storages have no supply asset within %g m"
-             " (%s of them because the nearest asset's capacity is below their volume)",
-             written, unmatched, MATCH_M, rejected)
+    log.info("wrote %s daily values; %s storages matched no asset (by name within %g m,"
+             " or nearest within %g m, with capacity at least their volume)",
+             written, unmatched, NAME_MATCH_M, MATCH_M)
     return written
 
 
