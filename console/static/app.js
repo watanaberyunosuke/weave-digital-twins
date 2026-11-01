@@ -659,6 +659,11 @@ const METER_CAP = 20000;
 // 'bulk' meters are large non-residential users, so they count as commercial;
 // the tooltip and popup still give the stored type.
 const meterCategory = (type) => (type === 'residential' ? 'residential' : 'commercial');
+// The category, with the stored type after it when they differ: "commercial (bulk)".
+function customerLabel(type) {
+  const category = meterCategory(type);
+  return type === category ? category : `${category} (${type})`;
+}
 
 function drawMeters(fc) {
   layers.meters.clearLayers();
@@ -716,7 +721,7 @@ function devicePopup(kind, id) {
   api(`/api/device/${kind}/${encodeURIComponent(id)}`).then((d) => {
     const l = d.latest;
     const rows = kind === 'meter'
-      ? [['Customer', `${meterCategory(d.info.meter_type)}${d.info.meter_type !== meterCategory(d.info.meter_type) ? ` (${d.info.meter_type})` : ''}`],
+      ? [['Customer', customerLabel(d.info.meter_type)],
         ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
         ['Litres (last reading)', l && fmt.n(l.litres, 1)], ['Flow', l && `${fmt.n(l.flow_lpm, 1)} L/min`],
         ['Battery', l && l.battery_pct !== null ? `${l.battery_pct}%` : null],

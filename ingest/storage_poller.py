@@ -250,6 +250,57 @@ CANDIDATES_SQL = """
 """
 
 
+def match_gauge(cur, s: Series, vols: list[float]):
+    """choose_match() for one gauge, against the assets near it."""
+    cur.execute(CANDIDATES_SQL, {"lat": s.lat, "lon": s.lon, "m": max(MATCH_M, NAME_MATCH_M)})
+    candidates = cur.fetchall()
+    # Without this run's values (a gauge already up to date), the latest
+    # stored volume decides whether an asset is big enough.
+    if not vols:
+        cur.execute("SELECT max(volume_ml) FROM twin.storage_level WHERE station_no = %s",
+                    (s.station_no,))
+        stored = cur.fetchone()[0]
+        vols = [stored] if stored is not None else []
+    return choose_match(s.name, candidates, max(vols) if vols else None)
+
+
+def write_gauge(cur, s: Series, values: list, source: str) -> tuple[int, bool]:
+    """Register one gauge, write its new days, and return (rows, matched)."""
+    hit = match_gauge(cur, s, [v for _, v in values])
+    facility_id, capacity, match_m = (hit[0], hit[2], hit[3]) if hit else (None, None, None)
+    # The gauge is the site of record; the asset link is a best guess, kept
+    # with its distance so it can be judged.
+    cur.execute("""
+        INSERT INTO ref.storage_site
+            (station_no, storage_name, facility_id, match_m, source, geom, synthetic)
+        VALUES (%s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), false)
+        ON CONFLICT (station_no) DO UPDATE SET
+            storage_name = EXCLUDED.storage_name, facility_id = EXCLUDED.facility_id,
+            match_m = EXCLUDED.match_m, source = EXCLUDED.source, geom = EXCLUDED.geom
+    """, (s.station_no, s.name, facility_id, match_m, source, s.lon, s.lat))
+    rows = [(ts, s.name, vol, capacity,
+             100.0 * vol / float(capacity) if capacity else None, s.station_no)
+            for ts, vol in values]
+    # A re-read day overwrites itself: the daily mean can be revised.
+    cur.executemany("""
+        INSERT INTO twin.storage_level
+            (ts, storage_name, volume_ml, capacity_ml, percent_full, station_no, is_synthetic)
+        VALUES (%s, %s, %s, %s, %s, %s, false)
+        ON CONFLICT (ts, storage_name) DO UPDATE SET
+            volume_ml = EXCLUDED.volume_ml, capacity_ml = EXCLUDED.capacity_ml,
+            percent_full = EXCLUDED.percent_full, station_no = EXCLUDED.station_no
+    """, rows)
+    # Earlier days take the current match's capacity too, so a corrected or
+    # newly published capacity reaches the whole history.
+    cur.execute("""
+        UPDATE twin.storage_level
+        SET capacity_ml = %(c)s,
+            percent_full = CASE WHEN %(c)s > 0 THEN 100.0 * volume_ml / %(c)s END
+        WHERE station_no = %(s)s AND capacity_ml IS DISTINCT FROM %(c)s
+    """, {"c": capacity, "s": s.station_no})
+    return len(rows), hit is not None
+
+
 def run_once(list_only: bool = False) -> int:
     bbox = parse_bbox(require_env("STORAGE_BBOX", "the area to keep, xmin,ymin,xmax,ymax"))
     series = list_series(bbox)
@@ -266,57 +317,14 @@ def run_once(list_only: bool = False) -> int:
         cur.execute(SCHEMA_SQL)
         cur.execute("SELECT station_no, max(ts) FROM twin.storage_level"
                     " WHERE station_no IS NOT NULL GROUP BY 1")
-        since = {no: ts for no, ts in cur.fetchall()}
+        since = dict(cur.fetchall())
         values = fetch_values(series, since)
 
         written = unmatched = 0
         for s in series:
-            cur.execute(CANDIDATES_SQL, {"lat": s.lat, "lon": s.lon,
-                                         "m": max(MATCH_M, NAME_MATCH_M)})
-            vols = [v for _, v in values.get(s.ts_id, [])]
-            # Without this run's values (a gauge already up to date), the
-            # latest stored volume decides whether an asset is big enough.
-            if not vols:
-                cur.execute("SELECT max(volume_ml) FROM twin.storage_level WHERE station_no = %s",
-                            (s.station_no,))
-                stored = cur.fetchone()[0]
-                vols = [stored] if stored is not None else []
-            hit = choose_match(s.name, cur.fetchall(), max(vols) if vols else None)
-            matched = hit is not None
-            facility_id, capacity = (hit[0], hit[2]) if matched else (None, None)
+            n, matched = write_gauge(cur, s, values.get(s.ts_id, []), source)
+            written += n
             unmatched += not matched
-            # The gauge is the site of record; the asset link is a best guess
-            # by distance, kept with its distance so it can be judged.
-            cur.execute("""
-                INSERT INTO ref.storage_site
-                    (station_no, storage_name, facility_id, match_m, source, geom, synthetic)
-                VALUES (%s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), false)
-                ON CONFLICT (station_no) DO UPDATE SET
-                    storage_name = EXCLUDED.storage_name, facility_id = EXCLUDED.facility_id,
-                    match_m = EXCLUDED.match_m, source = EXCLUDED.source, geom = EXCLUDED.geom
-            """, (s.station_no, s.name, facility_id, hit[3] if matched else None,
-                  source, s.lon, s.lat))
-            rows = [(ts, s.name, vol, capacity,
-                     100.0 * vol / float(capacity) if capacity else None, s.station_no)
-                    for ts, vol in values.get(s.ts_id, [])]
-            # A re-read day overwrites itself: the daily mean can be revised.
-            cur.executemany("""
-                INSERT INTO twin.storage_level
-                    (ts, storage_name, volume_ml, capacity_ml, percent_full, station_no, is_synthetic)
-                VALUES (%s, %s, %s, %s, %s, %s, false)
-                ON CONFLICT (ts, storage_name) DO UPDATE SET
-                    volume_ml = EXCLUDED.volume_ml, capacity_ml = EXCLUDED.capacity_ml,
-                    percent_full = EXCLUDED.percent_full, station_no = EXCLUDED.station_no
-            """, rows)
-            # Earlier days take the current match's capacity too, so a
-            # corrected or newly published capacity reaches the whole history.
-            cur.execute("""
-                UPDATE twin.storage_level
-                SET capacity_ml = %(c)s,
-                    percent_full = CASE WHEN %(c)s > 0 THEN 100.0 * volume_ml / %(c)s END
-                WHERE station_no = %(s)s AND capacity_ml IS DISTINCT FROM %(c)s
-            """, {"c": capacity, "s": s.station_no})
-            written += len(rows)
         conn.commit()
     log.info("wrote %s daily values; %s storages matched no asset (by name within %g m,"
              " or nearest within %g m, with capacity at least their volume)",
