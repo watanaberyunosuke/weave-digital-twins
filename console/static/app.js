@@ -30,6 +30,7 @@ const fmt = {
   n: (v, d = 0) => (v === null || v === undefined ? '—' : Number(v).toLocaleString(undefined, { maximumFractionDigits: d })),
   ts: (v) => (v ? new Date(v).toLocaleString() : '—'),
   time: (v) => (v ? new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'),
+  date: (v) => (v ? new Date(v).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }) : '—'),
   age: (v) => {
     if (!v) return '—';
     const s = (Date.now() - new Date(v).getTime()) / 1000;
@@ -683,7 +684,8 @@ function storagePopup(p) {
   const rows = [
     ['Latest', p.volume_ml === null ? null : `${fmt.n(p.volume_ml)} ML`],
     ['Full', p.percent_full === null ? null : `${fmt.n(p.percent_full, 1)}%`],
-    ['As of', p.ts && fmt.ts(p.ts)],
+    // Daily means: the day is the reading, the time of day is meaningless.
+    ['As of', p.ts && fmt.date(p.ts)],
     ['Asset', p.facility_id && `${p.facility_name || p.facility_id} (${fmt.n(p.match_m)} m away)`],
     ['Gauge', p.station_no],
     ['Source', p.source],
@@ -698,7 +700,12 @@ function storagePopup(p) {
           [{ name: 'volume', colour: css('--real'), points: d.series.map((r) => [r.ts, r.volume_ml]) }], { height: 110 })
         : el('p', { class: 'muted small' }, `No values in the last ${d.days} days.`),
       // Percent full needs a capacity, which only some asset layers publish.
-      p.percent_full === null ? el('p', { class: 'muted small' }, 'Percent full needs the matched asset to publish a capacity.') : null,
+      // (Spread, because replaceChildren() would print a null as "null".)
+      ...(p.percent_full === null
+        ? [el('p', { class: 'muted small' }, p.facility_id
+          ? 'Percent full needs the matched asset to publish a capacity.'
+          : 'No matching asset, so no capacity for percent full.')]
+        : []),
     );
   }).catch((err) => box.replaceChildren(el('strong', {}, p.name), el('div', { class: 'err' }, err.message)));
   return box;
@@ -767,8 +774,10 @@ function chart(title, series, { height = 130 } = {}) {
     add('line', { x1: pad.l, x2: W - pad.r, y1: sy(v), y2: sy(v), class: 'axis', 'stroke-dasharray': '2 3' });
     add('text', { x: pad.l - 4, y: sy(v) + 3, 'text-anchor': 'end', class: 'lbl' }, fmt.n(v, Math.abs(y1 - y0) < 10 ? 1 : 0));
   });
-  add('text', { x: pad.l, y: H - 4, class: 'lbl' }, fmt.time(x0));
-  add('text', { x: W - pad.r, y: H - 4, 'text-anchor': 'end', class: 'lbl' }, fmt.time(x1));
+  // Times suit a day's chart; a longer span needs dates to be read at all.
+  const xlabel = x1 - x0 > 36 * 3600e3 ? fmt.date : fmt.time;
+  add('text', { x: pad.l, y: H - 4, class: 'lbl' }, xlabel(x0));
+  add('text', { x: W - pad.r, y: H - 4, 'text-anchor': 'end', class: 'lbl' }, xlabel(x1));
 
   series.forEach((s, idx) => {
     const p = s.points.filter(([, v]) => v !== null && v !== undefined)
