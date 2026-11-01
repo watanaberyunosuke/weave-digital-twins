@@ -159,8 +159,10 @@ async function logout() {
   await reloadSession();
 }
 
+// Cancel is type="button": as the form's first submit button it was also its
+// default, so Enter in the password field cancelled instead of logging in.
+$('#login-cancel').addEventListener('click', () => $('#login-dialog').close());
 $('#login-form').addEventListener('submit', async (ev) => {
-  if (ev.submitter?.value !== 'login') return;
   ev.preventDefault();
   try {
     const user = $('#login-form').dataset.user || 'demo';
@@ -201,7 +203,8 @@ function renderHealth(st) {
     pill('Kafka', st.topics, `${(st.topics.value || []).length} topics`),
     pill('Connect', st.connectors, `${(st.connectors.value || []).length} connectors`),
     pill('Flink', st.flink, `${(st.flink.value || []).length} jobs`),
-    st.containers.hidden ? null : pill('Docker', st.containers, 'socket reachable'),
+    // replaceChildren() would print a null as the text "null".
+    ...(st.containers.hidden ? [] : [pill('Docker', st.containers, 'socket reachable')]),
   );
 }
 
@@ -443,6 +446,11 @@ async function pollJob() {
 // -------------------------------------------------------------------- map
 const map = L.map('map', { zoomControl: true, preferCanvas: true, attributionControl: true });
 map.setView([0, 0], 2);
+// Points get their own pane and canvas above the overlay pane. On one shared
+// canvas a click goes to the last shape drawn under the cursor, and the DMA
+// polygons are drawn after the meters, so a meter click opened its DMA.
+map.createPane('points').style.zIndex = 450;
+const pointRenderer = L.canvas({ pane: 'points' });
 const layers = {
   pipes: L.layerGroup().addTo(map),
   dmas: L.layerGroup().addTo(map),
@@ -454,6 +462,9 @@ const layers = {
 // basemap is dark so pipes and markers stay readable on it.
 const mcss = (name) => getComputedStyle($('#map')).getPropertyValue(name).trim();
 const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK: '--leak' }[s] || '--unknown');
+// The stored status stays UNKNOWN (model/residuals.py, twin.dma_latest, Kibana);
+// only the page says what it means, which reads less like a fault.
+const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECTED LEAK' }[s] || 'INSUFFICIENT DATA');
 
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
@@ -477,7 +488,6 @@ async function loadMap() {
     api('/api/geo/gauges').catch(() => null),
     api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
-  drawMeters(meters);
 
   layers.pipes.clearLayers();
   if (pipes) {
@@ -506,7 +516,7 @@ async function loadMap() {
         fillColor: statusColour(f.properties.status),
       }),
       onEachFeature: (f, lyr) => {
-        lyr.bindTooltip(`${f.properties.dma_id} · ${f.properties.status}`, { sticky: true });
+        lyr.bindTooltip(`${f.properties.dma_id} · ${statusLabel(f.properties.status)}`, { sticky: true });
         lyr.on('click', () => openDma(f.properties.dma_id));
       },
     }).addTo(layers.dmas);
@@ -516,6 +526,7 @@ async function loadMap() {
   if (facilities) {
     L.geoJSON(facilities, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
+        renderer: pointRenderer,
         radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
@@ -528,6 +539,7 @@ async function loadMap() {
   if (gauges) {
     L.geoJSON(gauges, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
+        renderer: pointRenderer,
         radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
@@ -535,6 +547,8 @@ async function loadMap() {
       ])),
     }).addTo(layers.gauges);
   }
+  // Last, so a meter beside a facility or gauge stays clickable on the shared points canvas.
+  drawMeters(meters);
 
   const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities, layers.gauges].flatMap((g) => g.getLayers()));
   const empty = !all.getLayers().length;
@@ -567,7 +581,7 @@ async function openDma(dmaId) {
   drawer.replaceChildren(
     el('header', {},
       el('div', {}, el('h3', {}, i.name || i.dma_id, el('span', { class: 'tag syn' }, 'synthetic')),
-        el('span', { class: `status ${i.status || ''}` }, i.status || 'NO STATUS')),
+        el('span', { class: `status ${i.status || 'UNKNOWN'}`, title: statusMeaning(i.status, d.baseline) }, statusLabel(i.status))),
       el('button', { class: 'btn ghost', onclick: closeDma, 'aria-label': 'Close' }, '×')),
     el('dl', { class: 'kv' },
       el('dt', {}, 'DMA id'), el('dd', {}, i.dma_id),
@@ -581,8 +595,29 @@ async function openDma(dmaId) {
       { name: 'modelled', colour: css('--derived'), points: d.residuals.map((r) => [r.ts, r.modelled]) },
       { name: 'observed', colour: css('--syn'), points: d.residuals.map((r) => [r.ts, r.observed]) },
     ]),
-    el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic. Flagged when |modelled − observed| > 5 m; watch above 2 m.'),
+    el('p', { class: 'hint' }, statusMeaning(i.status, d.baseline)),
+    el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic.'),
   );
+}
+
+// What a DMA's status means, in the terms model/residuals.py scores it by:
+// against the DMA's own history, not one threshold for every DMA.
+function statusMeaning(status, b) {
+  if (!b) return '';
+  const rule = `Each solve compares modelled with observed pressure. The DMA is scored against its own last ${fmt.n(b.baseline_days)} days: |z| ≥ ${b.z_watch} is WATCH, ≥ ${b.z_leak} is SUSPECTED_LEAK.`;
+  if ((status === 'UNKNOWN' || !status) && b.any_run && !b.in_last_run) {
+    return 'Insufficient data: the last solve did not score this DMA, so it is not learning a baseline. Either the model '
+      + 'has no junction inside it (the model keeps the SIM_MAX_PIPES pipes nearest the reservoirs; raising it '
+      + `brings more DMAs in), or its loggers sent nothing in the last 30 minutes. ${rule}`;
+  }
+  if (status === 'UNKNOWN' || !status) {
+    const left = Math.max(0, b.min_samples - b.samples);
+    const eta = left * b.interval_s / 3600;
+    return `Insufficient data: still learning what is normal here, ${fmt.n(b.samples)} of ${b.min_samples} residuals so far`
+      + (left ? ` (about ${fmt.n(eta, 1)} h more at one solve every ${fmt.n(b.interval_s / 60)} min).` : '; the next solve scores it.')
+      + ` ${rule}`;
+  }
+  return rule;
 }
 
 function closeDma() {
@@ -596,12 +631,43 @@ function drawMeters(fc) {
   if (!fc) return;
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
+      renderer: pointRenderer,
       radius: f.properties.kind === 'logger' ? 5 : 3,
       color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
     }),
-    onEachFeature: (f, lyr) => lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`),
+    onEachFeature: (f, lyr) => {
+      lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`);
+      // Read on click, not with the layer: thousands of points, few opened.
+      lyr.bindPopup(() => devicePopup(f.properties.kind, f.properties.id), { maxWidth: 380, minWidth: 300 });
+    },
   }).addTo(layers.meters);
+}
+
+function devicePopup(kind, id) {
+  const box = el('div', { class: 'device' }, el('strong', {}, id), el('div', { class: 'muted small' }, 'Loading ...'));
+  api(`/api/device/${kind}/${encodeURIComponent(id)}`).then((d) => {
+    const l = d.latest;
+    const rows = kind === 'meter'
+      ? [['Type', d.info.meter_type], ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
+        ['Litres (last reading)', l && fmt.n(l.litres, 1)], ['Flow', l && `${fmt.n(l.flow_lpm, 1)} L/min`],
+        ['Battery', l && l.battery_pct !== null ? `${l.battery_pct}%` : null],
+        [`Used, last ${d.hours} h`, `${fmt.n(d.series.reduce((t, r) => t + (r.litres || 0), 0))} L`]]
+      : [['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
+        ['Pressure', l && `${fmt.n(l.pressure_m, 1)} m`], ['Flow', l && `${fmt.n(l.flow_ls, 2)} L/s`]];
+    const series = kind === 'meter'
+      ? [{ name: 'litres', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.litres]) }]
+      : [{ name: 'pressure', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.pressure_m]) }];
+    box.replaceChildren(
+      el('strong', {}, id, el('span', { class: 'tag syn' }, 'synthetic')),
+      el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+      d.series.length
+        ? chart(kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)', series, { height: 110 })
+        : el('p', { class: 'muted small' }, `No readings in the last ${d.hours} h.`),
+    );
+  }).catch((err) => box.replaceChildren(el('strong', {}, id), el('div', { class: 'err' }, err.message)));
+  return box;
 }
 
 // ----------------------------------------------------------------- charts
@@ -717,7 +783,7 @@ async function loadAnomalies() {
     tile('Suspected leak', counts.SUSPECTED_LEAK || 0, 'leak'),
     tile('Watch', counts.WATCH || 0, 'watch'),
     tile('OK', counts.OK || 0, 'ok'),
-    tile('DMAs without status', Math.max(0, (state.status?.db.value?.dmas || 0)
+    tile('Insufficient data', Math.max(0, (state.status?.db.value?.dmas || 0)
       - (counts.SUSPECTED_LEAK || 0) - (counts.WATCH || 0) - (counts.OK || 0)), 'unknown'),
   );
 
@@ -737,7 +803,7 @@ async function loadAnomalies() {
     },
     el('td', {}, fmt.ts(r.ts)),
     el('td', {}, r.name || r.dma_id),
-    el('td', {}, el('span', { class: `status ${r.status || ''}` }, r.status || '—')),
+    el('td', {}, el('span', { class: `status ${r.status || ''}` }, r.status ? statusLabel(r.status) : '—')),
     el('td', { class: 'num' }, fmt.n(r.modelled, 2)),
     el('td', { class: 'num' }, fmt.n(r.observed, 2)),
     el('td', { class: 'num' }, fmt.n(r.residual, 2)),

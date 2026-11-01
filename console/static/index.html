@@ -62,7 +62,7 @@
               <span><i class="sw ok"></i>OK</span>
               <span><i class="sw watch"></i>Watch</span>
               <span><i class="sw leak"></i>Suspected leak</span>
-              <span><i class="sw unknown"></i>No status</span>
+              <span title="Not enough model history yet to judge this DMA. Each solve adds one residual; the status appears once a DMA has 24."><i class="sw unknown"></i>Insufficient data</span>
             </div>
             <div class="muted small" id="map-note"></div>
           </div>
@@ -148,7 +148,7 @@
         <input type="text" id="login-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"></label>
       <div class="err" id="login-err" hidden></div>
       <div class="row-end">
-        <button value="cancel" class="btn ghost" formnovalidate>Cancel</button>
+        <button type="button" id="login-cancel" class="btn ghost">Cancel</button>
         <button value="login" class="btn primary">Log in</button>
       </div>
     </form>

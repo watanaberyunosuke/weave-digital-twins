@@ -774,6 +774,98 @@ def geo_meters(dma_id: str | None = None, limit: int = Query(20000, ge=1, le=200
 
 
 # ----------------------------------------------------------------- telemetry
+# The residual scoring settings, read with the simulator's names and defaults
+# so the page explains the same rule model/residuals.py applies. The console
+# image has no model package, so the baseline count below mirrors its
+# RESIDUALS_SQL rather than importing it.
+RESIDUAL_RULES = {
+    "baseline_days": float(os.environ.get("SIM_RESIDUAL_BASELINE_DAYS", "7")),
+    "min_samples": int(os.environ.get("SIM_RESIDUAL_MIN_SAMPLES", "24")),
+    "z_watch": float(os.environ.get("SIM_RESIDUAL_Z_WATCH", "2")),
+    "z_leak": float(os.environ.get("SIM_RESIDUAL_Z_LEAK", "3")),
+    "relearn_hours": float(os.environ.get("SIM_RESIDUAL_RELEARN_HOURS", "24")),
+    "interval_s": int(os.environ.get("SIM_INTERVAL_S", "900")),
+}
+
+
+def baseline_progress(dma_id: str) -> dict:
+    """How many residuals count towards the DMA's baseline, of how many needed.
+
+    Same window as the simulator: inside the baseline days, after the DMA's
+    last reset (or a reset of every DMA), leaving out flagged rows still in
+    their relearn period.
+    """
+    r = RESIDUAL_RULES
+    # run_sim.py creates the reset table on first use, so it can be missing.
+    has_reset = scalar("SELECT to_regclass('twin.residual_baseline_reset') IS NOT NULL")
+    reset = """AND ts > coalesce((SELECT max(reset_at) FROM twin.residual_baseline_reset
+                                   WHERE dma_id IN (%(d)s, '*')), '-infinity')""" if has_reset else ""
+    n = scalar(f"""
+        SELECT count(*) FROM twin.sim_residual
+        WHERE dma_id = %(d)s AND variable = 'pressure' AND residual IS NOT NULL
+          AND ts > now() - make_interval(secs => %(baseline_s)s)
+          {reset}
+          AND NOT (coalesce(flagged, false) AND ts > now() - make_interval(secs => %(relearn_s)s))
+    """, {"d": dma_id, "baseline_s": r["baseline_days"] * 86400,
+          "relearn_s": r["relearn_hours"] * 3600})
+    # A DMA the model does not reach gets no residual at all, so it would stay
+    # UNKNOWN for good; the page must not promise it a status in a few hours.
+    # Every DMA scored in one solve shares that solve's ts.
+    last = query("""
+        SELECT EXISTS (SELECT 1 FROM twin.sim_residual) AS any_run,
+               EXISTS (SELECT 1 FROM twin.sim_residual
+                       WHERE dma_id = %(d)s AND ts = (SELECT max(ts) FROM twin.sim_residual)) AS in_last_run
+    """, {"d": dma_id})[0]
+    return {"samples": n or 0, "any_run": last["any_run"], "in_last_run": last["in_last_run"], **r}
+
+
+DEVICES = {
+    # kind: (registry, id column, readings, the reading columns to show)
+    "meter": ("ref.water_meter", "meter_id", "twin.meter_reading",
+              ["litres", "flow_lpm", "battery_pct"]),
+    "logger": ("ref.pressure_logger", "logger_id", "twin.pressure_reading",
+               ["pressure_m", "flow_ls"]),
+}
+
+
+@app.get("/api/device/{kind}/{device_id}")
+def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168)):
+    """One meter or logger: registry row, latest reading and 15-minute buckets.
+
+    Only synthetic registries are served, so the public page can show it too.
+    Table and column names come from DEVICES, never from the request.
+    """
+    if kind not in DEVICES:
+        raise HTTPException(404, f"no device kind {kind}")
+    registry, id_col, readings, cols = DEVICES[kind]
+
+    def run():
+        info = query(f"SELECT {id_col} AS id, * FROM {registry} WHERE {id_col} = %s",
+                     (device_id,))
+        if not info:
+            raise HTTPException(404, f"no {kind} {device_id}")
+        info = {k: v for k, v in info[0].items() if k != "geom"}
+        latest = query(f"""
+            SELECT ts, {", ".join(cols)} FROM {readings}
+            WHERE {id_col} = %(id)s AND ts > now() - make_interval(hours => %(h)s)
+            ORDER BY ts DESC LIMIT 1
+        """, {"id": device_id, "h": hours})
+        # A meter's litres are per reading, so a bucket sums them; a logger's
+        # pressure is a level, so a bucket averages it.
+        bucket = ("sum(litres) AS litres, avg(flow_lpm) AS flow_lpm" if kind == "meter"
+                  else "avg(pressure_m) AS pressure_m, avg(flow_ls) AS flow_ls")
+        series = query(f"""
+            SELECT date_bin('15 minutes', ts, TIMESTAMPTZ '2000-01-01') AS ts,
+                   {bucket}, count(*) AS readings
+            FROM {readings}
+            WHERE {id_col} = %(id)s AND ts > now() - make_interval(hours => %(h)s)
+            GROUP BY 1 ORDER BY 1
+        """, {"id": device_id, "h": hours})
+        return {"kind": kind, "info": info, "latest": latest[0] if latest else None,
+                "series": series, "hours": hours}
+    return db_or_503(run)
+
+
 def db_or_503(fn):
     try:
         return fn()
@@ -797,6 +889,7 @@ def dma_detail(dma_id: str, hours: int = Query(24, ge=1, le=168)):
         window = f"{hours} hours"
         return {
             "info": info[0],
+            "baseline": baseline_progress(dma_id),
             "balance": query("""
                 SELECT window_start AS ts, consumption_l, inflow_l, loss_pct,
                        min_pressure_m, meter_count
@@ -949,7 +1042,7 @@ ACTIONS: dict[str, dict] = {
         "step": None,
         "description": "Starts DMA residual baselines afresh after a lasting change such "
                        "as a model recalibration. Earlier residuals stay in the database "
-                       "but stop counting, so the DMA reads UNKNOWN until it has enough "
+                       "but stop counting, so the DMA shows insufficient data until it has enough "
                        "new ones. Blank resets every DMA.",
         "params": [Param(name="dma", label="DMA id (blank = all)", kind="text", default="")],
     },
