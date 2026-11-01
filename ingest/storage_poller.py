@@ -53,6 +53,9 @@ BACKFILL_DAYS = int(os.environ.get("STORAGE_BACKFILL_DAYS", "90"))
 MATCH_M = float(os.environ.get("STORAGE_MATCH_M", "1500"))
 # Series whose last value is older than this are retired gauges.
 STALE_DAYS = int(os.environ.get("STORAGE_STALE_DAYS", "30"))
+# Volume above this share of the matched asset's capacity rejects the match;
+# a little over 100% is normal when a storage spills.
+OVER_CAPACITY = 1.05
 BATCH = 20                    # series per values request
 ATTEMPTS = 4                  # the service fails transiently with DatasourceError
 
@@ -223,11 +226,19 @@ def run_once(list_only: bool = False) -> int:
         since = {no: ts for no, ts in cur.fetchall()}
         values = fetch_values(series, since)
 
-        written = unmatched = 0
+        written = unmatched = rejected = 0
         for s in series:
             cur.execute(MATCH_SQL, {"lat": s.lat, "lon": s.lon})
             hit = cur.fetchone()
             matched = bool(hit) and hit[2] <= MATCH_M
+            vols = [v for _, v in values.get(s.ts_id, [])]
+            # A storage holding more than its asset's capacity is not that
+            # asset: the nearest one was a smaller storage beside it (a gauge
+            # matched to a recycled-water basin read 10,000% full). The link
+            # is dropped rather than kept with a wrong percentage.
+            if matched and hit[1] and vols and max(vols) > OVER_CAPACITY * float(hit[1]):
+                matched = False
+                rejected += 1
             facility_id, capacity = (hit[0], hit[1]) if matched else (None, None)
             unmatched += not matched
             # The gauge is the site of record; the asset link is a best guess
@@ -253,10 +264,19 @@ def run_once(list_only: bool = False) -> int:
                     volume_ml = EXCLUDED.volume_ml, capacity_ml = EXCLUDED.capacity_ml,
                     percent_full = EXCLUDED.percent_full, station_no = EXCLUDED.station_no
             """, rows)
+            # Earlier days take the current match's capacity too, so a
+            # corrected or newly published capacity reaches the whole history.
+            cur.execute("""
+                UPDATE twin.storage_level
+                SET capacity_ml = %(c)s,
+                    percent_full = CASE WHEN %(c)s > 0 THEN 100.0 * volume_ml / %(c)s END
+                WHERE station_no = %(s)s AND capacity_ml IS DISTINCT FROM %(c)s
+            """, {"c": capacity, "s": s.station_no})
             written += len(rows)
         conn.commit()
-    log.info("wrote %s daily values; %s storages have no supply asset within %g m",
-             written, unmatched, MATCH_M)
+    log.info("wrote %s daily values; %s storages have no supply asset within %g m"
+             " (%s of them because the nearest asset's capacity is below their volume)",
+             written, unmatched, MATCH_M, rejected)
     return written
 
 
