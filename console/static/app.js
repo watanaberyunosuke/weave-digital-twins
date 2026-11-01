@@ -444,7 +444,13 @@ async function pollJob() {
 }
 
 // -------------------------------------------------------------------- map
-const map = L.map('map', { zoomControl: true, preferCanvas: true, attributionControl: true });
+// Most pipes are drawn 1 px wide, and a canvas line only takes clicks within
+// half its width, so they were nearly impossible to hit. The tolerance widens
+// every shape's click area by a few pixels without changing how it looks.
+const map = L.map('map', {
+  zoomControl: true, preferCanvas: true, attributionControl: true,
+  renderer: L.canvas({ tolerance: 4 }),
+});
 map.setView([0, 0], 2);
 const layers = {
   dmas: L.layerGroup().addTo(map),
