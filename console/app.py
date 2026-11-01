@@ -748,6 +748,49 @@ def geo_gauges():
     """)
 
 
+def storage_loaded() -> bool:
+    # ingest/storage_poller.py creates ref.storage_site on volumes initialised
+    # before it existed, so until its first run there is nothing to read.
+    return bool(scalar("SELECT to_regclass('ref.storage_site') IS NOT NULL"))
+
+
+@app.get("/api/geo/storages")
+def geo_storages():
+    """Real storage gauges with their latest daily volume, for the map."""
+    if not db_or_503(storage_loaded):
+        return JSONResponse({"type": "FeatureCollection", "features": []})
+    return geojson("""
+        SELECT json_build_object('type', 'Feature',
+               'geometry', ST_AsGeoJSON(s.geom, 6)::json,
+               'properties', json_build_object(
+                   'station_no', s.station_no, 'name', s.storage_name,
+                   'facility_id', s.facility_id, 'facility_name', f.name,
+                   'match_m', round(s.match_m), 'source', s.source,
+                   'ts', l.ts, 'volume_ml', l.volume_ml, 'percent_full', l.percent_full)) AS feature
+        FROM ref.storage_site s
+        LEFT JOIN asset.facility f USING (facility_id)
+        LEFT JOIN LATERAL (
+            SELECT ts, volume_ml, percent_full FROM twin.storage_level
+            WHERE station_no = s.station_no ORDER BY ts DESC LIMIT 1) l ON true
+        WHERE s.geom IS NOT NULL
+    """)
+
+
+@app.get("/api/storage/{station_no}")
+def storage_detail(station_no: str, days: int = Query(90, ge=1, le=3650)):
+    """One storage's daily volumes, oldest first."""
+    def run():
+        if not storage_loaded():
+            raise HTTPException(404, f"no storage {station_no}")
+        series = query("""
+            SELECT ts, volume_ml, percent_full FROM twin.storage_level
+            WHERE station_no = %(s)s AND ts > now() - make_interval(days => %(d)s)
+            ORDER BY ts
+        """, {"s": station_no, "d": days})
+        return {"station_no": station_no, "days": days, "series": series}
+    return db_or_503(run)
+
+
 @app.get("/api/geo/meters")
 def geo_meters(dma_id: str | None = None, limit: int = Query(20000, ge=1, le=200000)):
     # The whole registry by default, capped: a few thousand synthetic points

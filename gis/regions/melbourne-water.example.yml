@@ -77,4 +77,6 @@ attribute_hints:
   diameter_mm: [DIAMETER, DIAMETER_MM, NOMINAL_DIAMETER, PIPE_DIAMETER, Diameter]
   material:    [MATERIAL, PIPE_MATERIAL, MATERIAL_TYPE, Material]
   asset_name:  [ASSET_NAME, NAME, MAIN_NAME, DESCRIPTION, Name]
-  capacity_ml: [CAPACITY_ML, CAPACITY, VOLUME_ML, Capacity]
+  # Melbourne Water's dam and reservoir layers give capacity as USABLE_VOLUME
+  # (ML); their TOTAL_VOLUME is 0 throughout, so it is not listed.
+  capacity_ml: [CAPACITY_ML, CAPACITY, VOLUME_ML, Capacity, USABLE_VOLUME]

@@ -142,6 +142,30 @@ services:
       HYDRO_INTERVAL_S: ${HYDRO_INTERVAL_S:-900}
     restart: unless-stopped
 
+  # --- real feed: reservoir storage volumes ---------------------------------
+  # Daily values, so written straight to Postgres in batches rather than
+  # through Kafka (see ingest/storage_poller.py).
+  ingest-storage:
+    logging: *json-logs
+    build: ./ingest
+    container_name: ingest-storage
+    init: true
+    command: python storage_poller.py
+    environment:
+      TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
+      STORAGE_URL: ${STORAGE_URL}
+      STORAGE_BBOX: ${STORAGE_BBOX}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-kiwis}
+      STORAGE_INTERVAL_S: ${STORAGE_INTERVAL_S:-21600}
+      STORAGE_RETRY_S: ${STORAGE_RETRY_S:-900}
+      STORAGE_BACKFILL_DAYS: ${STORAGE_BACKFILL_DAYS:-90}
+      STORAGE_MATCH_M: ${STORAGE_MATCH_M:-1500}
+      STORAGE_NAME_MATCH_M: ${STORAGE_NAME_MATCH_M:-15000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   # --- batch: public GIS network loader (run on demand) ---------------------
   gis-loader:
     logging: *json-logs

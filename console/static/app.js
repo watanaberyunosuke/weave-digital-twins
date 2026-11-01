@@ -30,6 +30,7 @@ const fmt = {
   n: (v, d = 0) => (v === null || v === undefined ? '—' : Number(v).toLocaleString(undefined, { maximumFractionDigits: d })),
   ts: (v) => (v ? new Date(v).toLocaleString() : '—'),
   time: (v) => (v ? new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'),
+  date: (v) => (v ? new Date(v).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }) : '—'),
   age: (v) => {
     if (!v) return '—';
     const s = (Date.now() - new Date(v).getTime()) / 1000;
@@ -457,6 +458,7 @@ const layers = {
   pipes: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   gauges: L.layerGroup().addTo(map),
+  storages: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
 };
 // Map colours resolve against #map, which carries its own tokens when the
@@ -475,7 +477,7 @@ const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECT
 // DMAs could not be clicked.) loadMap() draws in this order; turning a layer
 // back on re-adds the layers above it, because re-adding moves a group to the
 // end of the draw order.
-const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'meters'];
+const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'storages', 'meters'];
 function restackAbove(name) {
   LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
     .filter((g) => map.hasLayer(g))
@@ -498,11 +500,12 @@ function popupHtml(title, rows) {
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, facilities, gauges, meters] = await Promise.all([
+  const [dmas, pipes, facilities, gauges, storages, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
     api('/api/geo/facilities').catch(() => null),
     api('/api/geo/gauges').catch(() => null),
+    api('/api/geo/storages').catch(() => null),
     api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
 
@@ -561,6 +564,17 @@ async function loadMap() {
         ['Site', f.properties.site_id], ['Variable', f.properties.variable], ['Provider', f.properties.provider],
       ])),
     }).addTo(layers.gauges);
+  }
+  layers.storages.clearLayers();
+  if (storages) {
+    L.geoJSON(storages, {
+      // On the shared canvas like everything else, so meters still draw over
+      // it; larger than a facility, with a heavy white ring, to read apart.
+      pointToLayer: (f, ll) => L.circleMarker(ll, {
+        radius: 7, color: '#fff', weight: 2.5, fillColor: mcss('--real'), fillOpacity: 1,
+      }),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => storagePopup(f.properties), { maxWidth: 380, minWidth: 300 }),
+    }).addTo(layers.storages);
   }
   // Drawn in LAYER_ORDER, so meters and loggers are added last and sit on top.
   drawMeters(meters);
@@ -641,15 +655,27 @@ function closeDma() {
 }
 
 const METER_CAP = 20000;
+// Two customer categories: residential, and everything else. The seeder's
+// 'bulk' meters are large non-residential users, so they count as commercial;
+// the tooltip and popup still give the stored type.
+const meterCategory = (type) => (type === 'residential' ? 'residential' : 'commercial');
+// The category, with the stored type after it when they differ: "commercial (bulk)".
+function customerLabel(type) {
+  const category = meterCategory(type);
+  return type === category ? category : `${category} (${type})`;
+}
+
 function drawMeters(fc) {
   layers.meters.clearLayers();
   if (!fc) return;
   L.geoJSON(fc, {
-    pointToLayer: (f, ll) => L.circleMarker(ll, {
-      radius: f.properties.kind === 'logger' ? 5 : 3,
-      color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
-      fillOpacity: 0.9, weight: 1.2,
-    }),
+    pointToLayer: (f, ll) => {
+      if (f.properties.kind === 'logger') {
+        return L.circleMarker(ll, { radius: 5, color: mcss('--syn'), fillColor: '#fff', fillOpacity: 0.9, weight: 1.2 });
+      }
+      const colour = mcss(meterCategory(f.properties.meter_type) === 'residential' ? '--syn' : '--meter-com');
+      return L.circleMarker(ll, { radius: 3, color: colour, fillColor: colour, fillOpacity: 0.9, weight: 1.2 });
+    },
     onEachFeature: (f, lyr) => {
       lyr.bindTooltip(`${f.properties.id} · ${f.properties.kind}${f.properties.meter_type ? ` (${f.properties.meter_type})` : ''} · ${f.properties.dma_id}`);
       // Read on click, not with the layer: thousands of points, few opened.
@@ -658,12 +684,45 @@ function drawMeters(fc) {
   }).addTo(layers.meters);
 }
 
+function storagePopup(p) {
+  const box = el('div', { class: 'device' }, el('strong', {}, p.name), el('div', { class: 'muted small' }, 'Loading ...'));
+  const rows = [
+    ['Latest', p.volume_ml === null ? null : `${fmt.n(p.volume_ml)} ML`],
+    ['Full', p.percent_full === null ? null : `${fmt.n(p.percent_full, 1)}%`],
+    // Daily means: the day is the reading, the time of day is meaningless.
+    ['As of', p.ts && fmt.date(p.ts)],
+    ['Asset', p.facility_id && `${p.facility_name || p.facility_id} (${fmt.n(p.match_m)} m away)`],
+    ['Gauge', p.station_no],
+    ['Source', p.source],
+  ];
+  api(`/api/storage/${encodeURIComponent(p.station_no)}`).then((d) => {
+    box.replaceChildren(
+      el('strong', {}, p.name, el('span', { class: 'tag real' }, 'real')),
+      el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+      d.series.length
+        ? chart(`Daily volume, last ${d.days} days (ML)`,
+          [{ name: 'volume', colour: css('--real'), points: d.series.map((r) => [r.ts, r.volume_ml]) }], { height: 110 })
+        : el('p', { class: 'muted small' }, `No values in the last ${d.days} days.`),
+      // Percent full needs a capacity, which only some asset layers publish.
+      // (Spread, because replaceChildren() would print a null as "null".)
+      ...(p.percent_full === null
+        ? [el('p', { class: 'muted small' }, p.facility_id
+          ? 'Percent full needs the matched asset to publish a capacity.'
+          : 'No matching asset, so no capacity for percent full.')]
+        : []),
+    );
+  }).catch((err) => box.replaceChildren(el('strong', {}, p.name), el('div', { class: 'err' }, err.message)));
+  return box;
+}
+
 function devicePopup(kind, id) {
   const box = el('div', { class: 'device' }, el('strong', {}, id), el('div', { class: 'muted small' }, 'Loading ...'));
   api(`/api/device/${kind}/${encodeURIComponent(id)}`).then((d) => {
     const l = d.latest;
     const rows = kind === 'meter'
-      ? [['Type', d.info.meter_type], ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
+      ? [['Customer', customerLabel(d.info.meter_type)],
+        ['DMA', d.info.dma_id], ['Last reading', l && fmt.age(l.ts)],
         ['Litres (last reading)', l && fmt.n(l.litres, 1)], ['Flow', l && `${fmt.n(l.flow_lpm, 1)} L/min`],
         ['Battery', l && l.battery_pct !== null ? `${l.battery_pct}%` : null],
         [`Used, last ${d.hours} h`, `${fmt.n(d.series.reduce((t, r) => t + (r.litres || 0), 0))} L`]]
@@ -720,8 +779,10 @@ function chart(title, series, { height = 130 } = {}) {
     add('line', { x1: pad.l, x2: W - pad.r, y1: sy(v), y2: sy(v), class: 'axis', 'stroke-dasharray': '2 3' });
     add('text', { x: pad.l - 4, y: sy(v) + 3, 'text-anchor': 'end', class: 'lbl' }, fmt.n(v, Math.abs(y1 - y0) < 10 ? 1 : 0));
   });
-  add('text', { x: pad.l, y: H - 4, class: 'lbl' }, fmt.time(x0));
-  add('text', { x: W - pad.r, y: H - 4, 'text-anchor': 'end', class: 'lbl' }, fmt.time(x1));
+  // Times suit a day's chart; a longer span needs dates to be read at all.
+  const xlabel = x1 - x0 > 36 * 3600e3 ? fmt.date : fmt.time;
+  add('text', { x: pad.l, y: H - 4, class: 'lbl' }, xlabel(x0));
+  add('text', { x: W - pad.r, y: H - 4, 'text-anchor': 'end', class: 'lbl' }, xlabel(x1));
 
   series.forEach((s, idx) => {
     const p = s.points.filter(([, v]) => v !== null && v !== undefined)
