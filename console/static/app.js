@@ -444,16 +444,17 @@ async function pollJob() {
 }
 
 // -------------------------------------------------------------------- map
-const map = L.map('map', { zoomControl: true, preferCanvas: true, attributionControl: true });
+// Most pipes are drawn 1 px wide, and a canvas line only takes clicks within
+// half its width, so they were nearly impossible to hit. The tolerance widens
+// every shape's click area by a few pixels without changing how it looks.
+const map = L.map('map', {
+  zoomControl: true, preferCanvas: true, attributionControl: true,
+  renderer: L.canvas({ tolerance: 4 }),
+});
 map.setView([0, 0], 2);
-// Points get their own pane and canvas above the overlay pane. On one shared
-// canvas a click goes to the last shape drawn under the cursor, and the DMA
-// polygons are drawn after the meters, so a meter click opened its DMA.
-map.createPane('points').style.zIndex = 450;
-const pointRenderer = L.canvas({ pane: 'points' });
 const layers = {
-  pipes: L.layerGroup().addTo(map),
   dmas: L.layerGroup().addTo(map),
+  pipes: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   gauges: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
@@ -466,9 +467,25 @@ const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK:
 // only the page says what it means, which reads less like a fault.
 const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECTED LEAK' }[s] || 'INSUFFICIENT DATA');
 
+// Bottom to top: DMA areas, pipes over them, then the point assets, with
+// meters and loggers on top. Everything shares one canvas, where a shape drawn
+// later covers earlier ones and a click goes to the last shape drawn under the
+// cursor, so this order is also the click order. (A second canvas for points
+// was tried and is worse: the top canvas takes every click on the map, so the
+// DMAs could not be clicked.) loadMap() draws in this order; turning a layer
+// back on re-adds the layers above it, because re-adding moves a group to the
+// end of the draw order.
+const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'meters'];
+function restackAbove(name) {
+  LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
+    .filter((g) => map.hasLayer(g))
+    .forEach((g) => { map.removeLayer(g); g.addTo(map); });
+}
+
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
   if (cb.checked) layer.addTo(map); else map.removeLayer(layer);
+  if (cb.checked) restackAbove(cb.dataset.layer);
 }));
 
 function popupHtml(title, rows) {
@@ -489,6 +506,20 @@ async function loadMap() {
     api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
 
+  layers.dmas.clearLayers();
+  if (dmas) {
+    L.geoJSON(dmas, {
+      style: (f) => ({
+        color: statusColour(f.properties.status), weight: 1.2, fillOpacity: 0.18,
+        fillColor: statusColour(f.properties.status),
+      }),
+      onEachFeature: (f, lyr) => {
+        lyr.bindTooltip(`${f.properties.dma_id} · ${statusLabel(f.properties.status)}`, { sticky: true });
+        lyr.on('click', () => openDma(f.properties.dma_id));
+      },
+    }).addTo(layers.dmas);
+  }
+
   layers.pipes.clearLayers();
   if (pipes) {
     L.geoJSON(pipes, {
@@ -508,25 +539,10 @@ async function loadMap() {
     meters && meters.features.length >= METER_CAP ? `Meters capped at ${fmt.n(METER_CAP)}.` : '',
   ].filter(Boolean).join(' ');
 
-  layers.dmas.clearLayers();
-  if (dmas) {
-    L.geoJSON(dmas, {
-      style: (f) => ({
-        color: statusColour(f.properties.status), weight: 1.2, fillOpacity: 0.18,
-        fillColor: statusColour(f.properties.status),
-      }),
-      onEachFeature: (f, lyr) => {
-        lyr.bindTooltip(`${f.properties.dma_id} · ${statusLabel(f.properties.status)}`, { sticky: true });
-        lyr.on('click', () => openDma(f.properties.dma_id));
-      },
-    }).addTo(layers.dmas);
-  }
-
   layers.facilities.clearLayers();
   if (facilities) {
     L.geoJSON(facilities, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        renderer: pointRenderer,
         radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
@@ -539,7 +555,6 @@ async function loadMap() {
   if (gauges) {
     L.geoJSON(gauges, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        renderer: pointRenderer,
         radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
@@ -547,7 +562,7 @@ async function loadMap() {
       ])),
     }).addTo(layers.gauges);
   }
-  // Last, so a meter beside a facility or gauge stays clickable on the shared points canvas.
+  // Drawn in LAYER_ORDER, so meters and loggers are added last and sit on top.
   drawMeters(meters);
 
   const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities, layers.gauges].flatMap((g) => g.getLayers()));
@@ -631,7 +646,6 @@ function drawMeters(fc) {
   if (!fc) return;
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
-      renderer: pointRenderer,
       radius: f.properties.kind === 'logger' ? 5 : 3,
       color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,

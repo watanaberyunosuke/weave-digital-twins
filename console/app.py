@@ -780,7 +780,7 @@ def geo_meters(dma_id: str | None = None, limit: int = Query(20000, ge=1, le=200
 # RESIDUALS_SQL rather than importing it.
 RESIDUAL_RULES = {
     "baseline_days": float(os.environ.get("SIM_RESIDUAL_BASELINE_DAYS", "7")),
-    "min_samples": int(os.environ.get("SIM_RESIDUAL_MIN_SAMPLES", "24")),
+    "min_samples": int(os.environ.get("SIM_RESIDUAL_MIN_SAMPLES", "8")),
     "z_watch": float(os.environ.get("SIM_RESIDUAL_Z_WATCH", "2")),
     "z_leak": float(os.environ.get("SIM_RESIDUAL_Z_LEAK", "3")),
     "relearn_hours": float(os.environ.get("SIM_RESIDUAL_RELEARN_HOURS", "24")),

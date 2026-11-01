@@ -154,9 +154,14 @@ services:
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
       GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
       SCHEMA_NAMESPACE: ${SCHEMA_NAMESPACE:-weave}
+      # The seeder places DMAs on the pipes the model keeps, so it reads the
+      # same cap and snap distance as the simulator.
+      SIM_MAX_PIPES: ${SIM_MAX_PIPES:-200000}
+      SIM_MAX_SNAP_M: ${SIM_MAX_SNAP_M:-500}
     volumes:
       - ./gis:/work/gis:ro
       - ./scripts:/work/scripts:ro
+      - ./model:/work/model:ro
       - ./schemas:/work/schemas
     depends_on:
       postgres:
@@ -174,9 +179,11 @@ services:
     environment:
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
       SIM_INTERVAL_S: "900"
-      SIM_MAX_PIPES: "10000"
+      SIM_MAX_PIPES: ${SIM_MAX_PIPES:-200000}
       SIM_RESERVOIR_DEPTH_M: "10"
-      SIM_MAX_SNAP_M: "500"
+      SIM_MAX_SNAP_M: ${SIM_MAX_SNAP_M:-500}
+      SIM_RESIDUAL_MIN_SAMPLES: ${SIM_RESIDUAL_MIN_SAMPLES:-8}
+      SIM_RESULT_RETENTION_HOURS: ${SIM_RESULT_RETENTION_HOURS:-24}
     volumes:
       - siminp:/app/out
     depends_on:
@@ -218,6 +225,8 @@ services:
       GOOGLE_MAPS_LANGUAGE: ${GOOGLE_MAPS_LANGUAGE:-en}
       FEATURESERV_URL: http://featureserv:9000
       FEATURESERV_PUBLIC_URL: ${FEATURESERV_PUBLIC_URL:-http://localhost:9000}
+      # The DMA panel explains the simulator's scoring, so it reads the same minimum.
+      SIM_RESIDUAL_MIN_SAMPLES: ${SIM_RESIDUAL_MIN_SAMPLES:-8}
       # "console" lets the public console reach the relay routes by service name.
       CONSOLE_ALLOWED_HOSTS: ${CONSOLE_ALLOWED_HOSTS:-localhost,127.0.0.1,console}
       CONSOLE_RELAY_TOKEN: ${CONSOLE_RELAY_TOKEN:-}
@@ -250,6 +259,7 @@ services:
       - "127.0.0.1:${CONSOLE_PUBLIC_PORT:-8091}:8090"
     environment:
       CONSOLE_MODE: public
+      SIM_RESIDUAL_MIN_SAMPLES: ${SIM_RESIDUAL_MIN_SAMPLES:-8}
       TWIN_DSN: postgresql://weave_reader:weave_reader@postgres:5432/weave_twin
       GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
       CONSOLE_ALLOWED_HOSTS: ${CONSOLE_PUBLIC_HOSTS:-localhost,127.0.0.1}

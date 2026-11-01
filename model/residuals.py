@@ -18,9 +18,11 @@ import os
 from dataclasses import dataclass
 
 BASELINE_DAYS = float(os.environ.get("SIM_RESIDUAL_BASELINE_DAYS", "7"))
-# Fewer residuals than this and the DMA is UNKNOWN. 24 is six hours of the
-# default 15-minute solves.
-MIN_SAMPLES = int(os.environ.get("SIM_RESIDUAL_MIN_SAMPLES", "24"))
+# Fewer residuals than this and the DMA is UNKNOWN. 8 is two hours of the
+# default 15-minute solves: a fresh stack reads a status sooner, at the cost
+# of judging the spread on less history, so expect more WATCH flags early on.
+# 24 (six hours) was steadier but left a new deployment blank for most of a day.
+MIN_SAMPLES = int(os.environ.get("SIM_RESIDUAL_MIN_SAMPLES", "8"))
 Z_WATCH = float(os.environ.get("SIM_RESIDUAL_Z_WATCH", "2"))
 Z_LEAK = float(os.environ.get("SIM_RESIDUAL_Z_LEAK", "3"))
 # A floor under the baseline's standard deviation. A DMA whose residual has

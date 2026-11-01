@@ -26,20 +26,23 @@ import wntr
 from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
 from residuals import (ALL_DMAS, BASELINE_DAYS, MIN_SAMPLES, RELEARN_HOURS, RESET_TABLE_SQL,
                        RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify)
-from subgraph import Pipe, element_name, select_supplied_subgraph
+from modelled_network import MAX_PIPES, MAX_SNAP_M, select_modelled
+from subgraph import element_name
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
 INTERVAL_S = int(os.environ.get("SIM_INTERVAL_S", "900"))
-MAX_PIPES = int(os.environ.get("SIM_MAX_PIPES", "5000"))
+# Only the latest run is read (residuals.py joins on run_id), so older results
+# are pruned each solve. Unpruned, a whole-network model writes about 240,000
+# rows a solve, several GB a day, and the table never shrank.
+RESULT_RETENTION_HOURS = float(os.environ.get("SIM_RESULT_RETENTION_HOURS", "24"))
+# Volumes initialised before 03_telemetry.sql indexed ts need it for the prune;
+# the primary key leads with run_id, so it can't serve a ts range.
+RESULT_TS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS sim_result_ts_idx ON twin.sim_result (ts)"
 # A reservoir's head is the ground level at its node plus this depth of
 # water. A fixed head only worked while every node sat at the same default
 # elevation; with a DEM, anything above it came out at negative pressure.
 RESERVOIR_DEPTH_M = float(os.environ.get("SIM_RESERVOIR_DEPTH_M", "10"))
-# Reservoirs further than this from any node are left out. Snapping a
-# catchment dam onto whatever main is nearest, kilometres away, would put a
-# fixed head where there is none.
-MAX_SNAP_M = float(os.environ.get("SIM_MAX_SNAP_M", "500"))
 DEFAULT_ELEVATION_M = 50.0
 
 
@@ -53,23 +56,11 @@ def build_inp() -> str:
         if cur.fetchone()[0] == 0:
             sys.exit("! topology not built — run SELECT asset.build_topology();")
 
-        # Reservoirs from real service reservoirs and storage dams. Each is
-        # snapped to its nearest graph node so it connects to the network;
-        # node_id breaks distance ties so the snap is the same every build.
-        cur.execute("""
-            SELECT f.facility_id, ST_Y(f.geom), ST_X(f.geom),
-                   near.node_id, near.elevation_m,
-                   ST_Distance(f.geom::geography, near.geom::geography)
-            FROM asset.facility f
-            CROSS JOIN LATERAL (
-                SELECT n.node_id, n.elevation_m, n.geom FROM asset.node n
-                ORDER BY n.geom <-> f.geom, n.node_id LIMIT 1) near
-            WHERE f.facility_type IN ('service_reservoir', 'storage_dam')
-            ORDER BY f.facility_id
-        """)
-        candidates = cur.fetchall()
-        reservoirs = [r for r in candidates if r[5] <= MAX_SNAP_M]
-        too_far = [r for r in candidates if r[5] > MAX_SNAP_M]
+        # Reservoirs and the capped walk out from them come from
+        # modelled_network.py, which the seeder also uses, so synthetic DMAs
+        # sit where this model can score them.
+        m = select_modelled(cur)
+        reservoirs, too_far, sel = m.reservoirs, m.too_far, m.selection
         if too_far:
             print(f"  {len(too_far)} reservoirs left out: further than "
                   f"SIM_MAX_SNAP_M={MAX_SNAP_M:g} m from any node "
@@ -78,22 +69,7 @@ def build_inp() -> str:
             sys.exit("! no supply: load a service_reservoir or storage_dam layer "
                      "within SIM_MAX_SNAP_M of the network so the model has a "
                      "fixed head")
-
-        # Every usable pipe, then a deterministic walk out from the
-        # reservoirs up to the cap (see subgraph.py for why not LIMIT).
-        cur.execute("""
-            SELECT pipe_id, start_node, end_node,
-                   COALESCE(length_m, ST_Length(geom::geography)),
-                   COALESCE(diameter_mm, 150) / 1000.0
-            FROM asset.pipe
-            WHERE start_node IS NOT NULL AND end_node IS NOT NULL
-        """)
-        pipes = [Pipe(pipe_id, s, e,
-                      max(float(length or 1), 1.0),
-                      max(float(dia or 0.15), 0.05))
-                 for pipe_id, s, e, length, dia in cur.fetchall()]
-        sel = select_supplied_subgraph(pipes, [r[3] for r in reservoirs], MAX_PIPES)
-        print(f"  selected {len(sel.pipes)} of {len(pipes)} pipes from "
+        print(f"  selected {len(sel.pipes)} of {m.pipe_count} pipes from "
               f"{len(reservoirs)} reservoirs (SIM_MAX_PIPES={MAX_PIPES}): "
               f"{sel.capped_pipes} over the cap, {sel.unsupplied_pipes} in "
               f"components no reservoir feeds, {sel.skipped_pipes} zero-length")
@@ -181,6 +157,7 @@ def simulate() -> str:
     print(f"  demands: {demands.meters} meters, {demands.silent} with no reading"
           f" in the last {DEMAND_WINDOW}; {sum(demands.by_node.values()):.6f} m³/s,"
           f" {unmodelled:.6f} of it at nodes outside the model")
+    started = time.monotonic()
     sim = wntr.sim.EpanetSimulator(wn)
     # EPANET's scratch files default to temp.* in the working directory, so
     # the --loop container and a --once run from the console would overwrite
@@ -201,14 +178,22 @@ def simulate() -> str:
         rows.append((run_id, now, "link", link_name, "flow",
                      float(flow[link_name].iloc[-1])))
 
+    solve_s = time.monotonic() - started
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
         cur.executemany(
             """INSERT INTO twin.sim_result
                  (run_id, ts, element_type, element_id, variable, value)
                VALUES (%s, %s, %s, %s, %s, %s)
                ON CONFLICT DO NOTHING""", rows)
+        cur.execute(RESULT_TS_INDEX_SQL)
+        cur.execute("DELETE FROM twin.sim_result WHERE ts < now() - make_interval(secs => %s)",
+                    (RESULT_RETENTION_HOURS * 3600,))
+        pruned = cur.rowcount
         conn.commit()
-    print(f"run {run_id}: wrote {len(rows)} simulated values")
+    # The solve time is logged because SIM_MAX_PIPES trades coverage for it:
+    # a solve longer than SIM_INTERVAL_S stretches the loop's cadence.
+    print(f"run {run_id}: solved in {solve_s:.0f} s, wrote {len(rows)} simulated values,"
+          f" pruned {pruned} older than {RESULT_RETENTION_HOURS:g} h")
     return run_id
 
 
@@ -308,11 +293,18 @@ def main() -> int:
 
     if args.loop:
         while True:
+            # Sleep the rest of the interval, not a whole one, so a larger
+            # model keeps the 15-minute cadence the baseline counts assume.
+            started = time.monotonic()
             try:
                 compute_residuals(simulate())
             except Exception as exc:
                 print(f"! simulation failed: {exc}")
-            time.sleep(INTERVAL_S)
+            elapsed = time.monotonic() - started
+            if elapsed > INTERVAL_S:
+                print(f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"
+                      " lower SIM_MAX_PIPES or raise the interval")
+            time.sleep(max(0.0, INTERVAL_S - elapsed))
 
     ap.error("pass --build, --once, --loop or --reset-baseline")
     return 1
