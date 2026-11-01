@@ -33,10 +33,13 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 import requests
 
-from common import poll_forever, require_env
+from common import require_env
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INTERVAL_S = int(os.environ.get("STORAGE_INTERVAL_S", "21600"))
+# After a failed run. The service's backend drops out for minutes at a time,
+# so waiting the full interval would leave the storages hours behind.
+RETRY_S = int(os.environ.get("STORAGE_RETRY_S", "900"))
 PARAMETER = os.environ.get("STORAGE_PARAMETER", "Storage Volume")
 # The quality-coded daily mean. A station often carries several series for the
 # same parameter (received, harmonised, merged); naming one keeps a storage to
@@ -267,8 +270,14 @@ def main() -> int:
     if args.once:
         run_once()
         return 0
-    poll_forever(run_once, INTERVAL_S, "storage")
-    return 0
+    while True:
+        try:
+            run_once()
+            wait = INTERVAL_S
+        except Exception:
+            log.exception("storage run failed; retrying in %s s", RETRY_S)
+            wait = RETRY_S
+        time.sleep(wait)
 
 
 if __name__ == "__main__":
