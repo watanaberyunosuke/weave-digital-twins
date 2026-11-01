@@ -6,25 +6,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Weave is a framework for building digital twins of utility networks (water, electricity, transport). It loads **real** public GIS topology into PostGIS, derives **synthetic** meters onto that real geometry, and runs both real and synthetic telemetry through one Kafka/Flink pipeline into TimescaleDB, where an EPANET model's output is compared against observations to flag anomalies.
 
-This repo is **an overlay, not a standalone stack**. It is copied over `weave-stack/`, a copy of `cp-all-in-one/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`), which supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Running compose from this directory alone will not work. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
+The clone is the stack, but **not on its own**: [scripts/fetch-confluent-stack.sh](scripts/fetch-confluent-stack.sh) puts `docker-compose.yml` and `vol/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`, its `cp-all-in-one/` folder) into the repository root, git-ignored, and that file supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Until the fetch has run, compose finds no base file and refuses to start. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
 
 ## Commands
 
 Everything runs in containers; there is no local build and no linter. Syntax-check before running, and run the unit tests (standard library only; the EPANET solve test skips unless `wntr` is installed):
 
 ```bash
-python3 -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/app.py
+python3 -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/*.py
 python3 -m unittest discover -s model -p 'test_*.py'
+python3 -m unittest discover -s console -p 'test_*.py'   # role tests skip without the console requirements
 # GIS loader fixtures need PostGIS and a role that can create databases; they skip without one
 WEAVE_TEST_DSN=postgresql://weave:weave@localhost:5432/weave_twin python3 -m unittest discover -s gis -p 'test_*.py'
 bash -n scripts/*.sh
 node --check console/static/app.js
 ```
 
-Full bring-up (from inside `weave-stack/` after the overlay is copied in):
+Full bring-up, from the repository root:
 
 ```bash
+./scripts/fetch-confluent-stack.sh       # Confluent's docker-compose.yml and vol/ (git-ignored); re-run to refresh
 cp .env.example .env                     # then edit for your region
+./scripts/init-secrets.sh                # console tokens and admin password hash; --totp adds an authenticator
 ./scripts/download-flink-connectors.sh   # populates flink/lib/ (gitignored, must exist before compose up)
 docker compose up -d broker connect control-center flink-jobmanager flink-taskmanager \
     flink-sql-client postgres ingest-market ingest-hydrometry gis-loader simulator console featureserv
@@ -127,6 +130,7 @@ Kibana can only read Elasticsearch, so Elasticsearch holds a **derived, disposab
 - **Step status is derived from what each step leaves behind** (topics, row counts, `schemas/*.avsc`, connector state, `network.inp`, Flink jobs, latest residual), so steps run from the CLI show up too.
 - **One job at a time**, because seeding truncates what loading and model building read. Jobs live in memory; killing the console doesn't stop a `docker exec` already started.
 - **It holds the Docker socket**, so it binds to loopback, rejects other `Host` headers, and requires an `X-Weave-Console` header on POSTs so other sites in the browser can't trigger operations. Keep all three.
+- **Public mode** (`CONSOLE_MODE=public`, compose profile `public`, service `console-public`) serves the same page to anyone without the Docker socket, as `weave_reader`, with no GIS clients tab or admin links. Its demo login is open to everyone (password `demo`, shown on the form, so not a secret; [console/access.py](console/access.py) signs the session cookie) and runs `access.SAFE_ACTIONS` for real, at most one live run per `CONSOLE_DEMO_COOLDOWN_S` across all demo users, by relaying them to the admin console's `/api/relay/*` routes with `CONSOLE_RELAY_TOKEN`; every other action is simulated ([console/demo.py](console/demo.py)), and each login starts a fresh history. The relay routes accept only the safe list, so keep that list to actions that leave nothing for other viewers to see. The same page has an admin login (scrypt `CONSOLE_ADMIN_PASSWORD_HASH` from `python3 console/access.py admin-hash`, optional TOTP `CONSOLE_ADMIN_TOTP_SECRET`, failed attempts throttled) that runs every action live through `/api/relay/admin/*` with a separate `CONSOLE_RELAY_ADMIN_TOKEN`; it is off unless all of the hash, the relay URL and that token are set. [scripts/init-secrets.sh](scripts/init-secrets.sh) fills these, the demo token and the session secret into `.env`, only where blank and without printing them. The role is in the signed cookie, so the public console still never holds the Docker socket. Google basemaps are off in public mode unless `CONSOLE_PUBLIC_GOOGLE=1`, because the tile URL carries the key.
 - Starting the Flink pipelines is refused while any Flink job runs: a second statement set writes every row twice, and the telemetry hypertables have no key to deduplicate on.
 - **Basemaps** are a server-side catalogue (`BUILTIN_BASEMAPS` in `console/app.py`: OSM, CARTO, Esri, OpenTopoMap, an optional `CONSOLE_TILE_URL`, and Google via the official Map Tiles API when `GOOGLE_MAPS_API_KEY` and `GOOGLE_MAPS_REGION` are set). None is drawn unless `CONSOLE_BASEMAP` or the viewer picks one, because every tile request tells the provider which area is in view. Dark mode swaps CARTO to its dark variant and inverts other light tiles in CSS; imagery and Google tiles are never altered (Google's terms forbid it). Google attribution is fetched per viewport through `/api/basemaps/google-attribution`; the Google logo its terms also require is not drawn yet.
 - **Theme** is Auto/Light/Dark from the header toggle (`data-theme` on `<html>`, remembered per browser). Every colour is a token defined on `:root` and redefined for dark under both `prefers-color-scheme` and `[data-theme="dark"]`; map overlays read tokens from `#map`, which carries its own when the basemap is dark.

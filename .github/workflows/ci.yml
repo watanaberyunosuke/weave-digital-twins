@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: python -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/app.py
+      - run: python -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/*.py
       - run: bash -n scripts/*.sh
       - run: node --check console/static/app.js
 
@@ -95,7 +95,9 @@ jobs:
           timeout 180 sh -c 'until docker exec postgis pg_isready -h 127.0.0.1 -U postgres; do sleep 2; done'
           python -m unittest discover -s ../gis -p 'test_*.py' -v
       - if: matrix.component == 'console'
-        run: python -c "import app"
+        run: |
+          python -c "import app"
+          python -m unittest discover -p 'test_*.py' -v
 
   dependabot-merge:
     name: Merge Dependabot patch update
