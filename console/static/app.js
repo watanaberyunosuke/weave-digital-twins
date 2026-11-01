@@ -447,8 +447,8 @@ async function pollJob() {
 const map = L.map('map', { zoomControl: true, preferCanvas: true, attributionControl: true });
 map.setView([0, 0], 2);
 const layers = {
-  pipes: L.layerGroup().addTo(map),
   dmas: L.layerGroup().addTo(map),
+  pipes: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   gauges: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
@@ -461,21 +461,25 @@ const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK:
 // only the page says what it means, which reads less like a fault.
 const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECTED LEAK' }[s] || 'INSUFFICIENT DATA');
 
-// Everything shares one canvas, and a click there goes to the last shape drawn
-// under the cursor, so points must be drawn after the DMA polygons or a meter
-// click opens its DMA. A second canvas for points was tried and is worse: the
-// top canvas takes every click on the map, so the DMAs could not be clicked.
-// Re-adding a group moves it to the end of the draw order.
-const POINT_LAYERS = ['facilities', 'gauges', 'meters'];
-function keepPointsOnTop() {
-  POINT_LAYERS.map((k) => layers[k]).filter((g) => map.hasLayer(g))
+// Bottom to top: DMA areas, pipes over them, then the point assets, with
+// meters and loggers on top. Everything shares one canvas, where a shape drawn
+// later covers earlier ones and a click goes to the last shape drawn under the
+// cursor, so this order is also the click order. (A second canvas for points
+// was tried and is worse: the top canvas takes every click on the map, so the
+// DMAs could not be clicked.) loadMap() draws in this order; turning a layer
+// back on re-adds the layers above it, because re-adding moves a group to the
+// end of the draw order.
+const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'meters'];
+function restackAbove(name) {
+  LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
+    .filter((g) => map.hasLayer(g))
     .forEach((g) => { map.removeLayer(g); g.addTo(map); });
 }
 
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
   if (cb.checked) layer.addTo(map); else map.removeLayer(layer);
-  if (cb.checked && !POINT_LAYERS.includes(cb.dataset.layer)) keepPointsOnTop();
+  if (cb.checked) restackAbove(cb.dataset.layer);
 }));
 
 function popupHtml(title, rows) {
@@ -496,6 +500,20 @@ async function loadMap() {
     api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
 
+  layers.dmas.clearLayers();
+  if (dmas) {
+    L.geoJSON(dmas, {
+      style: (f) => ({
+        color: statusColour(f.properties.status), weight: 1.2, fillOpacity: 0.18,
+        fillColor: statusColour(f.properties.status),
+      }),
+      onEachFeature: (f, lyr) => {
+        lyr.bindTooltip(`${f.properties.dma_id} · ${statusLabel(f.properties.status)}`, { sticky: true });
+        lyr.on('click', () => openDma(f.properties.dma_id));
+      },
+    }).addTo(layers.dmas);
+  }
+
   layers.pipes.clearLayers();
   if (pipes) {
     L.geoJSON(pipes, {
@@ -514,20 +532,6 @@ async function loadMap() {
     pipes && pipes.features.length >= 8000 ? 'Pipes capped at 8,000, largest diameters first.' : '',
     meters && meters.features.length >= METER_CAP ? `Meters capped at ${fmt.n(METER_CAP)}.` : '',
   ].filter(Boolean).join(' ');
-
-  layers.dmas.clearLayers();
-  if (dmas) {
-    L.geoJSON(dmas, {
-      style: (f) => ({
-        color: statusColour(f.properties.status), weight: 1.2, fillOpacity: 0.18,
-        fillColor: statusColour(f.properties.status),
-      }),
-      onEachFeature: (f, lyr) => {
-        lyr.bindTooltip(`${f.properties.dma_id} · ${statusLabel(f.properties.status)}`, { sticky: true });
-        lyr.on('click', () => openDma(f.properties.dma_id));
-      },
-    }).addTo(layers.dmas);
-  }
 
   layers.facilities.clearLayers();
   if (facilities) {
@@ -552,8 +556,7 @@ async function loadMap() {
       ])),
     }).addTo(layers.gauges);
   }
-  // Pipes, DMAs, facilities, gauges, then meters: the draw order is the click
-  // order (see keepPointsOnTop), so meters are added last.
+  // Drawn in LAYER_ORDER, so meters and loggers are added last and sit on top.
   drawMeters(meters);
 
   const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities, layers.gauges].flatMap((g) => g.getLayers()));
