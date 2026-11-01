@@ -446,11 +446,6 @@ async function pollJob() {
 // -------------------------------------------------------------------- map
 const map = L.map('map', { zoomControl: true, preferCanvas: true, attributionControl: true });
 map.setView([0, 0], 2);
-// Points get their own pane and canvas above the overlay pane. On one shared
-// canvas a click goes to the last shape drawn under the cursor, and the DMA
-// polygons are drawn after the meters, so a meter click opened its DMA.
-map.createPane('points').style.zIndex = 450;
-const pointRenderer = L.canvas({ pane: 'points' });
 const layers = {
   pipes: L.layerGroup().addTo(map),
   dmas: L.layerGroup().addTo(map),
@@ -466,9 +461,21 @@ const statusColour = (s) => mcss({ OK: '--ok', WATCH: '--watch', SUSPECTED_LEAK:
 // only the page says what it means, which reads less like a fault.
 const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECTED LEAK' }[s] || 'INSUFFICIENT DATA');
 
+// Everything shares one canvas, and a click there goes to the last shape drawn
+// under the cursor, so points must be drawn after the DMA polygons or a meter
+// click opens its DMA. A second canvas for points was tried and is worse: the
+// top canvas takes every click on the map, so the DMAs could not be clicked.
+// Re-adding a group moves it to the end of the draw order.
+const POINT_LAYERS = ['facilities', 'gauges', 'meters'];
+function keepPointsOnTop() {
+  POINT_LAYERS.map((k) => layers[k]).filter((g) => map.hasLayer(g))
+    .forEach((g) => { map.removeLayer(g); g.addTo(map); });
+}
+
 document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
   const layer = layers[cb.dataset.layer];
   if (cb.checked) layer.addTo(map); else map.removeLayer(layer);
+  if (cb.checked && !POINT_LAYERS.includes(cb.dataset.layer)) keepPointsOnTop();
 }));
 
 function popupHtml(title, rows) {
@@ -526,7 +533,6 @@ async function loadMap() {
   if (facilities) {
     L.geoJSON(facilities, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        renderer: pointRenderer,
         radius: 6, color: mcss('--facility'), fillColor: mcss('--facility'), fillOpacity: 0.85, weight: 1,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.name || f.properties.facility_id, [
@@ -539,7 +545,6 @@ async function loadMap() {
   if (gauges) {
     L.geoJSON(gauges, {
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        renderer: pointRenderer,
         radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
       }),
       onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
@@ -547,7 +552,8 @@ async function loadMap() {
       ])),
     }).addTo(layers.gauges);
   }
-  // Last, so a meter beside a facility or gauge stays clickable on the shared points canvas.
+  // Pipes, DMAs, facilities, gauges, then meters: the draw order is the click
+  // order (see keepPointsOnTop), so meters are added last.
   drawMeters(meters);
 
   const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities, layers.gauges].flatMap((g) => g.getLayers()));
@@ -631,7 +637,6 @@ function drawMeters(fc) {
   if (!fc) return;
   L.geoJSON(fc, {
     pointToLayer: (f, ll) => L.circleMarker(ll, {
-      renderer: pointRenderer,
       radius: f.properties.kind === 'logger' ? 5 : 3,
       color: mcss('--syn'), fillColor: f.properties.kind === 'logger' ? '#fff' : mcss('--syn'),
       fillOpacity: 0.9, weight: 1.2,
