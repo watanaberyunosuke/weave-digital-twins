@@ -6,7 +6,7 @@ This file provides guidance to Codex (claude.ai/code) when working with code in 
 
 Weave is a framework for building digital twins of utility networks (water, electricity, transport). It loads **real** public GIS topology into PostGIS, derives **synthetic** meters onto that real geometry, and runs both real and synthetic telemetry through one Kafka/Flink pipeline into TimescaleDB, where an EPANET model's output is compared against observations to flag anomalies.
 
-The clone is the stack, but **not on its own**: [scripts/fetch-confluent-stack.sh](scripts/fetch-confluent-stack.sh) puts `docker-compose.yml` and `vol/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`, its `cp-all-in-one/` folder) into the repository root, git-ignored, and that file supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Until the fetch has run, compose finds no base file and refuses to start. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
+The clone is the stack, but **not on its own**: [scripts/fetch-confluent-stack.sh](scripts/fetch-confluent-stack.sh) puts `docker-compose.yml` and `vol/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`, its `cp-all-in-one/` folder) into the repository root, git-ignored, and that file supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-market`, `ingest-hydrometry`, `ingest-storage`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Until the fetch has run, compose finds no base file and refuses to start. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
 
 ## Commands
 
@@ -80,6 +80,7 @@ public GIS catalogue ─(gis/load_gis.py)─> asset.gis_raw + asset.pipe/facilit
                                                └─> schemas/*.avsc ──> Datagen connectors ──┐
                                                                                            ▼
 real feeds (ingest/*.py) ──────────────────────────────────────────> Kafka topics ──> Flink SQL ──> twin.* (Timescale)
+storage volumes (ingest/storage_poller.py, daily) ── batch, no Kafka ──> ref.storage_site + twin.storage_level
                                                                                            │
                                      model/run_sim.py: PostGIS -> EPANET .inp -> solve -> twin.sim_result
                                                                                            │
@@ -92,7 +93,7 @@ real feeds (ingest/*.py) ──────────────────�
 ### Schemas in Postgres
 
 - `asset` — real topology (`gis_raw` verbatim JSONB, conformed `pipe`/`facility`/`substation`/`power_line`/`transit_stop`, graph `node`) plus derived `dma`.
-- `ref` — registries of things that emit telemetry (`water_meter`, `pressure_logger`, `electricity_meter` synthetic; `hydrometry_site` real).
+- `ref` — registries of things that emit telemetry (`water_meter`, `pressure_logger`, `electricity_meter` synthetic; `hydrometry_site`, `storage_site` real).
 - `twin` — telemetry hypertables and simulation output.
 
 [postgres/init/](postgres/init/) runs **only on an empty volume**. Schema changes require `docker compose down -v` for `postgres` (destroying loaded GIS) or a manual migration.
@@ -131,6 +132,7 @@ Kibana can only read Elasticsearch, so Elasticsearch holds a **derived, disposab
 - Starting the Flink pipelines is refused while any Flink job runs: a second statement set writes every row twice, and the telemetry hypertables have no key to deduplicate on.
 - **Basemaps** are a server-side catalogue (`BUILTIN_BASEMAPS` in `console/app.py`: OSM, CARTO, Esri, OpenTopoMap, an optional `CONSOLE_TILE_URL`, and Google via the official Map Tiles API when `GOOGLE_MAPS_API_KEY` and `GOOGLE_MAPS_REGION` are set). None is drawn unless `CONSOLE_BASEMAP` or the viewer picks one, because every tile request tells the provider which area is in view. Dark mode swaps CARTO to its dark variant and inverts other light tiles in CSS; imagery and Google tiles are never altered (Google's terms forbid it). Google attribution is fetched per viewport through `/api/basemaps/google-attribution`; the Google logo its terms also require is not drawn yet.
 - **Theme** is Auto/Light/Dark from the header toggle (`data-theme` on `<html>`, remembered per browser). Every colour is a token defined on `:root` and redefined for dark under both `prefers-color-scheme` and `[data-theme="dark"]`; map overlays read tokens from `#map`, which carries its own when the basemap is dark.
+- **Storage levels** come from `ingest-storage` ([ingest/storage_poller.py](ingest/storage_poller.py)), a KiWIS adapter: one series list per run, filtered to `STORAGE_BBOX` locally because the service ignores a bounding box, then values in batches of 20 from each gauge's last stored day. Daily means go straight to Postgres, upserted on `(ts, storage_name)`, because a stream adds nothing to one value a day. Each gauge is a `ref.storage_site` linked to the nearest storage-type asset within `STORAGE_MATCH_M` (kept with its distance); percent full needs that asset to publish a capacity. The service answers transient backend failures with HTTP 500 and a JSON error, which the poller retries. The map draws gauges as large blue dots, under the meters.
 - Static files are served `Cache-Control: no-cache`; there is no build step to fingerprint names, so without it browsers keep stale JS/CSS after a rebuild.
 
 ### GIS clients

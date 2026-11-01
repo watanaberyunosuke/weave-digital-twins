@@ -457,6 +457,7 @@ const layers = {
   pipes: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   gauges: L.layerGroup().addTo(map),
+  storages: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
 };
 // Map colours resolve against #map, which carries its own tokens when the
@@ -475,7 +476,7 @@ const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECT
 // DMAs could not be clicked.) loadMap() draws in this order; turning a layer
 // back on re-adds the layers above it, because re-adding moves a group to the
 // end of the draw order.
-const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'meters'];
+const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'storages', 'meters'];
 function restackAbove(name) {
   LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
     .filter((g) => map.hasLayer(g))
@@ -498,11 +499,12 @@ function popupHtml(title, rows) {
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, facilities, gauges, meters] = await Promise.all([
+  const [dmas, pipes, facilities, gauges, storages, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
     api('/api/geo/facilities').catch(() => null),
     api('/api/geo/gauges').catch(() => null),
+    api('/api/geo/storages').catch(() => null),
     api(`/api/geo/meters?limit=${METER_CAP}`).catch(() => null),
   ]);
 
@@ -561,6 +563,17 @@ async function loadMap() {
         ['Site', f.properties.site_id], ['Variable', f.properties.variable], ['Provider', f.properties.provider],
       ])),
     }).addTo(layers.gauges);
+  }
+  layers.storages.clearLayers();
+  if (storages) {
+    L.geoJSON(storages, {
+      // On the shared canvas like everything else, so meters still draw over
+      // it; larger than a facility, with a heavy white ring, to read apart.
+      pointToLayer: (f, ll) => L.circleMarker(ll, {
+        radius: 7, color: '#fff', weight: 2.5, fillColor: mcss('--real'), fillOpacity: 1,
+      }),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => storagePopup(f.properties), { maxWidth: 380, minWidth: 300 }),
+    }).addTo(layers.storages);
   }
   // Drawn in LAYER_ORDER, so meters and loggers are added last and sit on top.
   drawMeters(meters);
@@ -663,6 +676,32 @@ function drawMeters(fc) {
       lyr.bindPopup(() => devicePopup(f.properties.kind, f.properties.id), { maxWidth: 380, minWidth: 300 });
     },
   }).addTo(layers.meters);
+}
+
+function storagePopup(p) {
+  const box = el('div', { class: 'device' }, el('strong', {}, p.name), el('div', { class: 'muted small' }, 'Loading ...'));
+  const rows = [
+    ['Latest', p.volume_ml === null ? null : `${fmt.n(p.volume_ml)} ML`],
+    ['Full', p.percent_full === null ? null : `${fmt.n(p.percent_full, 1)}%`],
+    ['As of', p.ts && fmt.ts(p.ts)],
+    ['Asset', p.facility_id && `${p.facility_name || p.facility_id} (${fmt.n(p.match_m)} m away)`],
+    ['Gauge', p.station_no],
+    ['Source', p.source],
+  ];
+  api(`/api/storage/${encodeURIComponent(p.station_no)}`).then((d) => {
+    box.replaceChildren(
+      el('strong', {}, p.name, el('span', { class: 'tag real' }, 'real')),
+      el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+      d.series.length
+        ? chart(`Daily volume, last ${d.days} days (ML)`,
+          [{ name: 'volume', colour: css('--real'), points: d.series.map((r) => [r.ts, r.volume_ml]) }], { height: 110 })
+        : el('p', { class: 'muted small' }, `No values in the last ${d.days} days.`),
+      // Percent full needs a capacity, which only some asset layers publish.
+      p.percent_full === null ? el('p', { class: 'muted small' }, 'Percent full needs the matched asset to publish a capacity.') : null,
+    );
+  }).catch((err) => box.replaceChildren(el('strong', {}, p.name), el('div', { class: 'err' }, err.message)));
+  return box;
 }
 
 function devicePopup(kind, id) {

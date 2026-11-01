@@ -113,6 +113,20 @@ CREATE TABLE ref.hydrometry_site (
 );
 CREATE INDEX ON ref.hydrometry_site USING GIST (geom);
 
+-- Real reservoir storage gauges (ingest/storage_poller.py). facility_id is the
+-- nearest supply asset within STORAGE_MATCH_M, a best guess kept with its
+-- distance; a gauge with no asset nearby still stands on its own point.
+CREATE TABLE ref.storage_site (
+    station_no   TEXT PRIMARY KEY,
+    storage_name TEXT,
+    facility_id  TEXT,
+    match_m      DOUBLE PRECISION,
+    source       TEXT,
+    geom         GEOMETRY(Point, 4326),
+    synthetic    BOOLEAN DEFAULT false
+);
+CREATE INDEX storage_site_geom_idx ON ref.storage_site USING GIST (geom);
+
 -- =========================================================== ELECTRICITY
 CREATE TABLE asset.substation (
     substation_id TEXT PRIMARY KEY,

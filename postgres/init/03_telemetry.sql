@@ -15,7 +15,8 @@ CREATE TABLE twin.hydrometry (
 SELECT create_hypertable('twin.hydrometry', 'ts', chunk_time_interval => INTERVAL '7 days');
 CREATE INDEX ON twin.hydrometry (site_id, variable, ts DESC);
 
--- Real: bulk storage volumes from the water authority (batch loaded)
+-- Real: daily storage volumes (batch loaded by ingest/storage_poller.py;
+-- station_no joins ref.storage_site)
 CREATE TABLE twin.storage_level (
     ts             TIMESTAMPTZ NOT NULL,
     storage_name   TEXT NOT NULL,
@@ -23,8 +24,10 @@ CREATE TABLE twin.storage_level (
     capacity_ml    DOUBLE PRECISION,
     percent_full   DOUBLE PRECISION,
     is_synthetic   BOOLEAN DEFAULT false,
+    station_no     TEXT,
     PRIMARY KEY (ts, storage_name)
 );
+CREATE INDEX storage_level_station_idx ON twin.storage_level (station_no, ts DESC);
 
 -- ============================================= WATER: synthetic meter data
 CREATE TABLE twin.meter_reading (

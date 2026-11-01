@@ -79,7 +79,8 @@ jobs:
       - if: matrix.component == 'ingest'
         # gis/ runs in the ingest image, so its decoder is checked here too.
         run: |
-          python -c "import common, hydrometry_poller, market_poller"
+          python -c "import common, hydrometry_poller, market_poller, storage_poller"
+          python -m unittest discover -s . -p 'test_*.py'
           # The seeder runs in this image and shares the model's pipe selection.
           python -c "import sys; sys.path.insert(0, '../scripts'); import seed_synthetic_network"
           python -c "import imagecodecs, numpy; imagecodecs.lerc_decode"
