@@ -1,20 +1,22 @@
 """Synthetic meter demand: sourced volumes, daily shapes and the reading
 format the Flink meter source expects."""
 
+import random
 import unittest
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 
-from demand_profiles import (COMMERCIAL, COMMERCIAL_L_PER_M2_DAY, LITRES_PER_PERSON_DAY,
-                             PEOPLE_PER_HOUSEHOLD, RESIDENTIAL_WEEKDAY, RESIDENTIAL_WEEKEND,
-                             interval_litres, meter_profile)
+from demand_profiles import (COMMERCIAL, COMMERCIAL_L_PER_M2_DAY, DAY_RANGE, INTERVAL_RANGE,
+                             LITRES_PER_PERSON_DAY, PEOPLE_PER_HOUSEHOLD, RESIDENTIAL_WEEKDAY,
+                             RESIDENTIAL_WEEKEND, day_factor, interval_litres, meter_profile)
 
 # A Tuesday, so weekday shapes apply.
 TUESDAY = datetime(2026, 11, 3, tzinfo=timezone.utc)
 
 
-def day_of_intervals(profile, day, minutes=15):
-    return [interval_litres(profile, day + timedelta(minutes=minutes * i), minutes)
+def day_of_intervals(profile, day, minutes=15, rng=None):
+    rng = rng or random.Random(1)
+    return [interval_litres(profile, day + timedelta(minutes=minutes * i), minutes, rng)
             for i in range(1440 // minutes)]
 
 
@@ -60,18 +62,36 @@ class VolumeTest(unittest.TestCase):
 class IntervalTest(unittest.TestCase):
     def test_households_go_quiet_overnight_but_bulk_meters_do_not(self):
         night = [TUESDAY + timedelta(hours=2, minutes=15 * i) for i in range(8)]
-        house = [interval_litres(meter_profile(f"H{i}", "residential"), t, 15)
+        rng = random.Random(2)
+        house = [interval_litres(meter_profile(f"H{i}", "residential"), t, 15, rng)
                  for i in range(50) for t in night]
-        bulk = [interval_litres(meter_profile(f"B{i}", "bulk"), t, 15)
+        bulk = [interval_litres(meter_profile(f"B{i}", "bulk"), t, 15, rng)
                 for i in range(50) for t in night]
         self.assertGreater(sum(1 for v in house if v == 0) / len(house), 0.5)
         self.assertEqual(sum(1 for v in bulk if v == 0), 0)
 
-    def test_same_meter_and_time_give_the_same_reading(self):
+    def test_readings_are_random_within_the_range(self):
+        # 7 am is busy enough that a household never reads a quiet zero.
         p = meter_profile("H42", "residential")
         t = TUESDAY + timedelta(hours=7)
-        self.assertEqual(interval_litres(p, t, 15), interval_litres(p, t, 15))
-        self.assertEqual(meter_profile("H42", "residential"), p)
+        expected = p.daily_litres * day_factor(p.meter_id, t) * 15 / 1440.0
+        from demand_profiles import hourly_multiplier
+        expected *= hourly_multiplier("residential", t)
+        rng = random.Random(3)
+        draws = [interval_litres(p, t, 15, rng) for _ in range(500)]
+        self.assertGreater(len(set(draws)), 400)
+        self.assertGreaterEqual(min(draws), expected * (1 - INTERVAL_RANGE) - 1e-9)
+        self.assertLessEqual(max(draws), expected * (1 + INTERVAL_RANGE) + 1e-9)
+
+    def test_day_factor_holds_for_the_day_and_stays_in_range(self):
+        t = TUESDAY + timedelta(hours=2)
+        self.assertEqual(day_factor("H1", t, salt=9), day_factor("H1", t + timedelta(hours=9), salt=9))
+        factors = [day_factor(f"H{i}", t, salt=9) for i in range(500)]
+        self.assertGreaterEqual(min(factors), 1 - DAY_RANGE)
+        self.assertLessEqual(max(factors), 1 + DAY_RANGE)
+
+    def test_meter_size_is_fixed_by_its_id(self):
+        self.assertEqual(meter_profile("H42", "residential"), meter_profile("H42", "residential"))
 
     def test_unknown_type_is_read_as_a_household(self):
         self.assertEqual(meter_profile("X1", None).meter_type, "residential")

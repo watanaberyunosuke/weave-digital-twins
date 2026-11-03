@@ -167,6 +167,8 @@ services:
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
       METER_INTERVAL_S: ${METER_INTERVAL_S:-900}
       METER_TZ: ${METER_TZ:-UTC}
+      METER_INTERVAL_RANGE: ${METER_INTERVAL_RANGE:-0.5}
+      METER_DAY_RANGE: ${METER_DAY_RANGE:-0.15}
     depends_on:
       postgres:
         condition: service_healthy
