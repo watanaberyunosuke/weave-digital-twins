@@ -28,6 +28,7 @@ from residuals import (ALL_DMAS, BASELINE_DAYS, MIN_SAMPLES, RELEARN_HOURS, RESE
                        RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify)
 from modelled_network import MAX_PIPES, MAX_SNAP_M, select_modelled
 from subgraph import element_name
+from zones import HEAD_MARGIN_M, MAX_PRESSURE_M, MIN_PRESSURE_M, plan_zones
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
@@ -44,6 +45,11 @@ RESULT_TS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS sim_result_ts_idx ON twin.sim_
 # elevation; with a DEM, anything above it came out at negative pressure.
 RESERVOIR_DEPTH_M = float(os.environ.get("SIM_RESERVOIR_DEPTH_M", "10"))
 DEFAULT_ELEVATION_M = 50.0
+# "zoned" draws pressure zones from elevation (model/zones.py): band grade
+# lines, PRVs between bands and boosters where no source reaches. "ground" is
+# the earlier rule, each reservoir at its ground level plus
+# SIM_RESERVOIR_DEPTH_M with no zones, kept to compare against.
+HEAD_MODE = os.environ.get("SIM_HEAD_MODE", "zoned")
 
 
 # --------------------------------------------------------------- build model
@@ -84,29 +90,55 @@ def build_inp() -> str:
             WHERE node_id = ANY(%s)
             ORDER BY node_id
         """, (DEFAULT_ELEVATION_M, sorted(sel.nodes)))
+        elevation, coords = {}, {}
         for node_id, lat, lon, elev in cur.fetchall():
+            elevation[node_id] = float(elev)
+            coords[node_id] = (lon, lat)
             wn.add_junction(f"N{node_id}", base_demand=0.0,
                             elevation=float(elev), coordinates=(lon, lat))
 
-        # Element ids carry the source asset id (element_name), so results
-        # join back to asset.facility and asset.pipe across builds.
-        unattached = []
-        for fid, lat, lon, near_node, ground, _ in reservoirs:
-            if near_node not in sel.nodes:
-                unattached.append(fid)
-                continue
-            rid = element_name("R", fid)
-            head = float(ground if ground is not None else DEFAULT_ELEVATION_M)
-            wn.add_reservoir(rid, base_head=head + RESERVOIR_DEPTH_M,
-                             coordinates=(lon, lat))
-            wn.add_pipe(element_name("L", fid), rid, f"N{near_node}",
-                        length=10.0, diameter=0.6, roughness=100)
+        unattached = [r[0] for r in reservoirs if r[3] not in sel.nodes]
+        attached = [r for r in reservoirs if r[3] in sel.nodes]
         if unattached:
             print(f"  {len(unattached)} reservoirs left out: their node has no "
                   f"selected pipe (no connected pipe, or beyond the cap)")
 
+        if HEAD_MODE == "zoned":
+            plan = plan_zones(sel.pipes, elevation, {r[0]: r[3] for r in attached})
+            heads = plan.reservoir_head
+            pipes, prvs, boosters = plan.pipes, plan.prvs, plan.boosters
+            low, high = plan.static_pressure_range(elevation)
+            print(f"  zones: {len(plan.band_head)} elevation bands of "
+                  f"{plan.band_width_m:g} m (service pressure {MIN_PRESSURE_M:g}-"
+                  f"{MAX_PRESSURE_M:g} m, margin {HEAD_MARGIN_M:g} m), "
+                  f"{len(prvs)} PRVs, {len(plan.closed)} boundary pipes closed, "
+                  f"{len(boosters)} boosters; "
+                  f"static pressure {low:.0f}-{high:.0f} m")
+        elif HEAD_MODE == "ground":
+            heads = {fid: float(ground if ground is not None else DEFAULT_ELEVATION_M)
+                      + RESERVOIR_DEPTH_M
+                     for fid, _lat, _lon, _node, ground, _d in attached}
+            pipes, prvs, boosters = sel.pipes, [], []
+        else:
+            sys.exit(f"! SIM_HEAD_MODE={HEAD_MODE!r}: use zoned or ground")
+
+        # Element ids carry the source asset id (element_name), so results
+        # join back to asset.facility and asset.pipe across builds.
+        for fid, lat, lon, near_node, _ground, _ in attached:
+            rid = element_name("R", fid)
+            wn.add_reservoir(rid, base_head=heads[fid], coordinates=(lon, lat))
+            wn.add_pipe(element_name("L", fid), rid, f"N{near_node}",
+                        length=10.0, diameter=0.6, roughness=100)
+
+        # A booster stands in for a pump station or elevated tank the public
+        # data doesn't show; B<node_id> keeps it apart from real reservoirs.
+        for node_id, head in boosters:
+            wn.add_reservoir(f"B{node_id}", base_head=head, coordinates=coords[node_id])
+            wn.add_pipe(f"BL{node_id}", f"B{node_id}", f"N{node_id}",
+                        length=10.0, diameter=0.6, roughness=100)
+
         failed = 0
-        for pipe in sel.pipes:
+        for pipe in pipes:
             try:
                 wn.add_pipe(element_name("P", pipe.pipe_id),
                             f"N{pipe.start_node}", f"N{pipe.end_node}",
@@ -114,8 +146,29 @@ def build_inp() -> str:
                             roughness=100)
             except Exception:
                 failed += 1
+        # Crossings between bands that didn't get a PRV stay in the model,
+        # shut, as the boundary valves between zones are.
+        closed = plan.closed if HEAD_MODE == "zoned" else []
+        for pipe in closed:
+            try:
+                wn.add_pipe(element_name("P", pipe.pipe_id),
+                            f"N{pipe.start_node}", f"N{pipe.end_node}",
+                            length=pipe.length_m, diameter=pipe.diameter_m,
+                            roughness=100, initial_status="CLOSED")
+            except Exception:
+                failed += 1
+        # A PRV replaces the pipe it sits on; V<pipe_id> still joins back to
+        # asset.pipe, and the valve points from the higher grade line down.
+        for prv in prvs:
+            try:
+                wn.add_valve(element_name("V", prv.pipe.pipe_id),
+                             f"N{prv.upstream}", f"N{prv.downstream}",
+                             diameter=prv.pipe.diameter_m, valve_type="PRV",
+                             initial_setting=prv.setting_m)
+            except Exception:
+                failed += 1
         if failed:
-            print(f"  {failed} selected pipes failed to add")
+            print(f"  {failed} selected pipes or valves failed to add")
 
         # The walk guarantees supply, but a pipe that failed to add can strand
         # what lay beyond it, and EPANET rejects a junction with no link or a

@@ -102,7 +102,7 @@ def build_dmas(conn, n_dmas: int) -> list[str]:
     return dma_ids
 
 
-def build_meters(conn, dma_ids: list[str], per_dma: int) -> list[str]:
+def build_meters(conn, dma_ids: list[str], per_dma: int) -> None:
     """Place synthetic meters along modelled pipes inside each DMA."""
     print(f"placing {per_dma} meters per DMA along real mains ...")
     with conn.cursor() as cur:
@@ -147,10 +147,7 @@ def build_meters(conn, dma_ids: list[str], per_dma: int) -> list[str]:
 
         cur.execute("SELECT count(*) FROM ref.water_meter")
         meters = cur.fetchone()[0]
-        cur.execute("SELECT meter_id FROM ref.water_meter ORDER BY random() LIMIT 200")
-        sample = [r[0] for r in cur.fetchall()]
     print(f"  created {meters} meters")
-    return sample
 
 
 def build_electricity_meters(conn, per_substation: int) -> list[str]:
@@ -190,29 +187,12 @@ def write_schema(filename: str, schema: dict) -> None:
     print(f"  wrote {path}")
 
 
-def emit_schemas(meter_ids: list[str], dma_ids: list[str],
-                 elec_ids: list[str]) -> None:
+def emit_schemas(dma_ids: list[str], elec_ids: list[str]) -> None:
     print("generating Datagen schemas seeded with real asset ids ...")
 
-    write_schema("water_meter_reading.avsc", {
-        "type": "record",
-        "name": "WaterMeterReading",
-        "namespace": f"{NAMESPACE}.water",
-        "fields": [
-            {"name": "meter_id", "type": {"type": "string",
-                "arg.properties": {"options": meter_ids}}},
-            {"name": "dma_id", "type": {"type": "string",
-                "arg.properties": {"options": dma_ids}}},
-            {"name": "litres", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 0.0, "max": 45.0}}}},
-            {"name": "flow_lpm", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 0.0, "max": 30.0}}}},
-            {"name": "battery_pct", "type": {"type": "int",
-                "arg.properties": {"range": {"min": 55, "max": 100}}}},
-            {"name": "event_ts", "type": {"type": "long",
-                "arg.properties": {"iteration": {"start": 1767225600000, "step": 900000}}}},
-        ],
-    })
+    # No water meter schema: ingest-meters reads ref.water_meter directly and
+    # reports every meter with its own DMA and a typical daily pattern, where
+    # Datagen drew meter and DMA independently from a sample of 200.
 
     write_schema("pressure_reading.avsc", {
         "type": "record",
@@ -266,12 +246,12 @@ def main() -> int:
     with psycopg.connect(DSN) as conn:
         load_modelled_pipes(conn)
         dma_ids = build_dmas(conn, args.dmas)
-        meter_sample = build_meters(conn, dma_ids, args.meters_per_dma)
+        build_meters(conn, dma_ids, args.meters_per_dma)
         elec_sample = build_electricity_meters(conn, args.meters_per_substation)
 
     # Datagen picks uniformly from options, so a sample keeps the schema small
     # while still producing ids that exist in the registry tables.
-    emit_schemas(meter_sample, dma_ids, elec_sample)
+    emit_schemas(dma_ids, elec_sample)
 
     print("\nnext: ./scripts/register-connectors.sh")
     return 0

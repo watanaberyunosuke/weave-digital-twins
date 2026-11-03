@@ -15,6 +15,16 @@ fi
 echo "Waiting for Connect at $CONNECT_URL ..."
 until curl -s -o /dev/null "$CONNECT_URL/connectors"; do sleep 3; done
 
+# Water meter readings now come from the ingest-meters service; a stack
+# registered before that still runs the old connector, which would feed the
+# topic twice.
+for retired in datagen-water-meters; do
+  if curl -s -o /dev/null -w '%{http_code}' "$CONNECT_URL/connectors/$retired" | grep -q 200; then
+    curl -s -X DELETE "$CONNECT_URL/connectors/$retired" >/dev/null
+    echo "-> $retired  removed (replaced by ingest-meters)"
+  fi
+done
+
 for f in "$DIR"/datagen-*.json; do
   name=$(python3 -c "import json;print(json.load(open('$f'))['name'])")
   schema=$(python3 -c "import json,os;print(os.path.basename(json.load(open('$f'))['config']['schema.filename']))")
