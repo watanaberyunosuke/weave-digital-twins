@@ -421,3 +421,26 @@ class DeviceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(TestClient is None, "console requirements not installed")
+class ModelLinkLayerTests(unittest.TestCase):
+    """The network-joins layer reads asset.model_link, which the model build
+    creates; before the first build it is an empty layer, not an error."""
+
+    def setUp(self):
+        self.app = load_app()
+        self.client = TestClient(self.app.app)
+
+    def test_empty_before_the_first_build(self):
+        with mock.patch.object(self.app, "scalar", return_value=False):
+            r = self.client.get("/api/geo/model-links")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"type": "FeatureCollection", "features": []})
+
+    def test_reads_the_table_once_built(self):
+        fc = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": None,
+              "properties": {"kind": "bridge", "reason": "synthetic: invented"}}]}
+        with mock.patch.object(self.app, "scalar", side_effect=[True, fc]):
+            r = self.client.get("/api/geo/model-links")
+        self.assertEqual(r.json()["features"][0]["properties"]["kind"], "bridge")

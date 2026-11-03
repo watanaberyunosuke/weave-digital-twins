@@ -456,6 +456,7 @@ map.setView([0, 0], 2);
 const layers = {
   dmas: L.layerGroup().addTo(map),
   pipes: L.layerGroup().addTo(map),
+  links: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   gauges: L.layerGroup().addTo(map),
   storages: L.layerGroup().addTo(map),
@@ -477,7 +478,7 @@ const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECT
 // DMAs could not be clicked.) loadMap() draws in this order; turning a layer
 // back on re-adds the layers above it, because re-adding moves a group to the
 // end of the draw order.
-const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'storages', 'meters'];
+const LAYER_ORDER = ['dmas', 'pipes', 'links', 'facilities', 'gauges', 'storages', 'meters'];
 function restackAbove(name) {
   LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
     .filter((g) => map.hasLayer(g))
@@ -497,12 +498,29 @@ function popupHtml(title, rows) {
   return box;
 }
 
+const LINK_TITLE = {
+  split: 'Real pipe split at a junction',
+  gap: 'Synthetic gap link',
+  bridge: 'Synthetic bridge main',
+  trunk: 'Synthetic reservoir trunk main',
+};
+function linkPopup(p) {
+  const box = popupHtml(LINK_TITLE[p.kind] || p.kind, [
+    ['Model element', p.element_id], ['Real pipe', p.pipe_id], ['Reservoir', p.facility_id],
+    ['Length', p.kind === 'split' ? null : p.length_m !== null && `${fmt.n(p.length_m, 0)} m`],
+    ['Built', fmt.ts(p.built_at)],
+  ]);
+  box.append(el('p', { class: 'hint' }, p.reason));
+  return box;
+}
+
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, facilities, gauges, storages, meters] = await Promise.all([
+  const [dmas, pipes, links, facilities, gauges, storages, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
+    api('/api/geo/model-links').catch(() => null),
     api('/api/geo/facilities').catch(() => null),
     api('/api/geo/gauges').catch(() => null),
     api('/api/geo/storages').catch(() => null),
@@ -541,6 +559,24 @@ async function loadMap() {
     pipes && pipes.features.length >= 8000 ? 'Pipes capped at 8,000, largest diameters first.' : '',
     meters && meters.features.length >= METER_CAP ? `Meters capped at ${fmt.n(METER_CAP)}.` : '',
   ].filter(Boolean).join(' ');
+
+  // Joins the model build made (model/gaps.py), drawn over the real pipes:
+  // synthetic links in the synthetic colour, dashed by how much is invented,
+  // and a ring in the real colour where a real pipe was split.
+  layers.links.clearLayers();
+  if (links) {
+    const dash = { gap: '2 3', bridge: '7 4' };
+    L.geoJSON(links, {
+      style: (f) => ({
+        color: mcss('--syn'), weight: f.properties.kind === 'gap' ? 1.5 : 2.5,
+        opacity: 0.95, dashArray: dash[f.properties.kind] || null,
+      }),
+      pointToLayer: (f, ll) => L.circleMarker(ll, {
+        radius: 4, color: mcss('--real'), weight: 2, fillOpacity: 0,
+      }),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => linkPopup(f.properties), { maxWidth: 380 }),
+    }).addTo(layers.links);
+  }
 
   layers.facilities.clearLayers();
   if (facilities) {

@@ -773,6 +773,32 @@ def storage_loaded() -> bool:
     return bool(scalar("SELECT to_regclass('ref.storage_site') IS NOT NULL"))
 
 
+def model_links_built() -> bool:
+    # run_sim.py --build creates asset.model_link; before the first build
+    # there is nothing to draw.
+    return bool(scalar("SELECT to_regclass('asset.model_link') IS NOT NULL"))
+
+
+@app.get("/api/geo/model-links")
+def geo_model_links():
+    """What the model build changed to join the network's pieces (model/gaps.py):
+    real pipes it split at a junction, and the synthetic gaps, bridges and
+    reservoir trunk mains it added, each with the reason it was needed."""
+    if not db_or_503(model_links_built):
+        return JSONResponse({"type": "FeatureCollection", "features": []})
+    return geojson("""
+        SELECT json_build_object('type', 'Feature',
+               'geometry', ST_AsGeoJSON(geom, 6)::json,
+               'properties', json_build_object(
+                   'element_id', element_id, 'kind', kind, 'synthetic', synthetic,
+                   'pipe_id', pipe_id, 'facility_id', facility_id,
+                   'length_m', round(length_m::numeric, 1), 'reason', reason,
+                   'built_at', built_at)) AS feature
+        FROM asset.model_link
+        WHERE geom IS NOT NULL
+    """)
+
+
 @app.get("/api/geo/storages")
 def geo_storages():
     """Real storage gauges no asset matched, with their latest daily volume.
