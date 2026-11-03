@@ -3,4 +3,4 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 COPY . /app
-CMD ["python", "market_poller.py"]
+CMD ["python", "hydrometry_poller.py"]

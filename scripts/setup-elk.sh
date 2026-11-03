@@ -90,7 +90,6 @@ data_view() {  # id, index pattern, display name
   echo "  $1"
 }
 data_view twin-hydrometry           'twin-hydrometry-*'           'Hydrometry (real)'
-data_view twin-market-dispatch      'twin-market-dispatch-*'      'Market dispatch (real)'
 data_view twin-meter-reading        'twin-meter-reading-*'        'Water meters (synthetic)'
 data_view twin-pressure-reading     'twin-pressure-reading-*'     'Pressure loggers (synthetic)'
 data_view twin-electricity-interval 'twin-electricity-interval-*' 'Electricity meters (synthetic)'

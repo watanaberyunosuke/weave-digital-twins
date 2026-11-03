@@ -843,20 +843,9 @@ async function loadTelemetry() {
   }
 
   if (feeds.error) {
-    $('#market-price').replaceChildren(el('div', { class: 'err' }, feeds.error));
-    $('#market-demand').replaceChildren();
     $('#gauges').replaceChildren();
     return;
   }
-  const regions = [...new Set(feeds.market.map((r) => r.region_id))];
-  const palette = [css('--real'), css('--derived'), css('--watch'), css('--syn')];
-  const bySeries = (key) => regions.map((reg, i) => ({
-    name: reg, colour: palette[i % palette.length],
-    points: feeds.market.filter((r) => r.region_id === reg).map((r) => [r.ts, r[key]]),
-  }));
-  $('#market-price').replaceChildren(chart('Price ($/MWh)', bySeries('price_mwh')));
-  $('#market-demand').replaceChildren(chart('Total demand (MW)', bySeries('total_demand_mw')));
-
   const gauges = feeds.hydrometry_latest;
   $('#gauges').replaceChildren(...(gauges.length ? gauges.map((g) => el('div', { class: 'gauge' },
     el('div', { class: 'h' }, el('strong', {}, g.site_name || g.site_id), el('span', { class: 'muted small' }, g.site_id)),

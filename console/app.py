@@ -94,10 +94,9 @@ NOT_FOUND, NO_SUCH_JOB = "not found", "no such job"
 JOB_ID = re.compile(r"[0-9a-f]{1,32}")
 ADMIN_ENABLED = PUBLIC and bool(ADMIN_HASH) and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)
 
-# The six topics create-topics.sh makes; a step is done when all exist.
+# The four topics create-topics.sh makes; a step is done when all exist.
 TOPICS = [
-    "water.hydrometry.raw.v1", "electricity.market-dispatch.raw.v1",
-    "transport.vehicle-positions.raw.v1", "water.meter-readings.raw.v1",
+    "water.hydrometry.raw.v1", "water.meter-readings.raw.v1",
     "water.pressure-readings.raw.v1", "electricity.meter-interval.raw.v1",
 ]
 
@@ -108,8 +107,6 @@ TOPICS = [
 TELEMETRY = [
     ("hydrometry", "ts", "real"),
     ("storage_level", "ts", "real"),
-    ("market_dispatch", "ts", "real"),
-    ("vehicle_position", "ts", "real"),
     ("meter_reading", "ts", "synthetic"),
     ("pressure_reading", "ts", "synthetic"),
     ("electricity_interval", "ts", "synthetic"),
@@ -1018,12 +1015,6 @@ def feeds(hours: int = Query(24, ge=1, le=168)):
             WHERE ts > now() - %s::interval
             ORDER BY site_id, variable, ts
         """, (window,)),
-        "market": query("""
-            SELECT ts, region_id, price_mwh, total_demand_mw, is_synthetic
-            FROM twin.market_dispatch
-            WHERE ts > now() - %s::interval
-            ORDER BY region_id, ts
-        """, (window,)),
     })
 
 
@@ -1042,7 +1033,7 @@ ACTIONS: dict[str, dict] = {
     "create_topics": {
         "label": "Create Kafka topics",
         "step": 1,
-        "description": "Creates the six raw topics with explicit retention. Idempotent.",
+        "description": "Creates the four raw topics with explicit retention. Idempotent.",
         "params": [],
     },
     "load_gis": {
