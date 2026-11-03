@@ -13,7 +13,7 @@ Weave takes the real network and generates plausible meter readings *anchored to
 ## What you get
 
 - **Asset graph:** Real network topology in PostGIS with pgRouting for connectivity queries
-- **Telemetry ingestion:** Real feeds (AEMO, WMIS, BoM, GTFS-RT, etc.) and synthetic feeds (Datagen) in one Kafka/Flink pipeline
+- **Telemetry ingestion:** Real feeds (hydrometry gauges, storage volumes) and synthetic feeds (Datagen) in one Kafka/Flink pipeline
 - **Network model:** EPANET hydraulic solver (water) or pandapower (electricity) running on a schedule against live telemetry
 - **Anomaly detection:** Residual-based leak/burst/outage alerts by comparing modelled to observed
 - **What-if scenarios:** Run the model against changed conditions to plan interventions
@@ -26,11 +26,11 @@ container definitions. A region lives in exactly two files:
 1. **`gis/regions/<your-region>.yml`** — network layers, their catalogue, and the
    bounding box to load. Copy `gis/regions/TEMPLATE.yml` to start;
    `melbourne-water.example.yml` is a filled-in one to read.
-2. **`.env`** — real-feed endpoints and the gauge/market ids to poll. Copy
+2. **`.env`** — real-feed endpoints and the gauge ids to poll. Copy
    `.env.example`.
 
 The pollers under `ingest/` are adapters for a *shape* of API (a Kisters
-hydrometry webservice, a wholesale market summary report) rather than for a
+hydrometry webservice) rather than for a
 place — endpoints and ids are env config. If your region publishes something
 structurally different, the adapter is the only thing you rewrite.
 
@@ -60,7 +60,7 @@ cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
 
 # Start the stack
 docker compose up -d broker connect control-center flink-jobmanager \
-    flink-taskmanager flink-sql-client postgres ingest-market \
+    flink-taskmanager flink-sql-client postgres \
     ingest-hydrometry gis-loader simulator console featureserv
 
 # Bootstrap (load GIS, derive synthetic assets, start generators, bring up ELK)

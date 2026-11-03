@@ -113,20 +113,6 @@ services:
       timeout: 5s
       retries: 12
 
-  # --- real feed: wholesale electricity market dispatch ----------------------
-  ingest-market:
-    logging: *json-logs
-    build: ./ingest
-    container_name: ingest-market
-    init: true
-    command: python market_poller.py
-    environment:
-      KAFKA_BOOTSTRAP: broker:29092
-      MARKET_DISPATCH_URL: ${MARKET_DISPATCH_URL}
-      MARKET_REGION: ${MARKET_REGION}
-      MARKET_INTERVAL_S: ${MARKET_INTERVAL_S:-300}
-    restart: unless-stopped
-
   # --- real feed: public water gauge telemetry ------------------------------
   ingest-hydrometry:
     logging: *json-logs

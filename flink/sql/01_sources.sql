@@ -27,29 +27,6 @@ CREATE TABLE IF NOT EXISTS hydrometry_raw (
     'json.ignore-parse-errors' = 'true'
 );
 
--- ====================================================== REAL: electricity
-CREATE TABLE IF NOT EXISTS market_dispatch_raw (
-    source                       STRING,
-    region_id                    STRING,
-    settlement_ts                STRING,
-    price_mwh                    DOUBLE,
-    total_demand_mw              DOUBLE,
-    net_interchange_mw           DOUBLE,
-    scheduled_generation_mw      DOUBLE,
-    semi_scheduled_generation_mw DOUBLE,
-    is_synthetic                 BOOLEAN,
-    kafka_ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp' VIRTUAL,
-    WATERMARK FOR kafka_ts AS kafka_ts - INTERVAL '60' SECOND
-) WITH (
-    'connector' = 'kafka',
-    'topic' = 'electricity.market-dispatch.raw.v1',
-    'properties.bootstrap.servers' = 'broker:29092',
-    'properties.group.id' = 'flink-twin',
-    'scan.startup.mode' = 'latest-offset',
-    'format' = 'json',
-    'json.ignore-parse-errors' = 'true'
-);
-
 -- ===================================================== SYNTHETIC: meters
 CREATE TABLE IF NOT EXISTS meter_raw (
     meter_id    STRING,

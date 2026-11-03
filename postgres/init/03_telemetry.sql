@@ -79,19 +79,6 @@ CREATE TABLE twin.dma_latest (
 );
 
 -- ========================================================== ELECTRICITY
--- Real: wholesale market regional dispatch
-CREATE TABLE twin.market_dispatch (
-    ts            TIMESTAMPTZ NOT NULL,
-    region_id     TEXT        NOT NULL,
-    price_mwh     DOUBLE PRECISION,
-    total_demand_mw DOUBLE PRECISION,
-    net_interchange_mw DOUBLE PRECISION,
-    scheduled_generation_mw DOUBLE PRECISION,
-    semi_scheduled_generation_mw DOUBLE PRECISION,
-    is_synthetic  BOOLEAN DEFAULT false,
-    PRIMARY KEY (ts, region_id)
-);
-
 -- Synthetic: electricity interval meter data
 CREATE TABLE twin.electricity_interval (
     ts            TIMESTAMPTZ NOT NULL,
@@ -104,36 +91,6 @@ CREATE TABLE twin.electricity_interval (
 );
 SELECT create_hypertable('twin.electricity_interval', 'ts', chunk_time_interval => INTERVAL '1 day');
 CREATE INDEX ON twin.electricity_interval (substation_id, ts DESC);
-
--- ============================================================ TRANSPORT
-CREATE TABLE twin.vehicle_position (
-    ts               TIMESTAMPTZ NOT NULL,
-    vehicle_id       TEXT        NOT NULL,
-    route_id         TEXT,
-    trip_id          TEXT,
-    lat              DOUBLE PRECISION,
-    lon              DOUBLE PRECISION,
-    bearing          INTEGER,
-    occupancy_status TEXT,
-    is_synthetic     BOOLEAN DEFAULT false,
-    geom             GEOMETRY(Point, 4326)
-                     GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(lon, lat), 4326)) STORED
-);
-SELECT create_hypertable('twin.vehicle_position', 'ts', chunk_time_interval => INTERVAL '1 hour');
-CREATE INDEX ON twin.vehicle_position (vehicle_id, ts DESC);
-
-CREATE TABLE twin.vehicle_latest (
-    vehicle_id       TEXT PRIMARY KEY,
-    ts               TIMESTAMPTZ,
-    route_id         TEXT,
-    lat              DOUBLE PRECISION,
-    lon              DOUBLE PRECISION,
-    bearing          INTEGER,
-    occupancy_status TEXT,
-    geom             GEOMETRY(Point, 4326)
-                     GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(lon, lat), 4326)) STORED
-);
-CREATE INDEX ON twin.vehicle_latest USING GIST (geom);
 
 -- ====================================================== simulation output
 CREATE TABLE twin.sim_result (

@@ -10,13 +10,6 @@ SELECT CAST(kafka_ts AS TIMESTAMP(3)), site_id, variable, `value`,
 FROM hydrometry_raw
 WHERE `value` IS NOT NULL;
 
-INSERT INTO market_sink
-SELECT CAST(kafka_ts AS TIMESTAMP(3)), region_id, price_mwh, total_demand_mw,
-       net_interchange_mw, scheduled_generation_mw,
-       semi_scheduled_generation_mw, false
-FROM market_dispatch_raw
-WHERE region_id IS NOT NULL;
-
 INSERT INTO meter_sink
 SELECT CAST(kafka_ts AS TIMESTAMP(3)), meter_id, dma_id, litres, flow_lpm,
        battery_pct, true

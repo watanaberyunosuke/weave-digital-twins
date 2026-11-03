@@ -10,8 +10,6 @@ create() {
 echo "Creating topics ..."
 # real
 create water.hydrometry.raw.v1          1 2592000000   # 30 days
-create electricity.market-dispatch.raw.v1 1 2592000000 # 30 days
-create transport.vehicle-positions.raw.v1 1 172800000  # 48 hours
 # synthetic
 create water.meter-readings.raw.v1      1 604800000    # 7 days
 create water.pressure-readings.raw.v1   1 604800000    # 7 days

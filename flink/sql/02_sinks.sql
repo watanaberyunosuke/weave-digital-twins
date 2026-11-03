@@ -19,23 +19,6 @@ CREATE TABLE IF NOT EXISTS hydrometry_sink (
     'sink.buffer-flush.interval' = '5s'
 );
 
-CREATE TABLE IF NOT EXISTS market_sink (
-    ts                           TIMESTAMP(3),
-    region_id                    STRING,
-    price_mwh                    DOUBLE,
-    total_demand_mw              DOUBLE,
-    net_interchange_mw           DOUBLE,
-    scheduled_generation_mw      DOUBLE,
-    semi_scheduled_generation_mw DOUBLE,
-    is_synthetic                 BOOLEAN,
-    PRIMARY KEY (ts, region_id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:postgresql://postgres:5432/weave_twin',
-    'table-name' = 'twin.market_dispatch',
-    'username' = 'weave', 'password' = 'weave'
-);
-
 CREATE TABLE IF NOT EXISTS meter_sink (
     ts           TIMESTAMP(3),
     meter_id     STRING,

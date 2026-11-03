@@ -14,8 +14,6 @@ _SAMPLES: dict[str, list[str]] = {
     "create_topics": [
         "Creating topics ...",
         "  water.hydrometry.raw.v1",
-        "  electricity.market-dispatch.raw.v1",
-        "  transport.vehicle-positions.raw.v1",
         "  water.meter-readings.raw.v1",
         "  water.pressure-readings.raw.v1",
         "  electricity.meter-interval.raw.v1",
