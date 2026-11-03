@@ -498,6 +498,21 @@ function popupHtml(title, rows) {
   return box;
 }
 
+const MODEL_STATE = {
+  in: 'yes', zero_length: 'no: a joint, not a pipe', unsupplied: 'no: no supply reaches it',
+  over_cap: 'no: beyond the pipe cap', not_in_graph: 'no: not in the topology',
+};
+function pipePopup(p) {
+  const state = p.model === null ? (p.in_graph ? 'model not built yet' : 'no: not in the topology')
+    : MODEL_STATE[p.model] || p.model;
+  const box = popupHtml(p.pipe_id, [
+    ['Layer', p.layer], ['Diameter', p.diameter_mm && `${p.diameter_mm} mm`],
+    ['Material', p.material], ['In model', state],
+  ]);
+  if (p.model_reason) box.append(el('p', { class: 'hint' }, p.model_reason));
+  return box;
+}
+
 const LINK_TITLE = {
   split: 'Real pipe split at a junction',
   gap: 'Synthetic gap link',
@@ -543,16 +558,15 @@ async function loadMap() {
 
   layers.pipes.clearLayers();
   if (pipes) {
+    // Grey: left out of the model (asset.model_exclusion) or not in the graph.
+    const inModel = (p) => p.in_graph && (p.model === null || p.model === 'in');
     L.geoJSON(pipes, {
       style: (f) => ({
-        color: mcss(f.properties.in_graph ? '--pipe' : '--pipe-off'),
+        color: mcss(inModel(f.properties) ? '--pipe' : '--pipe-off'),
         weight: f.properties.diameter_mm >= 600 ? 2.5 : f.properties.diameter_mm >= 300 ? 1.6 : 1,
         opacity: 0.85,
       }),
-      onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.pipe_id, [
-        ['Layer', f.properties.layer], ['Diameter', f.properties.diameter_mm && `${f.properties.diameter_mm} mm`],
-        ['Material', f.properties.material], ['In graph', f.properties.in_graph ? 'yes' : 'no'],
-      ])),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => pipePopup(f.properties), { maxWidth: 380 }),
     }).addTo(layers.pipes);
   }
   $('#map-note').textContent = [

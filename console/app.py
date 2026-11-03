@@ -701,10 +701,23 @@ def geo_dmas():
     """)
 
 
+def exclusions_built() -> bool:
+    # run_sim.py --build writes asset.model_exclusion; before then whether a
+    # pipe is in the model is unknown, not "no".
+    return bool(scalar("SELECT to_regclass('asset.model_exclusion') IS NOT NULL"))
+
+
 @app.get("/api/geo/pipes")
 def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
               bbox: str | None = Query(None, pattern=r"^-?[\d.]+(,-?[\d.]+){3}$")):
     # Largest mains first, so a capped draw still shows the trunk network.
+    # model is 'in', a reason code from asset.model_exclusion, or null before
+    # the first build.
+    if db_or_503(exclusions_built):
+        join = "LEFT JOIN asset.model_exclusion x USING (pipe_id)"
+        model, why = "CASE WHEN x.reason_code IS NULL THEN 'in' ELSE x.reason_code END", "x.reason"
+    else:
+        join, model, why = "", "NULL", "NULL"
     where, params = "", {"limit": limit}
     if bbox:
         x1, y1, x2, y2 = (float(v) for v in bbox.split(","))
@@ -715,9 +728,11 @@ def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
                'geometry', ST_AsGeoJSON(ST_Simplify(geom, 0.00002), 6)::json,
                'properties', json_build_object(
                    'pipe_id', pipe_id, 'layer', layer, 'diameter_mm', diameter_mm,
-                   'material', material, 'in_graph', start_node IS NOT NULL)) AS feature
+                   'material', material, 'in_graph', start_node IS NOT NULL,
+                   'model', {model}, 'model_reason', {why})) AS feature
         FROM (SELECT * FROM asset.pipe {where}
               ORDER BY diameter_mm DESC NULLS LAST LIMIT %(limit)s) p
+        {join}
     """, params)
 
 

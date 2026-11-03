@@ -63,6 +63,7 @@ class Selection:
     capped_pipes: int = 0                   # reachable, but beyond the cap
     skipped_pipes: int = 0                  # self-loops after snapping
     sources_without_pipes: list[int] = field(default_factory=list)
+    reachable: frozenset = frozenset()      # nodes connected to a source, cap ignored
 
 
 def select_supplied_subgraph(pipes: list[Pipe], sources: list[int],
@@ -96,6 +97,7 @@ def select_supplied_subgraph(pipes: list[Pipe], sources: list[int],
         capped_pipes=reachable_pipes - len(selected),
         skipped_pipes=skipped,
         sources_without_pipes=[s for s in start if not adjacency.get(s)],
+        reachable=frozenset(reachable),
     )
 
 

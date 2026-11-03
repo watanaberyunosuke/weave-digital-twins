@@ -444,3 +444,35 @@ class ModelLinkLayerTests(unittest.TestCase):
         with mock.patch.object(self.app, "scalar", side_effect=[True, fc]):
             r = self.client.get("/api/geo/model-links")
         self.assertEqual(r.json()["features"][0]["properties"]["kind"], "bridge")
+
+
+@unittest.skipIf(TestClient is None, "console requirements not installed")
+class PipeModelStateTests(unittest.TestCase):
+    """Pipes carry whether the model keeps them once a build has run."""
+
+    def setUp(self):
+        self.app = load_app()
+        self.client = TestClient(self.app.app)
+
+    def test_unknown_before_the_first_build(self):
+        seen = []
+
+        def fake(sql, params=()):
+            seen.append(sql)
+            return False if "to_regclass" in sql else {"type": "FeatureCollection", "features": []}
+
+        with mock.patch.object(self.app, "scalar", side_effect=fake):
+            self.client.get("/api/geo/pipes")
+        self.assertIn("'model', NULL", seen[-1])
+        self.assertNotIn("model_exclusion", seen[-1])
+
+    def test_joined_to_exclusions_once_built(self):
+        seen = []
+
+        def fake(sql, params=()):
+            seen.append(sql)
+            return True if "to_regclass" in sql else {"type": "FeatureCollection", "features": []}
+
+        with mock.patch.object(self.app, "scalar", side_effect=fake):
+            self.client.get("/api/geo/pipes")
+        self.assertIn("LEFT JOIN asset.model_exclusion", seen[-1])

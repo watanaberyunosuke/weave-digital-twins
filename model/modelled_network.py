@@ -32,6 +32,38 @@ MAX_PIPES = int(os.environ.get("SIM_MAX_PIPES", "200000"))
 # catchment dam onto whatever main is nearest, kilometres away, would put a
 # fixed head where there is none.
 MAX_SNAP_M = float(os.environ.get("SIM_MAX_SNAP_M", "500"))
+SUPPLY_TYPES = ("service_reservoir", "storage_dam")
+# How many of a reservoir's nearest nodes are looked at for one with a usable
+# pipe. The nearest node can carry only a pipe that collapsed to zero length
+# when snapped, which supplies nothing.
+SNAP_CANDIDATES = 20
+
+
+def snap_limits(max_snap_m: float = MAX_SNAP_M) -> dict[str, float]:
+    """Snap distance per supply type. SIM_MAX_SNAP_M_<TYPE> overrides
+    SIM_MAX_SNAP_M for that type: a service reservoir feeds the distribution
+    network and may sit some way off it, while a storage dam is usually
+    catchment storage behind a treatment plant, so may warrant less."""
+    limits = {}
+    for kind in SUPPLY_TYPES:
+        value = os.environ.get(f"SIM_MAX_SNAP_M_{kind.upper()}")
+        limits[kind] = float(value) if value else max_snap_m
+    return limits
+
+
+RESERVOIR_NODES_SQL = """
+    SELECT f.facility_id, ST_Y(f.geom), ST_X(f.geom), f.facility_type,
+           near.node_id, near.elevation_m,
+           ST_Distance(f.geom::geography, near.geom::geography), near.rank
+    FROM asset.facility f
+    CROSS JOIN LATERAL (
+        SELECT n.node_id, n.elevation_m, n.geom,
+               row_number() OVER (ORDER BY n.geom <-> f.geom, n.node_id) AS rank
+        FROM (SELECT * FROM asset.node n
+              ORDER BY n.geom <-> f.geom, n.node_id LIMIT %(k)s) n) near
+    WHERE f.facility_type IN ('service_reservoir', 'storage_dam')
+    ORDER BY f.facility_id, near.rank
+"""
 
 
 # Dead ends lying close to the side of a pipe that isn't theirs, where the
@@ -72,6 +104,9 @@ class Modelled:
     selection: Selection
     links: list[Link] = field(default_factory=list)  # splits, gaps, bridges, with reasons
     unjoined: tuple = (0, 0)    # pieces and pipes still without supply
+    pipes: list = field(default_factory=list)        # every pipe the walk could use
+    snap_notes: list[str] = field(default_factory=list)  # reservoirs snapped past a node
+    limits: dict = field(default_factory=dict)       # snap distance per supply type
 
 
 def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNAP_M,
@@ -79,23 +114,6 @@ def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNA
                     large_m: float = BRIDGE_LARGE_M) -> Modelled:
     """Snap supply reservoirs to the graph, join the pieces (real splits
     first, then synthetic gaps and bridges), then walk out to the pipe cap."""
-    # Each reservoir snaps to its nearest graph node; node_id breaks distance
-    # ties so the snap is the same every build.
-    cur.execute("""
-        SELECT f.facility_id, ST_Y(f.geom), ST_X(f.geom),
-               near.node_id, near.elevation_m,
-               ST_Distance(f.geom::geography, near.geom::geography)
-        FROM asset.facility f
-        CROSS JOIN LATERAL (
-            SELECT n.node_id, n.elevation_m, n.geom FROM asset.node n
-            ORDER BY n.geom <-> f.geom, n.node_id LIMIT 1) near
-        WHERE f.facility_type IN ('service_reservoir', 'storage_dam')
-        ORDER BY f.facility_id
-    """)
-    candidates = cur.fetchall()
-    reservoirs = [r for r in candidates if r[5] <= max_snap_m]
-    too_far = [r for r in candidates if r[5] > max_snap_m]
-
     cur.execute("""
         SELECT pipe_id, start_node, end_node,
                COALESCE(length_m, ST_Length(geom::geography)),
@@ -105,6 +123,32 @@ def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNA
     """)
     pipes = [Pipe(pipe_id, s, e, max(float(length or 1), 1.0), max(float(dia or 0.15), 0.05))
              for pipe_id, s, e, length, dia in cur.fetchall()]
+    # A reservoir snaps to its nearest node that has a usable pipe (one that
+    # didn't collapse to zero length); node_id breaks distance ties so the snap
+    # is the same every build. Passing over a nearer node is noted with why.
+    usable = {n for p in pipes if p.start_node != p.end_node for n in (p.start_node, p.end_node)}
+    limits = snap_limits(max_snap_m)
+    cur.execute(RESERVOIR_NODES_SQL, {"k": SNAP_CANDIDATES})
+    by_facility: dict[str, list] = {}
+    for row in cur.fetchall():
+        by_facility.setdefault(row[0], []).append(row)
+    reservoirs, too_far, snap_notes = [], [], []
+    for fid in sorted(by_facility):
+        rows = sorted(by_facility[fid], key=lambda r: r[7])
+        pick = next((r for r in rows if r[4] in usable), None)
+        if pick is None:
+            snap_notes.append(f"reservoir {fid}: none of its {len(rows)} nearest nodes has a "
+                              f"usable pipe, so it is left out")
+            continue
+        if pick is not rows[0]:
+            snap_notes.append(
+                f"reservoir {fid}: nearest node N{rows[0][4]} ({rows[0][6]:.0f} m) has no usable "
+                f"pipe (only zero-length after snapping), so it snaps to N{pick[4]} "
+                f"({pick[6]:.0f} m)")
+        fid_, lat, lon, kind, node, elev, dist, _rank = pick
+        entry = (fid_, lat, lon, node, elev, dist)
+        (reservoirs if dist <= limits.get(kind, max_snap_m) else too_far).append(entry)
+
     pipe_count = len(pipes)
     sources = [r[3] for r in reservoirs]
 
@@ -120,4 +164,32 @@ def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNA
         links += joins
 
     selection = select_supplied_subgraph(pipes, sources, max_pipes)
-    return Modelled(reservoirs, too_far, pipe_count, selection, links, unjoined)
+    return Modelled(reservoirs, too_far, pipe_count, selection, links, unjoined,
+                    pipes, snap_notes, limits)
+
+
+def excluded_pipes(m: Modelled, max_pipes: int = MAX_PIPES,
+                   large_m: float = BRIDGE_LARGE_M) -> dict[str, tuple[str, str]]:
+    """Every real pipe the model leaves out, with a code and the reason.
+
+    A split pipe counts as modelled if any of its pieces is. Pipes the
+    topology build never gave nodes to are not in m.pipes; run_sim.py adds
+    those from the database.
+    """
+    kept = {p.asset_id for p in m.selection.pipes if p.asset_id is not None}
+    out: dict[str, tuple[str, str]] = {}
+    for p in m.pipes:
+        aid = p.asset_id
+        if aid is None or aid in kept or aid in out:
+            continue
+        if p.start_node == p.end_node:
+            out[aid] = ("zero_length",
+                        "both ends snapped to the same node: shorter than the snap tolerance, "
+                        "so it is a joint, not a pipe; the pipes it joined still meet there")
+        elif p.start_node in m.selection.reachable:
+            out[aid] = ("over_cap", f"connected to supply but beyond SIM_MAX_PIPES={max_pipes}")
+        else:
+            out[aid] = ("unsupplied",
+                        f"in a piece no reservoir reaches, with no real connection and no other "
+                        f"network within SIM_BRIDGE_LARGE_M={large_m:g} m to join it to")
+    return out

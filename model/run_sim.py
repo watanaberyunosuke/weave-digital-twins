@@ -27,7 +27,7 @@ from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_dema
 from residuals import (ALL_DMAS, BASELINE_DAYS, MIN_SAMPLES, RELEARN_HOURS, RESET_TABLE_SQL,
                        RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify)
 from gaps import BRIDGE_LARGE_M, BRIDGE_SMALL_M, TJUNCTION_M, Link
-from modelled_network import MAX_PIPES, MAX_SNAP_M, select_modelled
+from modelled_network import MAX_PIPES, MAX_SNAP_M, excluded_pipes, select_modelled
 from subgraph import element_name
 from zones import HEAD_MARGIN_M, MAX_PRESSURE_M, MIN_PRESSURE_M, plan_zones
 
@@ -122,6 +122,36 @@ def record_links(cur, links: list[Link], trunks: list[tuple]) -> None:
     """)
 
 
+EXCLUSION_SQL = """
+    CREATE TABLE IF NOT EXISTS asset.model_exclusion (
+        pipe_id      TEXT PRIMARY KEY,      -- asset.pipe the model leaves out
+        reason_code  TEXT NOT NULL,         -- zero_length | unsupplied | over_cap | not_in_graph
+        reason       TEXT NOT NULL,
+        built_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"""
+
+
+def record_exclusions(cur, excluded: dict[str, tuple[str, str]]) -> dict[str, int]:
+    """Write every real pipe the model leaves out, and why, to asset.model_exclusion;
+    returns the count per reason."""
+    cur.execute(EXCLUSION_SQL)
+    cur.execute("TRUNCATE asset.model_exclusion")
+    with cur.copy("COPY asset.model_exclusion (pipe_id, reason_code, reason) FROM STDIN") as copy:
+        for pipe_id, (code, reason) in excluded.items():
+            copy.write_row((pipe_id, code, reason))
+    # Pipes the topology build gave no nodes never reach the selection at all.
+    cur.execute("""
+        INSERT INTO asset.model_exclusion (pipe_id, reason_code, reason)
+        SELECT pipe_id, 'not_in_graph',
+               'not in the topology: asset.build_topology() gave it no nodes'
+        FROM asset.pipe WHERE start_node IS NULL OR end_node IS NULL
+        ON CONFLICT (pipe_id) DO NOTHING
+    """)
+    cur.execute("SELECT reason_code, count(*) FROM asset.model_exclusion GROUP BY 1 ORDER BY 2 DESC")
+    return dict(cur.fetchall())
+
+
 def report_links(links: list[Link], trunks: list[tuple], unjoined: tuple) -> None:
     """Counts by kind in the build log, with one example reason each."""
     by_kind: dict[str, list] = {}
@@ -159,10 +189,13 @@ def build_inp() -> str:
         # sit where this model can score them.
         m = select_modelled(cur)
         reservoirs, too_far, sel = m.reservoirs, m.too_far, m.selection
+        for note in m.snap_notes:
+            print(f"  {note}")
         if too_far:
-            print(f"  {len(too_far)} reservoirs left out: further than "
-                  f"SIM_MAX_SNAP_M={MAX_SNAP_M:g} m from any node "
-                  f"(furthest {max(r[5] for r in too_far):.0f} m)")
+            limits = ", ".join(f"{k} {v:g} m" for k, v in m.limits.items())
+            print(f"  {len(too_far)} reservoirs left out: further from a usable node than "
+                  f"their type's snap limit ({limits}; SIM_MAX_SNAP_M_<TYPE> overrides "
+                  f"SIM_MAX_SNAP_M) (furthest {max(r[5] for r in too_far):.0f} m)")
         if not reservoirs:
             sys.exit("! no supply: load a service_reservoir or storage_dam layer "
                      "within SIM_MAX_SNAP_M of the network so the model has a "
@@ -299,7 +332,12 @@ def build_inp() -> str:
                 if l.kind == "split" or l.element_id in modelled]
         report_links(used, trunks, m.unjoined)
         record_links(cur, used, trunks)
+        counts = record_exclusions(cur, excluded_pipes(m))
         conn.commit()
+        if counts:
+            print("  real pipes left out, by reason (asset.model_exclusion; the console map "
+                  "greys them, click one for why): "
+                  + ", ".join(f"{code} {n}" for code, n in counts.items()))
 
     os.makedirs(os.path.dirname(INP_PATH), exist_ok=True)
     wn.options.time.duration = 0                       # snapshot solve
