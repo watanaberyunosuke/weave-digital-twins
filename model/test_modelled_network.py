@@ -7,14 +7,23 @@ from modelled_network import select_modelled
 
 
 class StubCursor:
-    """Answers the two queries in order: reservoirs, then pipes."""
+    """Answers each query by what it reads: reservoirs, pipes, T-junction
+    hits, node coordinates."""
 
-    def __init__(self, reservoirs, pipes):
-        self._results = [reservoirs, pipes]
+    def __init__(self, reservoirs, pipes, hits=(), coords=None):
+        self._answers = {"facility": reservoirs, "pipes": pipes, "hits": list(hits),
+                         "coords": [(n, x, y) for n, (x, y) in (coords or {}).items()]}
         self._current = None
 
     def execute(self, sql, params=None):
-        self._current = self._results.pop(0)
+        if "asset.facility" in sql:
+            self._current = self._answers["facility"]
+        elif "ST_LineLocatePoint" in sql:
+            self._current = self._answers["hits"]
+        elif "FROM asset.node" in sql:
+            self._current = self._answers["coords"]
+        else:
+            self._current = self._answers["pipes"]
 
     def fetchall(self):
         return self._current
@@ -40,6 +49,33 @@ class SelectModelledTest(unittest.TestCase):
         reservoirs = [("near", -37.0, 145.0, 1, 40.0, 20.0)]
         m = select_modelled(StubCursor(reservoirs, PIPES), max_pipes=2, max_snap_m=500)
         self.assertEqual([p.pipe_id for p in m.selection.pipes], ["a", "b"])
+
+    def test_real_split_comes_before_any_synthetic_link(self):
+        # z's end node 10 lies on the side of pipe b: splitting b joins it
+        # for real, so no gap or bridge is needed even with coordinates given.
+        reservoirs = [("near", -37.0, 145.0, 1, 40.0, 20.0)]
+        coords = {1: (145.0, -37.0), 2: (145.001, -37.0), 3: (145.002, -37.0),
+                  4: (145.003, -37.0), 10: (145.0015, -37.0), 11: (145.0015, -37.001)}
+        m = select_modelled(StubCursor(reservoirs, PIPES, hits=[(10, "b", 0.5, 0.5)],
+                                       coords=coords), max_pipes=100, max_snap_m=500)
+        self.assertEqual([l.kind for l in m.links], ["split"])
+        self.assertIn("z", {p.pipe_id for p in m.selection.pipes})
+        self.assertEqual({p.asset_id for p in m.selection.pipes}, {"a", "b", "c", "z"})
+
+    def test_far_piece_is_bridged_and_says_so(self):
+        reservoirs = [("near", -37.0, 145.0, 1, 40.0, 20.0)]
+        coords = {1: (145.0, -37.0), 2: (145.001, -37.0), 3: (145.002, -37.0),
+                  4: (145.003, -37.0), 10: (145.013, -37.0), 11: (145.014, -37.0)}
+        m = select_modelled(StubCursor(reservoirs, PIPES, coords=coords),
+                            max_pipes=100, max_snap_m=500)
+        [link] = m.links
+        self.assertEqual(link.kind, "bridge")
+        self.assertIn("invented", link.reason)
+        self.assertIn("z", {p.pipe_id for p in m.selection.pipes})
+        off = select_modelled(StubCursor(reservoirs, PIPES, coords=coords), max_pipes=100,
+                              max_snap_m=500, small_m=0, large_m=0)
+        self.assertEqual(off.links, [])
+        self.assertNotIn("z", {p.pipe_id for p in off.selection.pipes})
 
     def test_no_reservoir_selects_nothing(self):
         m = select_modelled(StubCursor([], PIPES), max_pipes=100, max_snap_m=500)

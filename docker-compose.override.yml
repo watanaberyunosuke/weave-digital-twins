@@ -190,6 +190,9 @@ services:
       # same cap and snap distance as the simulator.
       SIM_MAX_PIPES: ${SIM_MAX_PIPES:-200000}
       SIM_MAX_SNAP_M: ${SIM_MAX_SNAP_M:-500}
+      SIM_TJUNCTION_M: ${SIM_TJUNCTION_M:-2}
+      SIM_BRIDGE_SMALL_M: ${SIM_BRIDGE_SMALL_M:-50}
+      SIM_BRIDGE_LARGE_M: ${SIM_BRIDGE_LARGE_M:-5000}
     volumes:
       - ./gis:/work/gis:ro
       - ./scripts:/work/scripts:ro
@@ -220,6 +223,11 @@ services:
       SIM_MAX_SERVICE_PRESSURE_M: ${SIM_MAX_SERVICE_PRESSURE_M:-80}
       SIM_HEAD_MARGIN_M: ${SIM_HEAD_MARGIN_M:-5}
       SIM_MAX_SNAP_M: ${SIM_MAX_SNAP_M:-500}
+      # Joining the network's pieces (model/gaps.py): real splits, then
+      # synthetic gaps and bridges. The seeder reads the same values.
+      SIM_TJUNCTION_M: ${SIM_TJUNCTION_M:-2}
+      SIM_BRIDGE_SMALL_M: ${SIM_BRIDGE_SMALL_M:-50}
+      SIM_BRIDGE_LARGE_M: ${SIM_BRIDGE_LARGE_M:-5000}
       SIM_RESIDUAL_MIN_SAMPLES: ${SIM_RESIDUAL_MIN_SAMPLES:-8}
       SIM_RESULT_RETENTION_HOURS: ${SIM_RESULT_RETENTION_HOURS:-24}
     volumes:

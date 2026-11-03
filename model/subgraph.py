@@ -43,6 +43,16 @@ class Pipe:
     end_node: int
     length_m: float
     diameter_m: float
+    # real: an asset.pipe row as published. split: a piece of one, cut where
+    # another main meets its side (source_id is the asset). gap / bridge: a
+    # synthetic link the model added; source_id is None. See model/gaps.py.
+    kind: str = "real"
+    source_id: str | None = None
+
+    @property
+    def asset_id(self) -> str | None:
+        """The asset.pipe id this element stands for, None if synthetic."""
+        return self.pipe_id if self.kind == "real" else self.source_id
 
 
 @dataclass
