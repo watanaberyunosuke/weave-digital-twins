@@ -174,6 +174,32 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # --- synthetic feed: gaps left while the host slept ------------------------
+  # Fills closed gaps in the meter and logger tables and logs each to
+  # twin.backfill_log. Real feeds are never filled.
+  ingest-backfill:
+    logging: *json-logs
+    build: ./ingest
+    container_name: ingest-backfill
+    init: true
+    command: python backfill.py
+    environment:
+      TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
+      METER_INTERVAL_S: ${METER_INTERVAL_S:-900}
+      METER_TZ: ${METER_TZ:-UTC}
+      METER_INTERVAL_RANGE: ${METER_INTERVAL_RANGE:-0.5}
+      METER_DAY_RANGE: ${METER_DAY_RANGE:-0.15}
+      BACKFILL_INTERVAL_S: ${BACKFILL_INTERVAL_S:-60}
+      BACKFILL_MAX_AGE_DAYS: ${BACKFILL_MAX_AGE_DAYS:-7}
+      BACKFILL_PRESSURE_GAP_S: ${BACKFILL_PRESSURE_GAP_S:-300}
+      BACKFILL_PRESSURE_EVERY_S: ${BACKFILL_PRESSURE_EVERY_S:-1.5}
+    volumes:
+      - ./schemas:/schemas:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   # --- batch: public GIS network loader (run on demand) ---------------------
   gis-loader:
     logging: *json-logs

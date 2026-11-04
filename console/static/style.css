@@ -266,6 +266,7 @@ a { color: var(--accent); }
 .chart { width: 100%; }
 .chart svg { display: block; width: 100%; max-width: 560px; height: auto; overflow: visible; }
 .chart .axis { stroke: var(--line); }
+.chart .backfill { fill: var(--syn); opacity: 0.12; }
 .chart .lbl { fill: var(--muted); font-size: 10px; }
 .chart .title { fill: var(--text); font-size: 11px; font-weight: 600; }
 .chart .nodata { fill: var(--muted); font-size: 12px; }

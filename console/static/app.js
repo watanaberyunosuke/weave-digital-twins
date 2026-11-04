@@ -674,14 +674,17 @@ async function openDma(dmaId) {
       el('dt', {}, 'Meters / loggers'), el('dd', {}, `${fmt.n(i.meters)} / ${fmt.n(i.loggers)}`),
       el('dt', {}, 'Observed pressure'), el('dd', {}, i.min_pressure_m === null ? '—' : `${fmt.n(i.min_pressure_m, 1)} m`),
       el('dt', {}, 'Status as of'), el('dd', {}, fmt.ts(i.ts))),
-    chart('Consumption per 15 min (L)', [{ name: 'consumption', colour: css('--syn'), points: d.balance.map((r) => [r.ts, r.consumption_l]) }]),
-    chart('Min pressure (m)', [{ name: 'min pressure', colour: css('--derived'), points: d.balance.map((r) => [r.ts, r.min_pressure_m]) }]),
+    chart('Consumption per 15 min (L)', [{ name: 'consumption', colour: css('--syn'), points: d.balance.map((r) => [r.ts, r.consumption_l]) }],
+      { bands: filledBands(d.backfills, 'meter_reading') }),
+    chart('Min pressure (m)', [{ name: 'min pressure', colour: css('--derived'), points: d.balance.map((r) => [r.ts, r.min_pressure_m]) }],
+      { bands: filledBands(d.backfills, 'pressure_reading') }),
     chart('Pressure: modelled vs observed (m)', [
       { name: 'modelled', colour: css('--derived'), points: d.residuals.map((r) => [r.ts, r.modelled]) },
       { name: 'observed', colour: css('--syn'), points: d.residuals.map((r) => [r.ts, r.observed]) },
     ]),
     el('p', { class: 'hint' }, statusMeaning(i.status, d.baseline)),
     el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic.'),
+    ...(d.backfills.length ? [el('p', { class: 'hint' }, BACKFILL_NOTE)] : []),
   );
 }
 
@@ -807,8 +810,10 @@ function devicePopup(kind, id) {
       el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
         .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
       d.series.length
-        ? chart(kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)', series, { height: 110 })
+        ? chart(kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)', series,
+          { height: 110, bands: filledBands(d.backfills) })
         : el('p', { class: 'muted small' }, `No readings in the last ${d.hours} h.`),
+      ...(d.backfills.length ? [el('p', { class: 'muted small' }, BACKFILL_NOTE)] : []),
     );
   }).catch((err) => box.replaceChildren(el('strong', {}, id), el('div', { class: 'err' }, err.message)));
   return box;
@@ -816,7 +821,32 @@ function devicePopup(kind, id) {
 
 // ----------------------------------------------------------------- charts
 // A small SVG line chart: enough for a 24 h trend, and no dependency.
-function chart(title, series, { height = 130 } = {}) {
+// Splits [time, value] points wherever a series went quiet, so a chart leaves a
+// gap instead of drawing a straight line through hours nothing was measured.
+// The limit follows the series' own median spacing because charts mix cadences,
+// and the median because one outage must not widen the limit that detects it.
+function runs(points) {
+  const gaps = points.slice(1).map(([t], i) => t - points[i][0]).sort((a, b) => a - b);
+  const limit = 3 * (gaps[Math.floor(gaps.length / 2)] ?? 0);
+  const out = [[points[0]]];
+  points.slice(1).forEach((point, i) => {
+    if (point[0] - points[i][0] > limit) out.push([point]);
+    else out[out.length - 1].push(point);
+  });
+  return out;
+}
+
+const BACKFILL_NOTE = 'Shaded periods were drawn afterwards to cover a gap in the feed, from the same profiles and ranges '
+  + 'as live readings. They are not readings generated at the time.';
+
+// [start, end] in ms of the ranges ingest/backfill.py filled; every stream given
+// when none is named, because a device's list holds only its own.
+function filledBands(fills, stream) {
+  return fills.filter((f) => !stream || f.stream === stream)
+    .map((f) => [new Date(f.gap_start).getTime(), new Date(f.gap_end).getTime()]);
+}
+
+function chart(title, series, { height = 130, bands = [] } = {}) {
   const W = 360;
   const H = height;
   const pad = { l: 40, r: 8, t: 18, b: 18 };
@@ -855,12 +885,22 @@ function chart(title, series, { height = 130 } = {}) {
   add('text', { x: pad.l, y: H - 4, class: 'lbl' }, xlabel(x0));
   add('text', { x: W - pad.r, y: H - 4, 'text-anchor': 'end', class: 'lbl' }, xlabel(x1));
 
+  // Under the lines, and named only here so a filled stretch can't be read as live.
+  const shown = bands.map(([a, b]) => [Math.max(a, x0), Math.min(b, x1)]).filter(([a, b]) => a < b);
+  shown.forEach(([a, b]) => add('rect', {
+    x: sx(a), y: pad.t, width: sx(b) - sx(a), height: H - pad.t - pad.b, class: 'backfill',
+  }));
+  if (shown.length) add('text', { x: W - pad.r, y: 11, 'text-anchor': 'end', class: 'lbl' }, 'shaded: backfilled');
+
   series.forEach((s, idx) => {
     const p = s.points.filter(([, v]) => v !== null && v !== undefined)
-      .map(([t, v]) => [sx(new Date(t).getTime()), sy(Number(v))]);
+      .map(([t, v]) => [new Date(t).getTime(), Number(v)]);
     if (!p.length) return;
-    if (p.length === 1) add('circle', { cx: p[0][0], cy: p[0][1], r: 2.5, fill: s.colour });
-    else add('polyline', { points: p.map((q) => q.join(',')).join(' '), fill: 'none', stroke: s.colour, 'stroke-width': 1.6 });
+    runs(p).forEach((run) => {
+      const q = run.map(([t, v]) => [sx(t), sy(v)]);
+      if (q.length === 1) add('circle', { cx: q[0][0], cy: q[0][1], r: 2.5, fill: s.colour });
+      else add('polyline', { points: q.map((c) => c.join(',')).join(' '), fill: 'none', stroke: s.colour, 'stroke-width': 1.6 });
+    });
     if (series.length > 1) {
       add('text', { x: W - pad.r - idx * 70, y: 11, 'text-anchor': 'end', class: 'lbl', fill: s.colour }, s.name);
     }

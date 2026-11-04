@@ -54,6 +54,18 @@ CREATE TABLE twin.pressure_reading (
 SELECT create_hypertable('twin.pressure_reading', 'ts', chunk_time_interval => INTERVAL '1 day');
 CREATE INDEX ON twin.pressure_reading (dma_id, ts DESC);
 
+-- Ranges of the two tables above that ingest/backfill.py drew after a gap, which
+-- is_synthetic alone can't show. The console marks them; Logstash re-reads them.
+CREATE TABLE twin.backfill_log (
+    stream     TEXT        NOT NULL,
+    gap_start  TIMESTAMPTZ NOT NULL,
+    gap_end    TIMESTAMPTZ NOT NULL,
+    row_count  BIGINT      NOT NULL,
+    method     TEXT        NOT NULL,
+    filled_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (stream, gap_start)
+);
+
 -- Gold: per-DMA water balance. Inflow minus consumption is the leak signal.
 CREATE TABLE twin.dma_balance (
     window_start   TIMESTAMPTZ NOT NULL,

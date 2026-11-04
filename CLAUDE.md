@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Weave is a framework for building digital twins of utility networks (water, electricity, transport). It loads **real** public GIS topology into PostGIS, derives **synthetic** meters onto that real geometry, and runs both real and synthetic telemetry through one Kafka/Flink pipeline into TimescaleDB, where an EPANET model's output is compared against observations to flag anomalies.
 
-The clone is the stack, but **not on its own**: [scripts/fetch-confluent-stack.sh](scripts/fetch-confluent-stack.sh) puts `docker-compose.yml` and `vol/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`, its `cp-all-in-one/` folder) into the repository root, git-ignored, and that file supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-hydrometry`, `ingest-storage`, `ingest-meters`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Until the fetch has run, compose finds no base file and refuses to start. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
+The clone is the stack, but **not on its own**: [scripts/fetch-confluent-stack.sh](scripts/fetch-confluent-stack.sh) puts `docker-compose.yml` and `vol/` from Confluent's `cp-all-in-one` repository (branch `8.2.0-post`, its `cp-all-in-one/` folder) into the repository root, git-ignored, and that file supplies `broker` (Confluent Server), `connect`, `control-center` (with `prometheus` and `alertmanager`), `flink-jobmanager`, `flink-taskmanager` and `flink-sql-client`. Control Center manages Kafka only; Flink is managed in its own UI. [docker-compose.override.yml](docker-compose.override.yml) only adds mounts to those and defines the Weave-specific services (`postgres`, `ingest-hydrometry`, `ingest-storage`, `ingest-meters`, `ingest-backfill`, `gis-loader`, `simulator`, `console`, `featureserv`, and the ELK services `elasticsearch`, `kibana`, `elk-setup`, `logstash`, `filebeat`). Until the fetch has run, compose finds no base file and refuses to start. The override pins the compose project to `weave`, so the directory can be named anything without orphaning the `weave_pgdata` volume.
 
 ## Commands
 
@@ -30,7 +30,7 @@ cp .env.example .env                     # then edit for your region
 ./scripts/init-secrets.sh                # console tokens and admin password hash; --totp adds an authenticator
 ./scripts/download-flink-connectors.sh   # populates flink/lib/ (gitignored, must exist before compose up)
 docker compose up -d broker connect control-center flink-jobmanager flink-taskmanager \
-    flink-sql-client postgres ingest-hydrometry ingest-meters gis-loader simulator console featureserv
+    flink-sql-client postgres ingest-hydrometry ingest-meters ingest-backfill gis-loader simulator console featureserv
 ./scripts/bootstrap.sh                   # topics -> GIS load -> seed synthetic -> connectors -> build model -> ELK
 docker exec -it flink-sql-client sql-client.sh
   SOURCE '/sql/01_sources.sql'; SOURCE '/sql/02_sinks.sql'; SOURCE '/sql/03_pipelines.sql';
@@ -85,6 +85,7 @@ public GIS catalogue ─(gis/load_gis.py)─> asset.gis_raw + asset.pipe/facilit
                                                                                            ▼
 real feeds (ingest/*.py) ──────────────────────────────────────────> Kafka topics ──> Flink SQL ──> twin.* (Timescale)
 storage volumes (ingest/storage_poller.py, daily) ── batch, no Kafka ──> ref.storage_site + twin.storage_level
+gaps in synthetic telemetry (ingest/backfill.py) ── no Kafka ──> twin.meter_reading, pressure_reading, dma_balance, backfill_log
                                                                                            │
                                      model/run_sim.py: PostGIS -> EPANET .inp -> solve -> twin.sim_result
                                                                                            │
@@ -103,6 +104,16 @@ storage volumes (ingest/storage_poller.py, daily) ── batch, no Kafka ──>
 [postgres/init/](postgres/init/) runs **only on an empty volume**. Schema changes require `docker compose down -v` for `postgres` (destroying loaded GIS) or a manual migration.
 
 `asset.build_topology()` ([postgres/init/02_asset_graph.sql:177](postgres/init/02_asset_graph.sql#L177)) snaps pipe endpoints within `tolerance` onto shared `asset.node` rows in plain PostGIS, because pgRouting 4 removed `pgr_createTopology`. Existing nodes keep their ids across re-runs and junctions no pipe touches are pruned; to re-snap at a new tolerance, empty `asset.node` first. The first run is slow on large networks (about 15 s per 180k pipes) and nothing downstream works without it — `run_sim.py --build` exits if `pipe.start_node` is unpopulated.
+
+### Gap fills
+
+A sleeping host stops the generators but not water use, so [ingest/backfill.py](ingest/backfill.py) (`ingest-backfill`) fills the gaps in `twin.meter_reading` and `twin.pressure_reading`, drawing from the live feeds' own sources (`demand_profiles`, and `schemas/pressure_reading.avsc`, read rather than copied because the seeder rewrites it). Real feeds are never filled.
+
+- **Closed gaps only.** A gap counts once a live row follows it. One still open can't be told from a broken pipeline, and filling it would make a dead feed look fresh. That row also fixes where the gap ends, so a filled gap stops being a gap, which is the only thing keeping a re-run safe on tables with no key. Meter gaps are over 1.5 × `METER_INTERVAL_S`, logger gaps over `BACKFILL_PRESSURE_GAP_S` (300 s), and only the last `BACKFILL_MAX_AGE_DAYS` (7) are looked at.
+- **Straight to Postgres, one transaction per gap**, like the storage poller. Through Kafka the bronze sinks would accept old timestamps but Flink's windows have closed, so `twin.dma_balance` is recomputed here over the same range, only for windows with meter readings, as the pipeline does.
+- **Every fill is logged** to `twin.backfill_log` (range, row count, method), because `is_synthetic` can't separate filled rows from live synthetic ones. The console shades those ranges on the DMA and device charts. Logstash's normal inputs only read forward, so three more inputs read each fill once, tracked on `filled_at`.
+- **Model output is not filled.** `twin.sim_residual` keeps its gaps, because the model reads `now()` and a past solve would use today's network.
+- A meter's day factor is salted per process, so it differs between live and filled rows on one date, as it already does across a restart of `ingest-meters`.
 
 ### Flink layer
 

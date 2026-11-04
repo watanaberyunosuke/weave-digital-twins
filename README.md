@@ -61,7 +61,7 @@ cp .env.example .env          # then edit: endpoints, ids, GIS_REGION_CONFIG
 # Start the stack
 docker compose up -d broker connect control-center flink-jobmanager \
     flink-taskmanager flink-sql-client postgres \
-    ingest-hydrometry ingest-meters gis-loader simulator console featureserv
+    ingest-hydrometry ingest-meters ingest-backfill gis-loader simulator console featureserv
 
 # Bootstrap (load GIS, derive synthetic assets, start generators, bring up ELK)
 ./scripts/bootstrap.sh

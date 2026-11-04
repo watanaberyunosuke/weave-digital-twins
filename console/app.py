@@ -929,6 +929,20 @@ DEVICES = {
 }
 
 
+def backfills(streams: list[str], hours: int) -> list[dict]:
+    """Ranges ingest/backfill.py drew after a gap, so a chart can mark them: their
+    rows look like any other synthetic reading. Older volumes lack the table until
+    that service first runs."""
+    if not scalar("SELECT to_regclass('twin.backfill_log') IS NOT NULL"):
+        return []
+    return query("""
+        SELECT stream, gap_start, gap_end, row_count, method
+        FROM twin.backfill_log
+        WHERE stream = ANY(%s) AND gap_end > now() - make_interval(hours => %s)
+        ORDER BY gap_start
+    """, (streams, hours))
+
+
 @app.get("/api/device/{kind}/{device_id}")
 def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168)):
     """One meter or logger: registry row, latest reading and 15-minute buckets.
@@ -963,7 +977,8 @@ def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168
             GROUP BY 1 ORDER BY 1
         """, {"id": device_id, "h": hours})
         return {"kind": kind, "info": info, "latest": latest[0] if latest else None,
-                "series": series, "hours": hours}
+                "series": series, "hours": hours,
+                "backfills": backfills([readings.removeprefix("twin.")], hours)}
     return db_or_503(run)
 
 
@@ -1004,6 +1019,7 @@ def dma_detail(dma_id: str, hours: int = Query(24, ge=1, le=168)):
                 WHERE dma_id = %s AND ts > now() - %s::interval
                 ORDER BY ts
             """, (dma_id, window)),
+            "backfills": backfills(["meter_reading", "pressure_reading"], hours),
         }
     return db_or_503(run)
 
