@@ -31,6 +31,8 @@ from modelled_network import MAX_PIPES, select_modelled  # noqa: E402
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@localhost:5432/weave_twin")
 NAMESPACE = os.environ.get("SCHEMA_NAMESPACE", "weave")
+# Where the Datagen connector reads how to draw each field.
+ARG_PROPERTIES = "arg.properties"
 SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "schemas")
 
 
@@ -206,16 +208,16 @@ def emit_schemas(dma_ids: list[str], elec_ids: list[str]) -> None:
         "namespace": f"{NAMESPACE}.water",
         "fields": [
             {"name": "logger_id", "type": {"type": "string",
-                "arg.properties": {"options": [f"{d}-P1" for d in dma_ids] +
+                ARG_PROPERTIES: {"options": [f"{d}-P1" for d in dma_ids] +
                                               [f"{d}-P2" for d in dma_ids]}}},
             {"name": "dma_id", "type": {"type": "string",
-                "arg.properties": {"options": dma_ids}}},
+                ARG_PROPERTIES: {"options": dma_ids}}},
             {"name": "pressure_m", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 18.0, "max": 62.0}}}},
+                ARG_PROPERTIES: {"range": {"min": 18.0, "max": 62.0}}}},
             {"name": "flow_ls", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 0.5, "max": 85.0}}}},
+                ARG_PROPERTIES: {"range": {"min": 0.5, "max": 85.0}}}},
             {"name": "event_ts", "type": {"type": "long",
-                "arg.properties": {"iteration": {"start": 1767225600000, "step": 300000}}}},
+                ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 300000}}}},
         ],
     })
 
@@ -226,15 +228,15 @@ def emit_schemas(dma_ids: list[str], elec_ids: list[str]) -> None:
             "namespace": f"{NAMESPACE}.electricity",
             "fields": [
                 {"name": "meter_id", "type": {"type": "string",
-                    "arg.properties": {"options": elec_ids}}},
+                    ARG_PROPERTIES: {"options": elec_ids}}},
                 {"name": "kwh_import", "type": {"type": "double",
-                    "arg.properties": {"range": {"min": 0.0, "max": 12.0}}}},
+                    ARG_PROPERTIES: {"range": {"min": 0.0, "max": 12.0}}}},
                 {"name": "kwh_export", "type": {"type": "double",
-                    "arg.properties": {"range": {"min": 0.0, "max": 6.0}}}},
+                    ARG_PROPERTIES: {"range": {"min": 0.0, "max": 6.0}}}},
                 {"name": "voltage_v", "type": {"type": "double",
-                    "arg.properties": {"range": {"min": 225.0, "max": 253.0}}}},
+                    ARG_PROPERTIES: {"range": {"min": 225.0, "max": 253.0}}}},
                 {"name": "event_ts", "type": {"type": "long",
-                    "arg.properties": {"iteration": {"start": 1767225600000, "step": 1800000}}}},
+                    ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 1800000}}}},
             ],
         })
 

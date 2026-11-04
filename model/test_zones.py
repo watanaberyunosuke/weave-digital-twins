@@ -90,8 +90,9 @@ class PlanZonesTest(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_impossible_limits_are_refused(self):
+        pipes = line(1, 2)
         with self.assertRaises(ValueError):
-            plan_zones(line(1, 2), {1: 0, 2: 0}, {"r": 1},
+            plan_zones(pipes, {1: 0, 2: 0}, {"r": 1},
                        min_pressure_m=20, max_pressure_m=25, margin_m=5)
 
 

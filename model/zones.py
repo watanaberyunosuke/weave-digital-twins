@@ -138,15 +138,9 @@ def plan_zones(pipes: list[Pipe], elevation: dict[int, float],
     return ZonePlan(width, band_of, band_head, reservoir_head, prvs, kept, closed, boosters)
 
 
-def _boosters(nodes, kept, prvs, band_of, band_head, sources):
-    """A source for each same-band component no reservoir or PRV reaches.
-
-    Components are linked by PRVs (upstream to downstream only, as a PRV
-    does not pass reverse flow). Feeding spreads from the components holding
-    a reservoir; whatever is still unfed gets a booster, which then feeds on
-    down through its own PRVs, so boosters are added top band first and
-    only where they are needed.
-    """
+def _component_finder(nodes, kept):
+    """A lookup from node to its component: the lowest node id joined to it by
+    kept pipes, so components are named the same however the pipes are ordered."""
     parent = {n: n for n in nodes}
 
     def find(n):
@@ -159,6 +153,19 @@ def _boosters(nodes, kept, prvs, band_of, band_head, sources):
         ra, rb = find(pipe.start_node), find(pipe.end_node)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
+    return find
+
+
+def _boosters(nodes, kept, prvs, band_of, band_head, sources):
+    """A source for each same-band component no reservoir or PRV reaches.
+
+    Components are linked by PRVs (upstream to downstream only, as a PRV
+    does not pass reverse flow). Feeding spreads from the components holding
+    a reservoir; whatever is still unfed gets a booster, which then feeds on
+    down through its own PRVs, so boosters are added top band first and
+    only where they are needed.
+    """
+    find = _component_finder(nodes, kept)
 
     members: dict[int, list[int]] = defaultdict(list)
     for n in nodes:

@@ -502,12 +502,14 @@ const MODEL_STATE = {
   in: 'yes', zero_length: 'no: a joint, not a pipe', unsupplied: 'no: no supply reaches it',
   over_cap: 'no: beyond the pipe cap', not_in_graph: 'no: not in the topology',
 };
+function pipeModelState(p) {
+  if (p.model !== null) return MODEL_STATE[p.model] || p.model;
+  return p.in_graph ? 'model not built yet' : MODEL_STATE.not_in_graph;
+}
 function pipePopup(p) {
-  const state = p.model === null ? (p.in_graph ? 'model not built yet' : 'no: not in the topology')
-    : MODEL_STATE[p.model] || p.model;
   const box = popupHtml(p.pipe_id, [
     ['Layer', p.layer], ['Diameter', p.diameter_mm && `${p.diameter_mm} mm`],
-    ['Material', p.material], ['In model', state],
+    ['Material', p.material], ['In model', pipeModelState(p)],
   ]);
   if (p.model_reason) box.append(el('p', { class: 'hint' }, p.model_reason));
   return box;
