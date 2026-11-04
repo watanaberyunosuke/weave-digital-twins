@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Reject pushes from branches that don't follow <type>/hdh-<n>-<short-description>.
+# The Linear id in the name is what links a pull request to its ticket, and the
+# type prefix tells reviewers what kind of change to expect. main is exempt.
+#
+# Git passes the refs being pushed on stdin; checking those (rather than the
+# current branch) covers `git push origin some-other-branch` as well.
+
+pattern='^(feature|enhancement|fix|chore|docs)/hdh-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$'
+status=0
+
+while read -r local_ref _local_sha remote_ref _remote_sha; do
+  # Deletions and tags aren't branch names to police.
+  [[ "$local_ref" == "(delete)" || "$remote_ref" != refs/heads/* ]] && continue
+  branch=${remote_ref#refs/heads/}
+  [[ "$branch" == "main" ]] && continue
+  if [[ ! "$branch" =~ $pattern ]]; then
+    echo "pre-push: '$branch' does not match <type>/hdh-<n>-<short-description>" >&2
+    echo "          type is one of feature, enhancement, fix, chore, docs" >&2
+    echo "          rename with: git branch -m <new-name>" >&2
+    status=1
+  fi
+done
+
+exit $status
