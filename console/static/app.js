@@ -807,13 +807,13 @@ function devicePopup(kind, id) {
     const series = kind === 'meter'
       ? [{ name: 'litres', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.litres]) }]
       : [{ name: 'pressure', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.pressure_m]) }];
+    const chartTitle = kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)';
     box.replaceChildren(
       el('strong', {}, id, el('span', { class: 'tag syn' }, 'synthetic')),
       el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
         .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
       d.series.length
-        ? chart(kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)', series,
-          { height: 110, bands: filledBands(d.backfills) })
+        ? chart(chartTitle, series, { height: 110, bands: filledBands(d.backfills) })
         : el('p', { class: 'muted small' }, `No readings in the last ${d.hours} h.`),
       ...(d.backfills.length ? [el('p', { class: 'muted small' }, BACKFILL_NOTE)] : []),
     );
@@ -833,7 +833,7 @@ function runs(points) {
   const out = [[points[0]]];
   points.slice(1).forEach((point, i) => {
     if (point[0] - points[i][0] > limit) out.push([point]);
-    else out[out.length - 1].push(point);
+    else out.at(-1).push(point);
   });
   return out;
 }
