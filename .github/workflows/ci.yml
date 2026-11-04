@@ -74,12 +74,12 @@ jobs:
       # explicitly: a broken wntr must fail the build, not skip a test.
       - if: matrix.component == 'model'
         run: |
-          python -c "import wntr, run_sim"
+          python -c "import wntr, run_sim, gaps, zones"
           python -m unittest discover -s . -p 'test_*.py'
       - if: matrix.component == 'ingest'
         # gis/ runs in the ingest image, so its decoder is checked here too.
         run: |
-          python -c "import common, hydrometry_poller, storage_poller"
+          python -c "import common, hydrometry_poller, storage_poller, demand_profiles, synthetic_meters, backfill"
           python -m unittest discover -s . -p 'test_*.py'
           # The seeder runs in this image and shares the model's pipe selection.
           python -c "import sys; sys.path.insert(0, '../scripts'); import seed_synthetic_network"
@@ -97,6 +97,7 @@ jobs:
             timescale/timescaledb-ha:pg16
           timeout 180 sh -c 'until docker exec postgis pg_isready -h 127.0.0.1 -U postgres; do sleep 2; done'
           python -m unittest discover -s ../gis -p 'test_*.py' -v
+          python -m unittest test_backfill -v
       - if: matrix.component == 'console'
         run: |
           python -c "import app"

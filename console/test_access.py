@@ -403,16 +403,28 @@ class DeviceTests(unittest.TestCase):
         rows = [[{"id": "M1", "meter_id": "M1", "dma_id": "D1", "meter_type": "residential",
                   "geom": "x"}],
                 [{"ts": "2026-10-31T12:00:00Z", "litres": 4.0, "flow_lpm": 2.0, "battery_pct": 90}],
-                [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}]]
-        with mock.patch.object(self.app, "query", side_effect=rows) as q:
+                [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}],
+                [{"stream": "meter_reading", "gap_start": "2026-10-31T09:00:00Z",
+                  "gap_end": "2026-10-31T11:00:00Z", "row_count": 8, "method": "m"}]]
+        with mock.patch.object(self.app, "scalar", return_value=True), \
+                mock.patch.object(self.app, "query", side_effect=rows) as q:
             body = self.client.get("/api/device/meter/M1").json()
         self.assertEqual(body["latest"]["litres"], 4.0)
+        # A chart can only mark filled stretches of the stream it draws.
+        self.assertEqual(body["backfills"][0]["gap_start"], "2026-10-31T09:00:00Z")
+        self.assertEqual(q.call_args_list[3].args[1], (["meter_reading"], 24))
         self.assertEqual(body["series"][0]["readings"], 3)
         self.assertNotIn("geom", body["info"])
         # Table names come from the server's own map, and the id only ever
         # travels as a bound parameter.
         self.assertIn("FROM ref.water_meter WHERE meter_id = %s", q.call_args_list[0].args[0])
         self.assertEqual(q.call_args_list[0].args[1], ("M1",))
+
+    def test_volume_without_the_backfill_table_has_no_fills(self):
+        rows = [[{"id": "M1", "meter_id": "M1"}], [], []]
+        with mock.patch.object(self.app, "scalar", return_value=False), \
+                mock.patch.object(self.app, "query", side_effect=rows):
+            self.assertEqual(self.client.get("/api/device/meter/M1").json()["backfills"], [])
 
     def test_missing_device_is_404(self):
         with mock.patch.object(self.app, "query", return_value=[]):
@@ -421,3 +433,58 @@ class DeviceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(TestClient is None, "console requirements not installed")
+class ModelLinkLayerTests(unittest.TestCase):
+    """The network-joins layer reads asset.model_link, which the model build
+    creates; before the first build it is an empty layer, not an error."""
+
+    def setUp(self):
+        self.app = load_app()
+        self.client = TestClient(self.app.app)
+
+    def test_empty_before_the_first_build(self):
+        with mock.patch.object(self.app, "scalar", return_value=False):
+            r = self.client.get("/api/geo/model-links")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"type": "FeatureCollection", "features": []})
+
+    def test_reads_the_table_once_built(self):
+        fc = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": None,
+              "properties": {"kind": "bridge", "reason": "synthetic: invented"}}]}
+        with mock.patch.object(self.app, "scalar", side_effect=[True, fc]):
+            r = self.client.get("/api/geo/model-links")
+        self.assertEqual(r.json()["features"][0]["properties"]["kind"], "bridge")
+
+
+@unittest.skipIf(TestClient is None, "console requirements not installed")
+class PipeModelStateTests(unittest.TestCase):
+    """Pipes carry whether the model keeps them once a build has run."""
+
+    def setUp(self):
+        self.app = load_app()
+        self.client = TestClient(self.app.app)
+
+    def test_unknown_before_the_first_build(self):
+        seen = []
+
+        def fake(sql, params=()):
+            seen.append(sql)
+            return False if "to_regclass" in sql else {"type": "FeatureCollection", "features": []}
+
+        with mock.patch.object(self.app, "scalar", side_effect=fake):
+            self.client.get("/api/geo/pipes")
+        self.assertIn("'model', NULL", seen[-1])
+        self.assertNotIn("model_exclusion", seen[-1])
+
+    def test_joined_to_exclusions_once_built(self):
+        seen = []
+
+        def fake(sql, params=()):
+            seen.append(sql)
+            return True if "to_regclass" in sql else {"type": "FeatureCollection", "features": []}
+
+        with mock.patch.object(self.app, "scalar", side_effect=fake):
+            self.client.get("/api/geo/pipes")
+        self.assertIn("LEFT JOIN asset.model_exclusion", seen[-1])

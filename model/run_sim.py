@@ -26,8 +26,10 @@ import wntr
 from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
 from residuals import (ALL_DMAS, BASELINE_DAYS, MIN_SAMPLES, RELEARN_HOURS, RESET_TABLE_SQL,
                        RESIDUALS_SQL, Z_LEAK, Z_WATCH, classify)
-from modelled_network import MAX_PIPES, MAX_SNAP_M, select_modelled
+from gaps import BRIDGE_LARGE_M, BRIDGE_SMALL_M, TJUNCTION_M, Link
+from modelled_network import MAX_PIPES, MAX_SNAP_M, excluded_pipes, select_modelled
 from subgraph import element_name
+from zones import HEAD_MARGIN_M, MAX_PRESSURE_M, MIN_PRESSURE_M, plan_zones
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
@@ -44,6 +46,132 @@ RESULT_TS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS sim_result_ts_idx ON twin.sim_
 # elevation; with a DEM, anything above it came out at negative pressure.
 RESERVOIR_DEPTH_M = float(os.environ.get("SIM_RESERVOIR_DEPTH_M", "10"))
 DEFAULT_ELEVATION_M = 50.0
+# "zoned" draws pressure zones from elevation (model/zones.py): band grade
+# lines, PRVs between bands and boosters where no source reaches. "ground" is
+# the earlier rule, each reservoir at its ground level plus
+# SIM_RESERVOIR_DEPTH_M with no zones, kept to compare against.
+HEAD_MODE = os.environ.get("SIM_HEAD_MODE", "zoned")
+# Every split, gap, bridge and trunk main the build makes is written here and
+# to asset.model_link, each with the reason it was needed.
+LINKS_PATH = os.path.join(os.path.dirname(INP_PATH), "model_links.csv")
+TRUNK_DIAMETER_M = 0.6
+MODEL_LINK_SQL = """
+    CREATE TABLE IF NOT EXISTS asset.model_link (
+        element_id   TEXT PRIMARY KEY,      -- id in network.inp
+        kind         TEXT NOT NULL,         -- split | gap | trunk | bridge
+        synthetic    BOOLEAN NOT NULL,      -- false only for splits of real pipes
+        pipe_id      TEXT,                  -- the real pipe a split cuts
+        facility_id  TEXT,                  -- the reservoir a trunk main serves
+        from_node    BIGINT,
+        to_node      BIGINT,
+        length_m     DOUBLE PRECISION,
+        reason       TEXT NOT NULL,
+        geom         GEOMETRY(Geometry, 4326),
+        built_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"""
+
+
+def element_for(pipe) -> str:
+    """P<asset id>[~n] for real pipes and their split pieces, S<id> for
+    synthetic links, so a result never passes for a real asset."""
+    return element_name("S" if pipe.kind in ("gap", "bridge") else "P", pipe.pipe_id)
+
+
+def record_links(cur, links: list[Link], trunks: list[tuple]) -> None:
+    """Write every change the build made, and why, to a CSV and asset.model_link."""
+    import csv
+    rows = []
+    for link in links:
+        if link.kind == "split":
+            rows.append((f"split@{link.element_id}@N{link.from_node}", "split", False,
+                         link.element_id, None, link.from_node, None, link.length_m, link.reason))
+        else:
+            rows.append((element_name("S", link.element_id), link.kind, True, None, None,
+                         link.from_node, link.to_node, link.length_m, link.reason))
+    for fid, node, dist, reason in trunks:
+        rows.append((element_name("L", fid), "trunk", True, None, fid, None, node, dist, reason))
+
+    os.makedirs(os.path.dirname(LINKS_PATH), exist_ok=True)
+    with open(LINKS_PATH, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["element_id", "kind", "synthetic", "pipe_id", "facility_id",
+                    "from_node", "to_node", "length_m", "reason"])
+        w.writerows(rows)
+
+    cur.execute(MODEL_LINK_SQL)
+    cur.execute("TRUNCATE asset.model_link")
+    cur.executemany(
+        """INSERT INTO asset.model_link (element_id, kind, synthetic, pipe_id, facility_id,
+                                         from_node, to_node, length_m, reason)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""", rows)
+    # Geometry for the map and GIS clients: a split is the point where the
+    # pipe was cut, a gap or bridge the straight line it assumes, a trunk main
+    # the line from the reservoir to its node.
+    cur.execute("""
+        UPDATE asset.model_link l SET geom = CASE
+            WHEN l.kind = 'split' THEN
+                (SELECT geom FROM asset.node WHERE node_id = l.from_node)
+            WHEN l.kind = 'trunk' THEN ST_MakeLine(
+                (SELECT geom FROM asset.facility WHERE facility_id = l.facility_id),
+                (SELECT geom FROM asset.node WHERE node_id = l.to_node))
+            ELSE ST_MakeLine(
+                (SELECT geom FROM asset.node WHERE node_id = l.from_node),
+                (SELECT geom FROM asset.node WHERE node_id = l.to_node))
+        END
+    """)
+
+
+EXCLUSION_SQL = """
+    CREATE TABLE IF NOT EXISTS asset.model_exclusion (
+        pipe_id      TEXT PRIMARY KEY,      -- asset.pipe the model leaves out
+        reason_code  TEXT NOT NULL,         -- zero_length | unsupplied | over_cap | not_in_graph
+        reason       TEXT NOT NULL,
+        built_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"""
+
+
+def record_exclusions(cur, excluded: dict[str, tuple[str, str]]) -> dict[str, int]:
+    """Write every real pipe the model leaves out, and why, to asset.model_exclusion;
+    returns the count per reason."""
+    cur.execute(EXCLUSION_SQL)
+    cur.execute("TRUNCATE asset.model_exclusion")
+    with cur.copy("COPY asset.model_exclusion (pipe_id, reason_code, reason) FROM STDIN") as copy:
+        for pipe_id, (code, reason) in excluded.items():
+            copy.write_row((pipe_id, code, reason))
+    # Pipes the topology build gave no nodes never reach the selection at all.
+    cur.execute("""
+        INSERT INTO asset.model_exclusion (pipe_id, reason_code, reason)
+        SELECT pipe_id, 'not_in_graph',
+               'not in the topology: asset.build_topology() gave it no nodes'
+        FROM asset.pipe WHERE start_node IS NULL OR end_node IS NULL
+        ON CONFLICT (pipe_id) DO NOTHING
+    """)
+    cur.execute("SELECT reason_code, count(*) FROM asset.model_exclusion GROUP BY 1 ORDER BY 2 DESC")
+    return dict(cur.fetchall())
+
+
+def report_links(links: list[Link], trunks: list[tuple], unjoined: tuple) -> None:
+    """Counts by kind in the build log, with one example reason each."""
+    by_kind: dict[str, list] = {}
+    for link in links:
+        by_kind.setdefault(link.kind, []).append(link)
+    names = {"split": "real pipes split at junctions the data never split",
+             "gap": "synthetic gap links", "bridge": "synthetic bridge mains"}
+    for kind in ("split", "gap", "bridge"):
+        found = by_kind.get(kind, [])
+        if found:
+            total = sum(l.length_m for l in found) if kind != "split" else None
+            extra = f", {total / 1000:.1f} km in all" if total else ""
+            print(f"  {len(found)} {names[kind]}{extra}; e.g. {found[0].reason}")
+    if trunks:
+        print(f"  {len(trunks)} synthetic reservoir trunk mains, "
+              f"{sum(t[2] for t in trunks) / 1000:.1f} km in all; e.g. {trunks[0][3]}")
+    if unjoined[0]:
+        print(f"  {unjoined[0]} pieces ({unjoined[1]} pipes) still without supply: no real "
+              f"connection and nothing within SIM_BRIDGE_LARGE_M={BRIDGE_LARGE_M:g} m")
+    print(f"  every change and its reason: {LINKS_PATH} and asset.model_link")
 
 
 # --------------------------------------------------------------- build model
@@ -61,21 +189,29 @@ def build_inp() -> str:
         # sit where this model can score them.
         m = select_modelled(cur)
         reservoirs, too_far, sel = m.reservoirs, m.too_far, m.selection
+        for note in m.snap_notes:
+            print(f"  {note}")
         if too_far:
-            print(f"  {len(too_far)} reservoirs left out: further than "
-                  f"SIM_MAX_SNAP_M={MAX_SNAP_M:g} m from any node "
-                  f"(furthest {max(r[5] for r in too_far):.0f} m)")
+            limits = ", ".join(f"{k} {v:g} m" for k, v in m.limits.items())
+            print(f"  {len(too_far)} reservoirs left out: further from a usable node than "
+                  f"their type's snap limit ({limits}; SIM_MAX_SNAP_M_<TYPE> overrides "
+                  f"SIM_MAX_SNAP_M) (furthest {max(r[5] for r in too_far):.0f} m)")
         if not reservoirs:
             sys.exit("! no supply: load a service_reservoir or storage_dam layer "
                      "within SIM_MAX_SNAP_M of the network so the model has a "
                      "fixed head")
-        print(f"  selected {len(sel.pipes)} of {m.pipe_count} pipes from "
-              f"{len(reservoirs)} reservoirs (SIM_MAX_PIPES={MAX_PIPES}): "
+        real = len({p.asset_id for p in sel.pipes if p.asset_id is not None})
+        synthetic = sum(1 for p in sel.pipes if p.asset_id is None)
+        print(f"  selected {real} of {m.pipe_count} real pipes, plus {synthetic} synthetic "
+              f"links, from {len(reservoirs)} reservoirs (SIM_MAX_PIPES={MAX_PIPES}): "
               f"{sel.capped_pipes} over the cap, {sel.unsupplied_pipes} in "
               f"components no reservoir feeds, {sel.skipped_pipes} zero-length")
         if not sel.pipes:
             sys.exit("! no supplied network: no reservoir snaps to a node with a "
                      "connected pipe — check facility locations and topology")
+        print(f"  joining pieces: real splits within SIM_TJUNCTION_M={TJUNCTION_M:g} m first, "
+              f"then synthetic gaps up to SIM_BRIDGE_SMALL_M={BRIDGE_SMALL_M:g} m and bridges "
+              f"up to SIM_BRIDGE_LARGE_M={BRIDGE_LARGE_M:g} m")
 
         # Junctions only for nodes the selected pipes touch.
         cur.execute("""
@@ -84,38 +220,94 @@ def build_inp() -> str:
             WHERE node_id = ANY(%s)
             ORDER BY node_id
         """, (DEFAULT_ELEVATION_M, sorted(sel.nodes)))
+        elevation, coords = {}, {}
         for node_id, lat, lon, elev in cur.fetchall():
+            elevation[node_id] = float(elev)
+            coords[node_id] = (lon, lat)
             wn.add_junction(f"N{node_id}", base_demand=0.0,
                             elevation=float(elev), coordinates=(lon, lat))
 
-        # Element ids carry the source asset id (element_name), so results
-        # join back to asset.facility and asset.pipe across builds.
-        unattached = []
-        for fid, lat, lon, near_node, ground, _ in reservoirs:
-            if near_node not in sel.nodes:
-                unattached.append(fid)
-                continue
-            rid = element_name("R", fid)
-            head = float(ground if ground is not None else DEFAULT_ELEVATION_M)
-            wn.add_reservoir(rid, base_head=head + RESERVOIR_DEPTH_M,
-                             coordinates=(lon, lat))
-            wn.add_pipe(element_name("L", fid), rid, f"N{near_node}",
-                        length=10.0, diameter=0.6, roughness=100)
+        unattached = [r[0] for r in reservoirs if r[3] not in sel.nodes]
+        attached = [r for r in reservoirs if r[3] in sel.nodes]
         if unattached:
             print(f"  {len(unattached)} reservoirs left out: their node has no "
                   f"selected pipe (no connected pipe, or beyond the cap)")
 
+        if HEAD_MODE == "zoned":
+            plan = plan_zones(sel.pipes, elevation, {r[0]: r[3] for r in attached})
+            heads = plan.reservoir_head
+            pipes, prvs, boosters = plan.pipes, plan.prvs, plan.boosters
+            low, high = plan.static_pressure_range(elevation)
+            print(f"  zones: {len(plan.band_head)} elevation bands of "
+                  f"{plan.band_width_m:g} m (service pressure {MIN_PRESSURE_M:g}-"
+                  f"{MAX_PRESSURE_M:g} m, margin {HEAD_MARGIN_M:g} m), "
+                  f"{len(prvs)} PRVs, {len(plan.closed)} boundary pipes closed, "
+                  f"{len(boosters)} boosters; "
+                  f"static pressure {low:.0f}-{high:.0f} m")
+        elif HEAD_MODE == "ground":
+            heads = {fid: float(ground if ground is not None else DEFAULT_ELEVATION_M)
+                      + RESERVOIR_DEPTH_M
+                     for fid, _lat, _lon, _node, ground, _d in attached}
+            pipes, prvs, boosters = sel.pipes, [], []
+        else:
+            sys.exit(f"! SIM_HEAD_MODE={HEAD_MODE!r}: use zoned or ground")
+
+        # Element ids carry the source asset id (element_name), so results
+        # join back to asset.facility and asset.pipe across builds.
+        # The main from a reservoir to the network isn't in the published data,
+        # so it is assumed: as long as the snap distance, at trunk size.
+        trunks = []
+        for fid, lat, lon, near_node, _ground, dist in attached:
+            rid = element_name("R", fid)
+            length = max(float(dist), 10.0)
+            wn.add_reservoir(rid, base_head=heads[fid], coordinates=(lon, lat))
+            wn.add_pipe(element_name("L", fid), rid, f"N{near_node}",
+                        length=length, diameter=TRUNK_DIAMETER_M, roughness=100)
+            trunks.append((fid, near_node, length,
+                           f"synthetic: reservoir {fid} is {float(dist):.0f} m from its nearest "
+                           f"node N{near_node}; the trunk main between them is not in the "
+                           f"published data, so a {TRUNK_DIAMETER_M * 1000:.0f} mm main of that "
+                           f"length is assumed"))
+
+        # A booster stands in for a pump station or elevated tank the public
+        # data doesn't show; B<node_id> keeps it apart from real reservoirs.
+        for node_id, head in boosters:
+            wn.add_reservoir(f"B{node_id}", base_head=head, coordinates=coords[node_id])
+            wn.add_pipe(f"BL{node_id}", f"B{node_id}", f"N{node_id}",
+                        length=10.0, diameter=0.6, roughness=100)
+
         failed = 0
-        for pipe in sel.pipes:
+        for pipe in pipes:
             try:
-                wn.add_pipe(element_name("P", pipe.pipe_id),
+                wn.add_pipe(element_for(pipe),
                             f"N{pipe.start_node}", f"N{pipe.end_node}",
                             length=pipe.length_m, diameter=pipe.diameter_m,
                             roughness=100)
             except Exception:
                 failed += 1
+        # Crossings between bands that didn't get a PRV stay in the model,
+        # shut, as the boundary valves between zones are.
+        closed = plan.closed if HEAD_MODE == "zoned" else []
+        for pipe in closed:
+            try:
+                wn.add_pipe(element_for(pipe),
+                            f"N{pipe.start_node}", f"N{pipe.end_node}",
+                            length=pipe.length_m, diameter=pipe.diameter_m,
+                            roughness=100, initial_status="CLOSED")
+            except Exception:
+                failed += 1
+        # A PRV replaces the pipe it sits on; V<pipe_id> still joins back to
+        # asset.pipe, and the valve points from the higher grade line down.
+        for prv in prvs:
+            try:
+                wn.add_valve(element_name("V", prv.pipe.pipe_id),
+                             f"N{prv.upstream}", f"N{prv.downstream}",
+                             diameter=prv.pipe.diameter_m, valve_type="PRV",
+                             initial_setting=prv.setting_m)
+            except Exception:
+                failed += 1
         if failed:
-            print(f"  {failed} selected pipes failed to add")
+            print(f"  {failed} selected pipes or valves failed to add")
 
         # The walk guarantees supply, but a pipe that failed to add can strand
         # what lay beyond it, and EPANET rejects a junction with no link or a
@@ -134,6 +326,18 @@ def build_inp() -> str:
             wn.remove_node(name)
         if dropped:
             print(f"  dropped {len(dropped)} junctions stranded by failed pipes")
+
+        modelled = {p.pipe_id for p in sel.pipes}
+        used = [l for l in m.links
+                if l.kind == "split" or l.element_id in modelled]
+        report_links(used, trunks, m.unjoined)
+        record_links(cur, used, trunks)
+        counts = record_exclusions(cur, excluded_pipes(m))
+        conn.commit()
+        if counts:
+            print("  real pipes left out, by reason (asset.model_exclusion; the console map "
+                  "greys them, click one for why): "
+                  + ", ".join(f"{code} {n}" for code, n in counts.items()))
 
     os.makedirs(os.path.dirname(INP_PATH), exist_ok=True)
     wn.options.time.duration = 0                       # snapshot solve

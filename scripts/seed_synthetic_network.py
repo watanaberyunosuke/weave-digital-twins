@@ -31,6 +31,8 @@ from modelled_network import MAX_PIPES, select_modelled  # noqa: E402
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@localhost:5432/weave_twin")
 NAMESPACE = os.environ.get("SCHEMA_NAMESPACE", "weave")
+# Where the Datagen connector reads how to draw each field.
+ARG_PROPERTIES = "arg.properties"
 SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "schemas")
 
 
@@ -46,13 +48,19 @@ def load_modelled_pipes(conn) -> None:
         if cur.fetchone()[0] == 0:
             print("! asset.pipe is empty — run gis/load_gis.py --all first")
             sys.exit(1)
-        selected = select_modelled(cur).selection.pipes
+        m = select_modelled(cur)
+        # Meters go on real pipes only: a split piece counts as the pipe it was
+        # cut from, and synthetic gaps and bridges carry no customers.
+        selected = sorted({p.asset_id for p in m.selection.pipes if p.asset_id is not None})
+        synthetic = sum(1 for p in m.selection.pipes if p.asset_id is None)
         cur.execute("CREATE TEMP TABLE modelled_pipe (pipe_id TEXT PRIMARY KEY)")
         if selected:
             with cur.copy("COPY modelled_pipe (pipe_id) FROM STDIN") as copy:
-                for pipe in selected:
-                    copy.write_row((pipe.pipe_id,))
-            print(f"seeding on the {len(selected)} pipes the model keeps (SIM_MAX_PIPES={MAX_PIPES})")
+                for pipe_id in selected:
+                    copy.write_row((pipe_id,))
+            print(f"seeding on the {len(selected)} real pipes the model keeps "
+                  f"(SIM_MAX_PIPES={MAX_PIPES}); {synthetic} synthetic links in the model "
+                  f"carry no meters")
         else:
             cur.execute("INSERT INTO modelled_pipe SELECT pipe_id FROM asset.pipe")
             print("! no supplied network to model (no reservoir in reach, or topology not built);"
@@ -102,7 +110,7 @@ def build_dmas(conn, n_dmas: int) -> list[str]:
     return dma_ids
 
 
-def build_meters(conn, dma_ids: list[str], per_dma: int) -> list[str]:
+def build_meters(conn, dma_ids: list[str], per_dma: int) -> None:
     """Place synthetic meters along modelled pipes inside each DMA."""
     print(f"placing {per_dma} meters per DMA along real mains ...")
     with conn.cursor() as cur:
@@ -147,10 +155,7 @@ def build_meters(conn, dma_ids: list[str], per_dma: int) -> list[str]:
 
         cur.execute("SELECT count(*) FROM ref.water_meter")
         meters = cur.fetchone()[0]
-        cur.execute("SELECT meter_id FROM ref.water_meter ORDER BY random() LIMIT 200")
-        sample = [r[0] for r in cur.fetchall()]
     print(f"  created {meters} meters")
-    return sample
 
 
 def build_electricity_meters(conn, per_substation: int) -> list[str]:
@@ -190,29 +195,12 @@ def write_schema(filename: str, schema: dict) -> None:
     print(f"  wrote {path}")
 
 
-def emit_schemas(meter_ids: list[str], dma_ids: list[str],
-                 elec_ids: list[str]) -> None:
+def emit_schemas(dma_ids: list[str], elec_ids: list[str]) -> None:
     print("generating Datagen schemas seeded with real asset ids ...")
 
-    write_schema("water_meter_reading.avsc", {
-        "type": "record",
-        "name": "WaterMeterReading",
-        "namespace": f"{NAMESPACE}.water",
-        "fields": [
-            {"name": "meter_id", "type": {"type": "string",
-                "arg.properties": {"options": meter_ids}}},
-            {"name": "dma_id", "type": {"type": "string",
-                "arg.properties": {"options": dma_ids}}},
-            {"name": "litres", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 0.0, "max": 45.0}}}},
-            {"name": "flow_lpm", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 0.0, "max": 30.0}}}},
-            {"name": "battery_pct", "type": {"type": "int",
-                "arg.properties": {"range": {"min": 55, "max": 100}}}},
-            {"name": "event_ts", "type": {"type": "long",
-                "arg.properties": {"iteration": {"start": 1767225600000, "step": 900000}}}},
-        ],
-    })
+    # No water meter schema: ingest-meters reads ref.water_meter directly and
+    # reports every meter with its own DMA and a typical daily pattern, where
+    # Datagen drew meter and DMA independently from a sample of 200.
 
     write_schema("pressure_reading.avsc", {
         "type": "record",
@@ -220,16 +208,16 @@ def emit_schemas(meter_ids: list[str], dma_ids: list[str],
         "namespace": f"{NAMESPACE}.water",
         "fields": [
             {"name": "logger_id", "type": {"type": "string",
-                "arg.properties": {"options": [f"{d}-P1" for d in dma_ids] +
+                ARG_PROPERTIES: {"options": [f"{d}-P1" for d in dma_ids] +
                                               [f"{d}-P2" for d in dma_ids]}}},
             {"name": "dma_id", "type": {"type": "string",
-                "arg.properties": {"options": dma_ids}}},
+                ARG_PROPERTIES: {"options": dma_ids}}},
             {"name": "pressure_m", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 18.0, "max": 62.0}}}},
+                ARG_PROPERTIES: {"range": {"min": 18.0, "max": 62.0}}}},
             {"name": "flow_ls", "type": {"type": "double",
-                "arg.properties": {"range": {"min": 0.5, "max": 85.0}}}},
+                ARG_PROPERTIES: {"range": {"min": 0.5, "max": 85.0}}}},
             {"name": "event_ts", "type": {"type": "long",
-                "arg.properties": {"iteration": {"start": 1767225600000, "step": 300000}}}},
+                ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 300000}}}},
         ],
     })
 
@@ -240,15 +228,15 @@ def emit_schemas(meter_ids: list[str], dma_ids: list[str],
             "namespace": f"{NAMESPACE}.electricity",
             "fields": [
                 {"name": "meter_id", "type": {"type": "string",
-                    "arg.properties": {"options": elec_ids}}},
+                    ARG_PROPERTIES: {"options": elec_ids}}},
                 {"name": "kwh_import", "type": {"type": "double",
-                    "arg.properties": {"range": {"min": 0.0, "max": 12.0}}}},
+                    ARG_PROPERTIES: {"range": {"min": 0.0, "max": 12.0}}}},
                 {"name": "kwh_export", "type": {"type": "double",
-                    "arg.properties": {"range": {"min": 0.0, "max": 6.0}}}},
+                    ARG_PROPERTIES: {"range": {"min": 0.0, "max": 6.0}}}},
                 {"name": "voltage_v", "type": {"type": "double",
-                    "arg.properties": {"range": {"min": 225.0, "max": 253.0}}}},
+                    ARG_PROPERTIES: {"range": {"min": 225.0, "max": 253.0}}}},
                 {"name": "event_ts", "type": {"type": "long",
-                    "arg.properties": {"iteration": {"start": 1767225600000, "step": 1800000}}}},
+                    ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 1800000}}}},
             ],
         })
 
@@ -266,12 +254,12 @@ def main() -> int:
     with psycopg.connect(DSN) as conn:
         load_modelled_pipes(conn)
         dma_ids = build_dmas(conn, args.dmas)
-        meter_sample = build_meters(conn, dma_ids, args.meters_per_dma)
+        build_meters(conn, dma_ids, args.meters_per_dma)
         elec_sample = build_electricity_meters(conn, args.meters_per_substation)
 
     # Datagen picks uniformly from options, so a sample keeps the schema small
     # while still producing ids that exist in the registry tables.
-    emit_schemas(meter_sample, dma_ids, elec_sample)
+    emit_schemas(dma_ids, elec_sample)
 
     print("\nnext: ./scripts/register-connectors.sh")
     return 0

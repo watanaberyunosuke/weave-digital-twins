@@ -456,6 +456,7 @@ map.setView([0, 0], 2);
 const layers = {
   dmas: L.layerGroup().addTo(map),
   pipes: L.layerGroup().addTo(map),
+  links: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   gauges: L.layerGroup().addTo(map),
   storages: L.layerGroup().addTo(map),
@@ -477,7 +478,7 @@ const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECT
 // DMAs could not be clicked.) loadMap() draws in this order; turning a layer
 // back on re-adds the layers above it, because re-adding moves a group to the
 // end of the draw order.
-const LAYER_ORDER = ['dmas', 'pipes', 'facilities', 'gauges', 'storages', 'meters'];
+const LAYER_ORDER = ['dmas', 'pipes', 'links', 'facilities', 'gauges', 'storages', 'meters'];
 function restackAbove(name) {
   LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
     .filter((g) => map.hasLayer(g))
@@ -497,12 +498,46 @@ function popupHtml(title, rows) {
   return box;
 }
 
+const MODEL_STATE = {
+  in: 'yes', zero_length: 'no: a joint, not a pipe', unsupplied: 'no: no supply reaches it',
+  over_cap: 'no: beyond the pipe cap', not_in_graph: 'no: not in the topology',
+};
+function pipeModelState(p) {
+  if (p.model !== null) return MODEL_STATE[p.model] || p.model;
+  return p.in_graph ? 'model not built yet' : MODEL_STATE.not_in_graph;
+}
+function pipePopup(p) {
+  const box = popupHtml(p.pipe_id, [
+    ['Layer', p.layer], ['Diameter', p.diameter_mm && `${p.diameter_mm} mm`],
+    ['Material', p.material], ['In model', pipeModelState(p)],
+  ]);
+  if (p.model_reason) box.append(el('p', { class: 'hint' }, p.model_reason));
+  return box;
+}
+
+const LINK_TITLE = {
+  split: 'Real pipe split at a junction',
+  gap: 'Synthetic gap link',
+  bridge: 'Synthetic bridge main',
+  trunk: 'Synthetic reservoir trunk main',
+};
+function linkPopup(p) {
+  const box = popupHtml(LINK_TITLE[p.kind] || p.kind, [
+    ['Model element', p.element_id], ['Real pipe', p.pipe_id], ['Reservoir', p.facility_id],
+    ['Length', p.kind === 'split' ? null : p.length_m !== null && `${fmt.n(p.length_m, 0)} m`],
+    ['Built', fmt.ts(p.built_at)],
+  ]);
+  box.append(el('p', { class: 'hint' }, p.reason));
+  return box;
+}
+
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, facilities, gauges, storages, meters] = await Promise.all([
+  const [dmas, pipes, links, facilities, gauges, storages, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
+    api('/api/geo/model-links').catch(() => null),
     api('/api/geo/facilities').catch(() => null),
     api('/api/geo/gauges').catch(() => null),
     api('/api/geo/storages').catch(() => null),
@@ -525,22 +560,39 @@ async function loadMap() {
 
   layers.pipes.clearLayers();
   if (pipes) {
+    // Grey: left out of the model (asset.model_exclusion) or not in the graph.
+    const inModel = (p) => p.in_graph && (p.model === null || p.model === 'in');
     L.geoJSON(pipes, {
       style: (f) => ({
-        color: mcss(f.properties.in_graph ? '--pipe' : '--pipe-off'),
+        color: mcss(inModel(f.properties) ? '--pipe' : '--pipe-off'),
         weight: f.properties.diameter_mm >= 600 ? 2.5 : f.properties.diameter_mm >= 300 ? 1.6 : 1,
         opacity: 0.85,
       }),
-      onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.pipe_id, [
-        ['Layer', f.properties.layer], ['Diameter', f.properties.diameter_mm && `${f.properties.diameter_mm} mm`],
-        ['Material', f.properties.material], ['In graph', f.properties.in_graph ? 'yes' : 'no'],
-      ])),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => pipePopup(f.properties), { maxWidth: 380 }),
     }).addTo(layers.pipes);
   }
   $('#map-note').textContent = [
     pipes && pipes.features.length >= 8000 ? 'Pipes capped at 8,000, largest diameters first.' : '',
     meters && meters.features.length >= METER_CAP ? `Meters capped at ${fmt.n(METER_CAP)}.` : '',
   ].filter(Boolean).join(' ');
+
+  // Joins the model build made (model/gaps.py), drawn over the real pipes:
+  // synthetic links in the synthetic colour, dashed by how much is invented,
+  // and a ring in the real colour where a real pipe was split.
+  layers.links.clearLayers();
+  if (links) {
+    const dash = { gap: '2 3', bridge: '7 4' };
+    L.geoJSON(links, {
+      style: (f) => ({
+        color: mcss('--syn'), weight: f.properties.kind === 'gap' ? 1.5 : 2.5,
+        opacity: 0.95, dashArray: dash[f.properties.kind] || null,
+      }),
+      pointToLayer: (f, ll) => L.circleMarker(ll, {
+        radius: 4, color: mcss('--real'), weight: 2, fillOpacity: 0,
+      }),
+      onEachFeature: (f, lyr) => lyr.bindPopup(() => linkPopup(f.properties), { maxWidth: 380 }),
+    }).addTo(layers.links);
+  }
 
   layers.facilities.clearLayers();
   if (facilities) {
@@ -624,14 +676,17 @@ async function openDma(dmaId) {
       el('dt', {}, 'Meters / loggers'), el('dd', {}, `${fmt.n(i.meters)} / ${fmt.n(i.loggers)}`),
       el('dt', {}, 'Observed pressure'), el('dd', {}, i.min_pressure_m === null ? '—' : `${fmt.n(i.min_pressure_m, 1)} m`),
       el('dt', {}, 'Status as of'), el('dd', {}, fmt.ts(i.ts))),
-    chart('Consumption per 15 min (L)', [{ name: 'consumption', colour: css('--syn'), points: d.balance.map((r) => [r.ts, r.consumption_l]) }]),
-    chart('Min pressure (m)', [{ name: 'min pressure', colour: css('--derived'), points: d.balance.map((r) => [r.ts, r.min_pressure_m]) }]),
+    chart('Consumption per 15 min (L)', [{ name: 'consumption', colour: css('--syn'), points: d.balance.map((r) => [r.ts, r.consumption_l]) }],
+      { bands: filledBands(d.backfills, 'meter_reading') }),
+    chart('Min pressure (m)', [{ name: 'min pressure', colour: css('--derived'), points: d.balance.map((r) => [r.ts, r.min_pressure_m]) }],
+      { bands: filledBands(d.backfills, 'pressure_reading') }),
     chart('Pressure: modelled vs observed (m)', [
       { name: 'modelled', colour: css('--derived'), points: d.residuals.map((r) => [r.ts, r.modelled]) },
       { name: 'observed', colour: css('--syn'), points: d.residuals.map((r) => [r.ts, r.observed]) },
     ]),
     el('p', { class: 'hint' }, statusMeaning(i.status, d.baseline)),
     el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic.'),
+    ...(d.backfills.length ? [el('p', { class: 'hint' }, BACKFILL_NOTE)] : []),
   );
 }
 
@@ -752,13 +807,15 @@ function devicePopup(kind, id) {
     const series = kind === 'meter'
       ? [{ name: 'litres', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.litres]) }]
       : [{ name: 'pressure', colour: css('--syn'), points: d.series.map((r) => [r.ts, r.pressure_m]) }];
+    const chartTitle = kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)';
     box.replaceChildren(
       el('strong', {}, id, el('span', { class: 'tag syn' }, 'synthetic')),
       el('dl', { class: 'kv' }, ...rows.filter(([, v]) => v !== null && v !== undefined && v !== '')
         .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
       d.series.length
-        ? chart(kind === 'meter' ? 'Litres per 15 min' : 'Pressure, 15-min mean (m)', series, { height: 110 })
+        ? chart(chartTitle, series, { height: 110, bands: filledBands(d.backfills) })
         : el('p', { class: 'muted small' }, `No readings in the last ${d.hours} h.`),
+      ...(d.backfills.length ? [el('p', { class: 'muted small' }, BACKFILL_NOTE)] : []),
     );
   }).catch((err) => box.replaceChildren(el('strong', {}, id), el('div', { class: 'err' }, err.message)));
   return box;
@@ -766,7 +823,32 @@ function devicePopup(kind, id) {
 
 // ----------------------------------------------------------------- charts
 // A small SVG line chart: enough for a 24 h trend, and no dependency.
-function chart(title, series, { height = 130 } = {}) {
+// Splits [time, value] points wherever a series went quiet, so a chart leaves a
+// gap instead of drawing a straight line through hours nothing was measured.
+// The limit follows the series' own median spacing because charts mix cadences,
+// and the median because one outage must not widen the limit that detects it.
+function runs(points) {
+  const gaps = points.slice(1).map(([t], i) => t - points[i][0]).sort((a, b) => a - b);
+  const limit = 3 * (gaps[Math.floor(gaps.length / 2)] ?? 0);
+  const out = [[points[0]]];
+  points.slice(1).forEach((point, i) => {
+    if (point[0] - points[i][0] > limit) out.push([point]);
+    else out.at(-1).push(point);
+  });
+  return out;
+}
+
+const BACKFILL_NOTE = 'Shaded periods were drawn afterwards to cover a gap in the feed, from the same profiles and ranges '
+  + 'as live readings. They are not readings generated at the time.';
+
+// [start, end] in ms of the ranges ingest/backfill.py filled; every stream given
+// when none is named, because a device's list holds only its own.
+function filledBands(fills, stream) {
+  return fills.filter((f) => !stream || f.stream === stream)
+    .map((f) => [new Date(f.gap_start).getTime(), new Date(f.gap_end).getTime()]);
+}
+
+function chart(title, series, { height = 130, bands = [] } = {}) {
   const W = 360;
   const H = height;
   const pad = { l: 40, r: 8, t: 18, b: 18 };
@@ -805,12 +887,22 @@ function chart(title, series, { height = 130 } = {}) {
   add('text', { x: pad.l, y: H - 4, class: 'lbl' }, xlabel(x0));
   add('text', { x: W - pad.r, y: H - 4, 'text-anchor': 'end', class: 'lbl' }, xlabel(x1));
 
+  // Under the lines, and named only here so a filled stretch can't be read as live.
+  const shown = bands.map(([a, b]) => [Math.max(a, x0), Math.min(b, x1)]).filter(([a, b]) => a < b);
+  shown.forEach(([a, b]) => add('rect', {
+    x: sx(a), y: pad.t, width: sx(b) - sx(a), height: H - pad.t - pad.b, class: 'backfill',
+  }));
+  if (shown.length) add('text', { x: W - pad.r, y: 11, 'text-anchor': 'end', class: 'lbl' }, 'shaded: backfilled');
+
   series.forEach((s, idx) => {
     const p = s.points.filter(([, v]) => v !== null && v !== undefined)
-      .map(([t, v]) => [sx(new Date(t).getTime()), sy(Number(v))]);
+      .map(([t, v]) => [new Date(t).getTime(), Number(v)]);
     if (!p.length) return;
-    if (p.length === 1) add('circle', { cx: p[0][0], cy: p[0][1], r: 2.5, fill: s.colour });
-    else add('polyline', { points: p.map((q) => q.join(',')).join(' '), fill: 'none', stroke: s.colour, 'stroke-width': 1.6 });
+    runs(p).forEach((run) => {
+      const q = run.map(([t, v]) => [sx(t), sy(v)]);
+      if (q.length === 1) add('circle', { cx: q[0][0], cy: q[0][1], r: 2.5, fill: s.colour });
+      else add('polyline', { points: q.map((c) => c.join(',')).join(' '), fill: 'none', stroke: s.colour, 'stroke-width': 1.6 });
+    });
     if (series.length > 1) {
       add('text', { x: W - pad.r - idx * 70, y: 11, 'text-anchor': 'end', class: 'lbl', fill: s.colour }, s.name);
     }

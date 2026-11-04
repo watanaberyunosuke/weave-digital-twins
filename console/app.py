@@ -701,10 +701,23 @@ def geo_dmas():
     """)
 
 
+def exclusions_built() -> bool:
+    # run_sim.py --build writes asset.model_exclusion; before then whether a
+    # pipe is in the model is unknown, not "no".
+    return bool(scalar("SELECT to_regclass('asset.model_exclusion') IS NOT NULL"))
+
+
 @app.get("/api/geo/pipes")
 def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
               bbox: str | None = Query(None, pattern=r"^-?[\d.]+(,-?[\d.]+){3}$")):
     # Largest mains first, so a capped draw still shows the trunk network.
+    # model is 'in', a reason code from asset.model_exclusion, or null before
+    # the first build.
+    if db_or_503(exclusions_built):
+        join = "LEFT JOIN asset.model_exclusion x USING (pipe_id)"
+        model, why = "CASE WHEN x.reason_code IS NULL THEN 'in' ELSE x.reason_code END", "x.reason"
+    else:
+        join, model, why = "", "NULL", "NULL"
     where, params = "", {"limit": limit}
     if bbox:
         x1, y1, x2, y2 = (float(v) for v in bbox.split(","))
@@ -715,9 +728,11 @@ def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
                'geometry', ST_AsGeoJSON(ST_Simplify(geom, 0.00002), 6)::json,
                'properties', json_build_object(
                    'pipe_id', pipe_id, 'layer', layer, 'diameter_mm', diameter_mm,
-                   'material', material, 'in_graph', start_node IS NOT NULL)) AS feature
+                   'material', material, 'in_graph', start_node IS NOT NULL,
+                   'model', {model}, 'model_reason', {why})) AS feature
         FROM (SELECT * FROM asset.pipe {where}
               ORDER BY diameter_mm DESC NULLS LAST LIMIT %(limit)s) p
+        {join}
     """, params)
 
 
@@ -771,6 +786,32 @@ def storage_loaded() -> bool:
     # ingest/storage_poller.py creates ref.storage_site on volumes initialised
     # before it existed, so until its first run there is nothing to read.
     return bool(scalar("SELECT to_regclass('ref.storage_site') IS NOT NULL"))
+
+
+def model_links_built() -> bool:
+    # run_sim.py --build creates asset.model_link; before the first build
+    # there is nothing to draw.
+    return bool(scalar("SELECT to_regclass('asset.model_link') IS NOT NULL"))
+
+
+@app.get("/api/geo/model-links")
+def geo_model_links():
+    """What the model build changed to join the network's pieces (model/gaps.py):
+    real pipes it split at a junction, and the synthetic gaps, bridges and
+    reservoir trunk mains it added, each with the reason it was needed."""
+    if not db_or_503(model_links_built):
+        return JSONResponse({"type": "FeatureCollection", "features": []})
+    return geojson("""
+        SELECT json_build_object('type', 'Feature',
+               'geometry', ST_AsGeoJSON(geom, 6)::json,
+               'properties', json_build_object(
+                   'element_id', element_id, 'kind', kind, 'synthetic', synthetic,
+                   'pipe_id', pipe_id, 'facility_id', facility_id,
+                   'length_m', round(length_m::numeric, 1), 'reason', reason,
+                   'built_at', built_at)) AS feature
+        FROM asset.model_link
+        WHERE geom IS NOT NULL
+    """)
 
 
 @app.get("/api/geo/storages")
@@ -888,6 +929,20 @@ DEVICES = {
 }
 
 
+def backfills(streams: list[str], hours: int) -> list[dict]:
+    """Ranges ingest/backfill.py drew after a gap, so a chart can mark them: their
+    rows look like any other synthetic reading. Older volumes lack the table until
+    that service first runs."""
+    if not scalar("SELECT to_regclass('twin.backfill_log') IS NOT NULL"):
+        return []
+    return query("""
+        SELECT stream, gap_start, gap_end, row_count, method
+        FROM twin.backfill_log
+        WHERE stream = ANY(%s) AND gap_end > now() - make_interval(hours => %s)
+        ORDER BY gap_start
+    """, (streams, hours))
+
+
 @app.get("/api/device/{kind}/{device_id}")
 def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168)):
     """One meter or logger: registry row, latest reading and 15-minute buckets.
@@ -922,7 +977,8 @@ def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168
             GROUP BY 1 ORDER BY 1
         """, {"id": device_id, "h": hours})
         return {"kind": kind, "info": info, "latest": latest[0] if latest else None,
-                "series": series, "hours": hours}
+                "series": series, "hours": hours,
+                "backfills": backfills([readings.removeprefix("twin.")], hours)}
     return db_or_503(run)
 
 
@@ -963,6 +1019,7 @@ def dma_detail(dma_id: str, hours: int = Query(24, ge=1, le=168)):
                 WHERE dma_id = %s AND ts > now() - %s::interval
                 ORDER BY ts
             """, (dma_id, window)),
+            "backfills": backfills(["meter_reading", "pressure_reading"], hours),
         }
     return db_or_503(run)
 

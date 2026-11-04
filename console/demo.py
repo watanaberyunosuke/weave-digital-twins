@@ -27,18 +27,18 @@ _SAMPLES: dict[str, list[str]] = {
     "seed": [
         "Clustering pipes into {dmas} DMAs (ST_ClusterKMeans)",
         "Placing {meters_per_dma} meters per DMA on real pipe geometry",
-        "Writing schemas/water-meter.avsc, pressure-logger.avsc, electricity-meter.avsc",
+        "Writing schemas/pressure_reading.avsc, electricity_interval.avsc",
         "Re-register the connectors so Datagen picks up the new ids.",
     ],
     "register_connectors": [
         "Waiting for Kafka Connect ...",
-        "datagen-water-meters: deleted, created (RUNNING)",
         "datagen-pressure-loggers: deleted, created (RUNNING)",
         "datagen-electricity-meters: deleted, created (RUNNING)",
     ],
     "build_model": [
         "Reservoirs snapped: 3 (0 beyond SIM_MAX_SNAP_M)",
         "Supplied subgraph: pipes kept up to SIM_MAX_PIPES, unsupplied fragments left out",
+        "Zones: 5 elevation bands of 55 m, PRVs between bands, 1 booster; static pressure 25-80 m",
         "Wrote /app/out/network.inp",
     ],
     "start_flink": [
