@@ -91,7 +91,11 @@ class IntervalTest(unittest.TestCase):
         self.assertLessEqual(max(factors), 1 + DAY_RANGE)
 
     def test_meter_size_is_fixed_by_its_id(self):
-        self.assertEqual(meter_profile("H42", "residential"), meter_profile("H42", "residential"))
+        first = meter_profile("H42", "residential")
+        again = meter_profile("H42", "residential")
+        self.assertEqual(first, again)
+        # Without this, a constant size would pass too.
+        self.assertNotEqual(first.daily_litres, meter_profile("H43", "residential").daily_litres)
 
     def test_unknown_type_is_read_as_a_household(self):
         self.assertEqual(meter_profile("X1", None).meter_type, "residential")
