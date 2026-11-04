@@ -403,16 +403,28 @@ class DeviceTests(unittest.TestCase):
         rows = [[{"id": "M1", "meter_id": "M1", "dma_id": "D1", "meter_type": "residential",
                   "geom": "x"}],
                 [{"ts": "2026-10-31T12:00:00Z", "litres": 4.0, "flow_lpm": 2.0, "battery_pct": 90}],
-                [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}]]
-        with mock.patch.object(self.app, "query", side_effect=rows) as q:
+                [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}],
+                [{"stream": "meter_reading", "gap_start": "2026-10-31T09:00:00Z",
+                  "gap_end": "2026-10-31T11:00:00Z", "row_count": 8, "method": "m"}]]
+        with mock.patch.object(self.app, "scalar", return_value=True), \
+                mock.patch.object(self.app, "query", side_effect=rows) as q:
             body = self.client.get("/api/device/meter/M1").json()
         self.assertEqual(body["latest"]["litres"], 4.0)
+        # A chart can only mark filled stretches of the stream it draws.
+        self.assertEqual(body["backfills"][0]["gap_start"], "2026-10-31T09:00:00Z")
+        self.assertEqual(q.call_args_list[3].args[1], (["meter_reading"], 24))
         self.assertEqual(body["series"][0]["readings"], 3)
         self.assertNotIn("geom", body["info"])
         # Table names come from the server's own map, and the id only ever
         # travels as a bound parameter.
         self.assertIn("FROM ref.water_meter WHERE meter_id = %s", q.call_args_list[0].args[0])
         self.assertEqual(q.call_args_list[0].args[1], ("M1",))
+
+    def test_volume_without_the_backfill_table_has_no_fills(self):
+        rows = [[{"id": "M1", "meter_id": "M1"}], [], []]
+        with mock.patch.object(self.app, "scalar", return_value=False), \
+                mock.patch.object(self.app, "query", side_effect=rows):
+            self.assertEqual(self.client.get("/api/device/meter/M1").json()["backfills"], [])
 
     def test_missing_device_is_404(self):
         with mock.patch.object(self.app, "query", return_value=[]):
