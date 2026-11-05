@@ -64,21 +64,3 @@ CREATE TABLE IF NOT EXISTS pressure_raw (
     'format' = 'json',
     'json.ignore-parse-errors' = 'true'
 );
-
-CREATE TABLE IF NOT EXISTS electricity_meter_raw (
-    meter_id   STRING,
-    kwh_import DOUBLE,
-    kwh_export DOUBLE,
-    voltage_v  DOUBLE,
-    event_ts   BIGINT,
-    kafka_ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp' VIRTUAL,
-    WATERMARK FOR kafka_ts AS kafka_ts - INTERVAL '10' SECOND
-) WITH (
-    'connector' = 'kafka',
-    'topic' = 'electricity.meter-interval.raw.v1',
-    'properties.bootstrap.servers' = 'broker:29092',
-    'properties.group.id' = 'flink-twin',
-    'scan.startup.mode' = 'latest-offset',
-    'format' = 'json',
-    'json.ignore-parse-errors' = 'true'
-);

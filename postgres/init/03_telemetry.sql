@@ -90,20 +90,6 @@ CREATE TABLE twin.dma_latest (
     status         TEXT               -- OK | WATCH | SUSPECTED_LEAK | UNKNOWN
 );
 
--- ========================================================== ELECTRICITY
--- Synthetic: electricity interval meter data
-CREATE TABLE twin.electricity_interval (
-    ts            TIMESTAMPTZ NOT NULL,
-    meter_id      TEXT        NOT NULL,
-    substation_id TEXT,
-    kwh_import    DOUBLE PRECISION,
-    kwh_export    DOUBLE PRECISION,
-    voltage_v     DOUBLE PRECISION,
-    is_synthetic  BOOLEAN DEFAULT true
-);
-SELECT create_hypertable('twin.electricity_interval', 'ts', chunk_time_interval => INTERVAL '1 day');
-CREATE INDEX ON twin.electricity_interval (substation_id, ts DESC);
-
 -- ====================================================== simulation output
 CREATE TABLE twin.sim_result (
     run_id       TEXT NOT NULL,

@@ -158,35 +158,6 @@ def build_meters(conn, dma_ids: list[str], per_dma: int) -> None:
     print(f"  created {meters} meters")
 
 
-def build_electricity_meters(conn, per_substation: int) -> list[str]:
-    """Synthetic electricity meters hung off real OSM substations."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM asset.substation")
-        if cur.fetchone()[0] == 0:
-            print("  (no substations loaded — skipping electricity meters)")
-            return []
-        cur.execute("TRUNCATE ref.electricity_meter CASCADE")
-        cur.execute(
-            """
-            INSERT INTO ref.electricity_meter
-                   (meter_id, substation_id, customer_type, has_solar, geom)
-            SELECT 'EM' || lpad((row_number() OVER ())::text, 8, '0'),
-                   s.substation_id,
-                   (ARRAY['residential','residential','commercial','industrial'])
-                       [1 + floor(random() * 4)::int],
-                   random() < 0.35,
-                   ST_Translate(s.geom, (random() - 0.5) * 0.01, (random() - 0.5) * 0.01)
-            FROM asset.substation s
-            CROSS JOIN generate_series(1, %s)
-            ON CONFLICT (meter_id) DO NOTHING
-            """,
-            (per_substation,),
-        )
-        conn.commit()
-        cur.execute("SELECT meter_id FROM ref.electricity_meter ORDER BY random() LIMIT 200")
-        return [r[0] for r in cur.fetchall()]
-
-
 def write_schema(filename: str, schema: dict) -> None:
     os.makedirs(SCHEMA_DIR, exist_ok=True)
     path = os.path.join(SCHEMA_DIR, filename)
@@ -195,7 +166,7 @@ def write_schema(filename: str, schema: dict) -> None:
     print(f"  wrote {path}")
 
 
-def emit_schemas(dma_ids: list[str], elec_ids: list[str]) -> None:
+def emit_schemas(dma_ids: list[str]) -> None:
     print("generating Datagen schemas seeded with real asset ids ...")
 
     # No water meter schema: ingest-meters reads ref.water_meter directly and
@@ -221,31 +192,11 @@ def emit_schemas(dma_ids: list[str], elec_ids: list[str]) -> None:
         ],
     })
 
-    if elec_ids:
-        write_schema("electricity_interval.avsc", {
-            "type": "record",
-            "name": "ElectricityInterval",
-            "namespace": f"{NAMESPACE}.electricity",
-            "fields": [
-                {"name": "meter_id", "type": {"type": "string",
-                    ARG_PROPERTIES: {"options": elec_ids}}},
-                {"name": "kwh_import", "type": {"type": "double",
-                    ARG_PROPERTIES: {"range": {"min": 0.0, "max": 12.0}}}},
-                {"name": "kwh_export", "type": {"type": "double",
-                    ARG_PROPERTIES: {"range": {"min": 0.0, "max": 6.0}}}},
-                {"name": "voltage_v", "type": {"type": "double",
-                    ARG_PROPERTIES: {"range": {"min": 225.0, "max": 253.0}}}},
-                {"name": "event_ts", "type": {"type": "long",
-                    ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 1800000}}}},
-            ],
-        })
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dmas", type=int, default=40)
     ap.add_argument("--meters-per-dma", type=int, default=25)
-    ap.add_argument("--meters-per-substation", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -255,11 +206,10 @@ def main() -> int:
         load_modelled_pipes(conn)
         dma_ids = build_dmas(conn, args.dmas)
         build_meters(conn, dma_ids, args.meters_per_dma)
-        elec_sample = build_electricity_meters(conn, args.meters_per_substation)
 
     # Datagen picks uniformly from options, so a sample keeps the schema small
     # while still producing ids that exist in the registry tables.
-    emit_schemas(dma_ids, elec_sample)
+    emit_schemas(dma_ids)
 
     print("\nnext: ./scripts/register-connectors.sh")
     return 0

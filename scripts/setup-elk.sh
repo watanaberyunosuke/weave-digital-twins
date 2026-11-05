@@ -92,7 +92,6 @@ data_view() {  # id, index pattern, display name
 data_view twin-hydrometry           'twin-hydrometry-*'           'Hydrometry (real)'
 data_view twin-meter-reading        'twin-meter-reading-*'        'Water meters (synthetic)'
 data_view twin-pressure-reading     'twin-pressure-reading-*'     'Pressure loggers (synthetic)'
-data_view twin-electricity-interval 'twin-electricity-interval-*' 'Electricity meters (synthetic)'
 data_view twin-dma-balance          'twin-dma-balance-*'          'DMA balance'
 data_view twin-sim-residual         'twin-sim-residual-*'         'Model residuals'
 data_view twin-dma-latest           'twin-dma-latest'             'DMA status (current)'

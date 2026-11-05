@@ -16,7 +16,6 @@ _SAMPLES: dict[str, list[str]] = {
         "  water.hydrometry.raw.v1",
         "  water.meter-readings.raw.v1",
         "  water.pressure-readings.raw.v1",
-        "  electricity.meter-interval.raw.v1",
     ],
     "load_gis": [
         "layer water_main: fetching features (limit {limit})",
@@ -27,13 +26,12 @@ _SAMPLES: dict[str, list[str]] = {
     "seed": [
         "Clustering pipes into {dmas} DMAs (ST_ClusterKMeans)",
         "Placing {meters_per_dma} meters per DMA on real pipe geometry",
-        "Writing schemas/pressure_reading.avsc, electricity_interval.avsc",
+        "Writing schemas/pressure_reading.avsc",
         "Re-register the connectors so Datagen picks up the new ids.",
     ],
     "register_connectors": [
         "Waiting for Kafka Connect ...",
         "datagen-pressure-loggers: deleted, created (RUNNING)",
-        "datagen-electricity-meters: deleted, created (RUNNING)",
     ],
     "build_model": [
         "Reservoirs snapped: 3 (0 beyond SIM_MAX_SNAP_M)",
