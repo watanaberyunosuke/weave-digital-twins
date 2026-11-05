@@ -54,9 +54,7 @@
             <label><input type="checkbox" data-layer="dmas" checked> DMAs <span class="tag syn">synthetic</span></label>
             <label><input type="checkbox" data-layer="pipes" checked> Pipes <span class="tag real">real</span></label>
             <label title="Where the model build joined the network's pieces: rings mark real pipes split at a junction the data never split; purple lines are synthetic gaps (dotted), bridges (dashed) and reservoir trunk mains (solid). Click one for the reason."><input type="checkbox" data-layer="links" checked> <i class="sw link"></i> Network joins <span class="tag real">real</span> <span class="tag syn">synthetic</span></label>
-            <label><input type="checkbox" data-layer="facilities" checked> Facilities <span class="tag real">real</span></label>
-            <label><input type="checkbox" data-layer="gauges" checked> Gauges <span class="tag real">real</span></label>
-            <label><input type="checkbox" data-layer="storages" checked> <i class="sw storage"></i> Unmatched storage gauges <span class="tag real">real</span></label>
+            <label title="Water assets, plus river monitoring sites and the reservoirs and tanks that have a storage gauge but no matching asset."><input type="checkbox" data-layer="facilities" checked> Facilities and monitoring sites <span class="tag real">real</span></label>
             <label><input type="checkbox" data-layer="meters" checked> Meters and loggers <span class="tag syn">synthetic</span></label>
             <label class="small muted" for="basemap">Basemap</label>
             <select id="basemap"></select>
@@ -64,7 +62,8 @@
               <span><i class="sw dot meter-res"></i>Residential meter</span>
               <span title="Commercial and bulk meters"><i class="sw dot meter-com"></i>Commercial meter</span>
               <span><i class="sw dot logger"></i>Pressure logger</span>
-              <span title="Click the asset for its storage level"><i class="sw facility-storage"></i>Asset with storage level</span>
+              <span title="River and hydrometry monitoring sites. Hover or click one for what it measures."><i class="sw dot gauge-dot"></i>Monitoring site</span>
+              <span title="Click for its storage level. Includes reservoirs and tanks with a gauge but no matching asset."><i class="sw facility-storage"></i>Reservoir or tank with storage level</span>
               <span title="Real pipes the hydraulic model leaves out. Click one for why: a zero-length joint, no supply within reach, or beyond the pipe cap."><i class="sw pipe-out"></i>Pipe not in model</span>
             </div>
             <div class="legend">
