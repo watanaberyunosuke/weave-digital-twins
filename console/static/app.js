@@ -458,8 +458,6 @@ const layers = {
   pipes: L.layerGroup().addTo(map),
   links: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
-  gauges: L.layerGroup().addTo(map),
-  storages: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
 };
 // Map colours resolve against #map, which carries its own tokens when the
@@ -478,7 +476,7 @@ const statusLabel = (s) => ({ OK: 'OK', WATCH: 'WATCH', SUSPECTED_LEAK: 'SUSPECT
 // DMAs could not be clicked.) loadMap() draws in this order; turning a layer
 // back on re-adds the layers above it, because re-adding moves a group to the
 // end of the draw order.
-const LAYER_ORDER = ['dmas', 'pipes', 'links', 'facilities', 'gauges', 'storages', 'meters'];
+const LAYER_ORDER = ['dmas', 'pipes', 'links', 'facilities', 'meters'];
 function restackAbove(name) {
   LAYER_ORDER.slice(LAYER_ORDER.indexOf(name) + 1).map((k) => layers[k])
     .filter((g) => map.hasLayer(g))
@@ -534,7 +532,7 @@ function linkPopup(p) {
 let fitted = false;
 async function loadMap() {
   let dbError = null;
-  const [dmas, pipes, links, facilities, gauges, storages, meters] = await Promise.all([
+  const [dmas, pipes, links, facilities, hydrometry, storages, meters] = await Promise.all([
     api('/api/geo/dmas').catch((e) => { dbError = e.message; return null; }),
     api('/api/geo/pipes?limit=8000').catch(() => null),
     api('/api/geo/model-links').catch(() => null),
@@ -611,33 +609,42 @@ async function loadMap() {
     }).addTo(layers.facilities);
   }
 
-  layers.gauges.clearLayers();
-  if (gauges) {
-    L.geoJSON(gauges, {
-      pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
-      }),
-      onEachFeature: (f, lyr) => lyr.bindPopup(() => popupHtml(f.properties.site_name || f.properties.site_id, [
-        ['Site', f.properties.site_id], ['Variable', f.properties.variable], ['Provider', f.properties.provider],
-      ])),
-    }).addTo(layers.gauges);
+  // Hydrometry sites and storage gauges no asset matched join the facilities
+  // layer, drawn after the assets so they sit on top. (A matched storage gauge
+  // is in its asset's popup.)
+  const gaugeMarker = (f, ll) => L.circleMarker(ll, {
+    radius: 5, color: '#fff', fillColor: mcss('--gauge'), fillOpacity: 1, weight: 1.5,
+  });
+  if (hydrometry) {
+    L.geoJSON(hydrometry, {
+      pointToLayer: gaugeMarker,
+      onEachFeature: (f, lyr) => {
+        const name = f.properties.site_name || f.properties.site_id;
+        lyr.bindTooltip(`${name} · ${f.properties.variable || 'hydrometry'}`, { sticky: true });
+        lyr.bindPopup(() => popupHtml(name, [
+          ['Measures', f.properties.variable || 'Hydrometry'],
+          ['Site', f.properties.site_id], ['Provider', f.properties.provider],
+        ]));
+      },
+    }).addTo(layers.facilities);
   }
-  layers.storages.clearLayers();
   if (storages) {
     L.geoJSON(storages, {
-      // Only gauges no asset matched; a matched one is in its asset's popup.
-      // On the shared canvas like everything else, so meters still draw over
-      // it; larger than a facility, with a heavy white ring, to read apart.
+      // A storage gauge is a reservoir or tank in its own right, so it takes the
+      // facility marker with the real-data ring, as an asset with a level does.
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 7, color: '#fff', weight: 2.5, fillColor: mcss('--real'), fillOpacity: 1,
+        radius: 7, color: mcss('--real'), weight: 2.5, fillColor: mcss('--facility'), fillOpacity: 0.9,
       }),
-      onEachFeature: (f, lyr) => lyr.bindPopup(() => storagePopup(f.properties), { maxWidth: 380, minWidth: 300 }),
-    }).addTo(layers.storages);
+      onEachFeature: (f, lyr) => {
+        lyr.bindTooltip(`${f.properties.name} · storage`, { sticky: true });
+        lyr.bindPopup(() => storagePopup(f.properties), { maxWidth: 380, minWidth: 300 });
+      },
+    }).addTo(layers.facilities);
   }
   // Drawn in LAYER_ORDER, so meters and loggers are added last and sit on top.
   drawMeters(meters);
 
-  const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities, layers.gauges].flatMap((g) => g.getLayers()));
+  const all = L.featureGroup([layers.dmas, layers.pipes, layers.facilities].flatMap((g) => g.getLayers()));
   const empty = !all.getLayers().length;
   $('#map-empty').hidden = !empty;
   $('#map-empty').textContent = dmas === null
@@ -757,10 +764,11 @@ function facilityPopup(p) {
   return box;
 }
 
-// A gauge no asset matched, so it has no capacity and its own marker.
+// A storage gauge no asset matched, so it has no capacity and is drawn as a gauge.
 function storagePopup(p) {
   return el('div', {},
     el('strong', {}, p.name, el('span', { class: 'tag real' }, 'real')),
+    el('div', { class: 'muted small' }, 'Measures: storage level'),
     storageLevel(p, p.station_no, 'No matching asset, so no capacity for percent full.'));
 }
 
