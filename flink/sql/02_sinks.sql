@@ -52,22 +52,6 @@ CREATE TABLE IF NOT EXISTS pressure_sink (
     'sink.buffer-flush.interval' = '2s'
 );
 
-CREATE TABLE IF NOT EXISTS electricity_meter_sink (
-    ts           TIMESTAMP(3),
-    meter_id     STRING,
-    kwh_import   DOUBLE,
-    kwh_export   DOUBLE,
-    voltage_v    DOUBLE,
-    is_synthetic BOOLEAN
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:postgresql://postgres:5432/weave_twin',
-    'table-name' = 'twin.electricity_interval',
-    'username' = 'weave', 'password' = 'weave',
-    'sink.buffer-flush.max-rows' = '500',
-    'sink.buffer-flush.interval' = '2s'
-);
-
 -- Gold: per-DMA water balance, the leak signal.
 CREATE TABLE IF NOT EXISTS dma_balance_sink (
     window_start   TIMESTAMP(3),

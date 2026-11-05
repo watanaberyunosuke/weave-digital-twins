@@ -127,38 +127,6 @@ CREATE TABLE ref.storage_site (
 );
 CREATE INDEX storage_site_geom_idx ON ref.storage_site USING GIST (geom);
 
--- =========================================================== ELECTRICITY
-CREATE TABLE asset.substation (
-    substation_id TEXT PRIMARY KEY,
-    name          TEXT,
-    operator      TEXT,
-    voltage_kv    NUMERIC,
-    source        TEXT,                 -- 'osm'
-    props         JSONB,
-    geom          GEOMETRY(Point, 4326)
-);
-CREATE INDEX ON asset.substation USING GIST (geom);
-
-CREATE TABLE asset.power_line (
-    line_id     TEXT PRIMARY KEY,
-    voltage_kv  NUMERIC,
-    operator    TEXT,
-    source      TEXT,
-    geom        GEOMETRY(LineString, 4326)
-);
-CREATE INDEX ON asset.power_line USING GIST (geom);
-
--- Synthetic connection-point meters, hung off real substations.
-CREATE TABLE ref.electricity_meter (
-    meter_id      TEXT PRIMARY KEY,
-    substation_id TEXT REFERENCES asset.substation(substation_id),
-    customer_type TEXT,                 -- residential | commercial | industrial
-    has_solar     BOOLEAN,
-    geom          GEOMETRY(Point, 4326),
-    synthetic     BOOLEAN DEFAULT true
-);
-CREATE INDEX ON ref.electricity_meter USING GIST (geom);
-
 -- ============================================================= TRANSPORT
 CREATE TABLE asset.transit_stop (
     stop_id    TEXT PRIMARY KEY,

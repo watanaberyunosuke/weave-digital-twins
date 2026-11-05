@@ -13,4 +13,3 @@ create water.hydrometry.raw.v1          1 2592000000   # 30 days
 # synthetic
 create water.meter-readings.raw.v1      1 604800000    # 7 days
 create water.pressure-readings.raw.v1   1 604800000    # 7 days
-create electricity.meter-interval.raw.v1 1 604800000   # 7 days

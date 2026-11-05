@@ -21,11 +21,6 @@ SELECT CAST(kafka_ts AS TIMESTAMP(3)), logger_id, dma_id, pressure_m, flow_ls, t
 FROM pressure_raw
 WHERE pressure_m BETWEEN 0 AND 120;
 
-INSERT INTO electricity_meter_sink
-SELECT CAST(kafka_ts AS TIMESTAMP(3)), meter_id, kwh_import, kwh_export, voltage_v, true
-FROM electricity_meter_raw
-WHERE voltage_v BETWEEN 180 AND 280;
-
 -- Gold: 15-minute consumption per DMA, joined to pressure minima.
 INSERT INTO dma_balance_sink
 SELECT m.window_start,

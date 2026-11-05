@@ -17,11 +17,12 @@ until curl -s -o /dev/null "$CONNECT_URL/connectors"; do sleep 3; done
 
 # Water meter readings now come from the ingest-meters service; a stack
 # registered before that still runs the old connector, which would feed the
-# topic twice.
-for retired in datagen-water-meters; do
+# topic twice. The electricity connector is retired with nothing to replace
+# it: an older stack would keep producing to a topic nothing reads.
+for retired in datagen-water-meters datagen-electricity-meters; do
   if curl -s -o /dev/null -w '%{http_code}' "$CONNECT_URL/connectors/$retired" | grep -q 200; then
     curl -s -X DELETE "$CONNECT_URL/connectors/$retired" >/dev/null
-    echo "-> $retired  removed (replaced by ingest-meters)"
+    echo "-> $retired  removed (retired)"
   fi
 done
 

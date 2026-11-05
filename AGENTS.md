@@ -92,8 +92,8 @@ storage volumes (ingest/storage_poller.py, daily) ── batch, no Kafka ──>
 
 ### Schemas in Postgres
 
-- `asset` — real topology (`gis_raw` verbatim JSONB, conformed `pipe`/`facility`/`substation`/`power_line`/`transit_stop`, graph `node`) plus derived `dma`.
-- `ref` — registries of things that emit telemetry (`water_meter`, `pressure_logger`, `electricity_meter` synthetic; `hydrometry_site`, `storage_site` real).
+- `asset` — real topology (`gis_raw` verbatim JSONB, conformed `pipe`/`facility`/`transit_stop`, graph `node`) plus derived `dma`.
+- `ref` — registries of things that emit telemetry (`water_meter`, `pressure_logger` synthetic; `hydrometry_site`, `storage_site` real).
 - `twin` — telemetry hypertables and simulation output.
 
 [postgres/init/](postgres/init/) runs **only on an empty volume**. Schema changes require `docker compose down -v` for `postgres` (destroying loaded GIS) or a manual migration.

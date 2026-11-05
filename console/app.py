@@ -94,10 +94,10 @@ NOT_FOUND, NO_SUCH_JOB = "not found", "no such job"
 JOB_ID = re.compile(r"[0-9a-f]{1,32}")
 ADMIN_ENABLED = PUBLIC and bool(ADMIN_HASH) and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)
 
-# The four topics create-topics.sh makes; a step is done when all exist.
+# The three topics create-topics.sh makes; a step is done when all exist.
 TOPICS = [
     "water.hydrometry.raw.v1", "water.meter-readings.raw.v1",
-    "water.pressure-readings.raw.v1", "electricity.meter-interval.raw.v1",
+    "water.pressure-readings.raw.v1",
 ]
 
 # Telemetry tables and the column that dates a row. The origin label is shown
@@ -109,7 +109,6 @@ TELEMETRY = [
     ("storage_level", "ts", "real"),
     ("meter_reading", "ts", "synthetic"),
     ("pressure_reading", "ts", "synthetic"),
-    ("electricity_interval", "ts", "synthetic"),
     ("dma_balance", "window_start", "derived"),
     ("sim_residual", "ts", "model"),
 ]
@@ -267,9 +266,7 @@ def probe_db() -> dict:
                (SELECT count(*) FROM asset.dma)                                 AS dmas,
                (SELECT count(*) FROM ref.water_meter)                           AS water_meters,
                (SELECT count(*) FROM ref.pressure_logger)                       AS pressure_loggers,
-               (SELECT count(*) FROM ref.electricity_meter)                     AS electricity_meters,
                (SELECT count(*) FROM ref.hydrometry_site)                       AS hydrometry_sites,
-               (SELECT count(*) FROM asset.substation)                          AS substations,
                (SELECT max(ts) FROM twin.sim_residual)                          AS last_residual_ts
     """)[0]
     row["dma_status"] = {r["status"]: r["n"] for r in query(
@@ -1109,9 +1106,8 @@ ACTIONS: dict[str, dict] = {
     "seed": {
         "label": "Derive synthetic DMAs and meters",
         "step": 3,
-        "destructive": "Truncates asset.dma, ref.water_meter, ref.pressure_logger and "
-                       "ref.electricity_meter, and rewrites schemas/. Re-register the "
-                       "connectors afterwards.",
+        "destructive": "Truncates asset.dma, ref.water_meter and ref.pressure_logger, "
+                       "and rewrites schemas/. Re-register the connectors afterwards.",
         "description": "Clusters real pipes into DMAs, places meters on real geometry, "
                        "and writes Datagen schemas drawn from the new ids.",
         "params": [

@@ -2,7 +2,7 @@
 
 A framework for building digital twins of water, electricity and transport networks using public network topology data and synthetic telemetry to fill gaps where real meter data isn't publicly available.
 
-**The core principle:** Never fake the network. Use real public GIS layers for topology (pipes, mains, substations, transit stops), and generate meters *onto* that real geometry rather than floating them at random coordinates.
+**The core principle:** Never fake the network. Use real public GIS layers for topology (pipes, mains, transit stops), and generate meters *onto* that real geometry rather than floating them at random coordinates.
 
 ## Why it works
 
@@ -124,7 +124,7 @@ Every table and message carries `is_synthetic` so you never accidentally mix the
 
 | Layer | Real (public) | Synthetic (generated) |
 |---|---|---|
-| Network topology | GIS mains, substations, transit stops | — |
+| Network topology | GIS mains, transit stops | — |
 | Telemetry | Your region's public feeds | Smart meters, pressure loggers |
 
 Synthetic data is *coherent*: every meter ID exists, every meter sits on real geometry, every zone is derived from real assets.
