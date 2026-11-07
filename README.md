@@ -96,6 +96,16 @@ simulates the rest. The admin login on the same page runs every step live
 once `./scripts/init-secrets.sh` has filled the console secrets into `.env`
 (it asks for the admin password and keeps only its hash).
 
+**One console instead of two.** Set `CONSOLE_MODE=unified` (and
+`CONSOLE_TWIN_DSN` to the `weave_reader` URL, as `.env.example` shows) and
+restart `console`: that single service then serves everyone on `CONSOLE_PORT`
+with the same public, demo and admin roles, chosen by password, and
+`console-public` is not needed. The trade-off is that the one process holds
+the Docker socket, so only the role check stands between a visitor and the
+host. The default keeps two services so the public one never holds it. Use
+unified only with a strong admin password and an authenticator, and put
+the public host name in `CONSOLE_ALLOWED_HOSTS`.
+
 The map has a basemap picker (OpenStreetMap, CARTO, Esri imagery and
 topographic, OpenTopoMap, and Google Maps when `.env` holds a Map Tiles API
 key) and a light/dark theme toggle. No basemap is drawn until you pick one,

@@ -285,7 +285,18 @@ services:
     ports:
       - "127.0.0.1:${CONSOLE_PORT:-8090}:8090"
     environment:
-      TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
+      # CONSOLE_MODE=unified turns this service into the one console for
+      # everyone (see .env.example): demo and admin logins on this address, no
+      # console-public. It reads as weave_reader there, because strangers can
+      # reach it; the socket and the role check are what act.
+      CONSOLE_MODE: ${CONSOLE_MODE:-admin}
+      TWIN_DSN: ${CONSOLE_TWIN_DSN:-postgresql://weave:weave@postgres:5432/weave_twin}
+      CONSOLE_DEMO: ${CONSOLE_DEMO:-1}
+      CONSOLE_DEMO_PASSWORD: ${CONSOLE_DEMO_PASSWORD:-demo}
+      CONSOLE_COOKIE_SECURE: ${CONSOLE_COOKIE_SECURE:-0}
+      CONSOLE_ADMIN_PASSWORD_HASH: ${CONSOLE_ADMIN_PASSWORD_HASH:-}
+      CONSOLE_ADMIN_TOTP_SECRET: ${CONSOLE_ADMIN_TOTP_SECRET:-}
+      CONSOLE_SESSION_SECRET: ${CONSOLE_SESSION_SECRET:-}
       GIS_REGION_CONFIG: ${GIS_REGION_CONFIG}
       KAFKA_BOOTSTRAP: broker:29092
       CONNECT_URL: http://connect:8083
