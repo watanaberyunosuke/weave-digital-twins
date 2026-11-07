@@ -55,10 +55,10 @@
             <label><input type="checkbox" data-layer="pipes" checked> Pipes <span class="tag real">real</span></label>
             <div class="layer-row">
               <label title="Where the model build joined the network's pieces: blue dots mark real pipes split at a junction the data never split; purple lines are synthetic gaps and bridges (thin dotted) and reservoir trunk mains (solid). Click one for the reason."><input type="checkbox" data-layer="links" checked> Network joins</label>
-              <span class="tag-group" role="group" aria-label="Show kinds of network join">
+              <fieldset class="tag-group"><legend class="sr-only">Show kinds of network join</legend>
                 <button type="button" class="tag real" data-join="real" aria-pressed="true" title="Real pipes the build split at a junction (blue dots). Click to hide or show.">real</button>
                 <button type="button" class="tag syn" data-join="synthetic" aria-pressed="true" title="Synthetic gaps, bridges and trunk mains the build added (purple lines). Click to hide or show.">synthetic</button>
-              </span>
+              </fieldset>
             </div>
             <label title="Water assets, plus river monitoring sites and the reservoirs and tanks that have a storage gauge but no matching asset."><input type="checkbox" data-layer="facilities" checked> Facilities and monitoring sites <span class="tag real">real</span></label>
             <label><input type="checkbox" data-layer="meters" checked> Meters and loggers <span class="tag syn">synthetic</span></label>
