@@ -30,15 +30,17 @@ done
 
 # Seconds since the newest row, or "none" when the table is empty.
 age_of() {
+  local table=$1
   docker exec weave-postgres psql -U weave -d weave_twin -Atc \
-    "SELECT COALESCE(EXTRACT(EPOCH FROM now() - max(ts))::bigint::text, 'none') FROM twin.$1"
+    "SELECT COALESCE(EXTRACT(EPOCH FROM now() - max(ts))::bigint::text, 'none') FROM twin.${table}"
 }
 
 needs_seed() { # $1 = table; prints the reason and returns 0 when seeding is due
-  local age; age=$(age_of "$1")
-  if [[ "$age" == "none" ]]; then echo "$1: empty"; return 0; fi
-  if (( age > STALE_S )); then echo "$1: newest row ${age}s old (limit ${STALE_S}s)"; return 0; fi
-  echo "$1: fresh (${age}s)" >&2; return 1
+  local table=$1 age
+  age=$(age_of "$table")
+  if [[ "$age" == "none" ]]; then echo "$table: empty"; return 0; fi
+  if (( age > STALE_S )); then echo "$table: newest row ${age}s old (limit ${STALE_S}s)"; return 0; fi
+  echo "$table: fresh (${age}s)" >&2; return 1
 }
 
 flink_running() {
