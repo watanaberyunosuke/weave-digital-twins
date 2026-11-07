@@ -101,7 +101,8 @@ function renderHeader() {
     ['Control Center', config.control_center_url]].filter(([, href]) => href);
   $('#links').replaceChildren(...links.map(([label, href]) => el('a', { href, target: '_blank', rel: 'noopener' }, label)));
   const auth = $('#auth');
-  if (session.mode !== 'public') {
+  // Admin mode has no logins; public and unified both do.
+  if (session.mode === 'admin') {
     auth.replaceChildren();
     return;
   }
