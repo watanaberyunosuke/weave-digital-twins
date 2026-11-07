@@ -52,6 +52,7 @@ docker exec gis-loader python scripts/seed_synthetic_network.py --dmas 40 --mete
 
 ./scripts/register-connectors.sh          # re-registers Datagen connectors (DELETEs then POSTs each)
 DATAGEN_ITERATIONS=10000 DATAGEN_MAX_INTERVAL=10 ./scripts/register-connectors.sh   # bounded batch instead of endless stream; start Flink first (latest-offset)
+./scripts/seed-if-needed.sh [--check]   # seeds meters (--once) and a bounded pressure batch only when a feed is empty or older than SEED_STALE_S; needs Flink running
 docker exec simulator python run_sim.py --build   # PostGIS -> /app/out/network.inp
 docker exec simulator python run_sim.py --once    # one solve + residuals; --loop is the container default
 docker exec simulator python run_sim.py --reset-baseline --dma D07   # after a recalibration; omit --dma for all
