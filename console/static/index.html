@@ -10,8 +10,8 @@
 <body>
   <header class="top">
     <div class="brand">
-      <span class="logo" aria-hidden="true"></span>
-      <strong>Weave</strong><span class="muted">console</span>
+      <svg class="logo" viewBox="0 0 24 24" fill="none" aria-hidden="true"><g stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5C10 7.6 6.5 10.6 6.5 14a5.5 5.5 0 0 0 11 0C17.5 10.6 14 7.6 12 4.5Z"/><path d="M1.5 14c2.33 1.4 4.67 1.4 7 0s4.67-1.4 7 0 4.67 1.4 7 0"/></g></svg>
+      <strong>Weave</strong><span class="brand-context">console</span>
     </div>
     <div class="region muted" id="region"></div>
     <div class="health" id="health"></div>
@@ -53,7 +53,13 @@
           <div class="map-ctl card">
             <label><input type="checkbox" data-layer="dmas" checked> DMAs <span class="tag syn">synthetic</span></label>
             <label><input type="checkbox" data-layer="pipes" checked> Pipes <span class="tag real">real</span></label>
-            <label title="Where the model build joined the network's pieces: rings mark real pipes split at a junction the data never split; purple lines are synthetic gaps (dotted), bridges (dashed) and reservoir trunk mains (solid). Click one for the reason."><input type="checkbox" data-layer="links" checked> <i class="sw link"></i> Network joins <span class="tag real">real</span> <span class="tag syn">synthetic</span></label>
+            <div class="layer-row">
+              <label title="Where the model build joined the network's pieces: blue dots mark real pipes split at a junction the data never split; purple lines are synthetic gaps and bridges (thin dotted) and reservoir trunk mains (solid). Click one for the reason."><input type="checkbox" data-layer="links" checked> Network joins</label>
+              <fieldset class="tag-group"><legend class="sr-only">Show kinds of network join</legend>
+                <button type="button" class="tag real" data-join="real" aria-pressed="true" title="Real pipes the build split at a junction (blue dots). Click to hide or show.">real</button>
+                <button type="button" class="tag syn" data-join="synthetic" aria-pressed="true" title="Synthetic gaps, bridges and trunk mains the build added (purple lines). Click to hide or show.">synthetic</button>
+              </fieldset>
+            </div>
             <label title="Water assets, plus river monitoring sites and the reservoirs and tanks that have a storage gauge but no matching asset."><input type="checkbox" data-layer="facilities" checked> Facilities and monitoring sites <span class="tag real">real</span></label>
             <label><input type="checkbox" data-layer="meters" checked> Meters and loggers <span class="tag syn">synthetic</span></label>
             <label class="small muted" for="basemap">Basemap</label>

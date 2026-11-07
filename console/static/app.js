@@ -458,9 +458,14 @@ const layers = {
   dmas: L.layerGroup().addTo(map),
   pipes: L.layerGroup().addTo(map),
   links: L.layerGroup().addTo(map),
+  // The two kinds of join sit inside `links`, so the row's checkbox hides both
+  // and the real/synthetic buttons hide one kind.
+  joinsReal: L.layerGroup(),
+  joinsSyn: L.layerGroup(),
   facilities: L.layerGroup().addTo(map),
   meters: L.layerGroup().addTo(map),
 };
+layers.links.addLayer(layers.joinsReal).addLayer(layers.joinsSyn);
 // Map colours resolve against #map, which carries its own tokens when the
 // basemap is dark so pipes and markers stay readable on it.
 const mcss = (name) => getComputedStyle($('#map')).getPropertyValue(name).trim();
@@ -488,6 +493,16 @@ document.querySelectorAll('[data-layer]').forEach((cb) => cb.addEventListener('c
   const layer = layers[cb.dataset.layer];
   if (cb.checked) layer.addTo(map); else map.removeLayer(layer);
   if (cb.checked) restackAbove(cb.dataset.layer);
+}));
+
+// Real/synthetic buttons on the Network joins row: each shows or hides one kind
+// of join. They have no effect while the whole row is off, and the pressed
+// state is kept so turning the row back on restores what was chosen.
+document.querySelectorAll('[data-join]').forEach((btn) => btn.addEventListener('click', () => {
+  const layer = layers[btn.dataset.join === 'real' ? 'joinsReal' : 'joinsSyn'];
+  const on = btn.getAttribute('aria-pressed') !== 'true';
+  btn.setAttribute('aria-pressed', String(on));
+  if (on) layers.links.addLayer(layer); else layers.links.removeLayer(layer);
 }));
 
 function popupHtml(title, rows) {
@@ -577,20 +592,35 @@ async function loadMap() {
 
   // Joins the model build made (model/gaps.py), drawn over the real pipes:
   // synthetic links in the synthetic colour, dashed by how much is invented,
-  // and a ring in the real colour where a real pipe was split.
-  layers.links.clearLayers();
+  // and a small solid dot in the real colour where a real pipe was split.
+  layers.joinsReal.clearLayers();
+  layers.joinsSyn.clearLayers();
   if (links) {
-    const dash = { gap: '2 3', bridge: '7 4' };
+    // Gaps and bridges are thin dotted connectors, lighter than any pipe, so
+    // they read as "the model joined these" rather than as a synthetic main.
+    // Only the reservoir trunk is a solid, pipe-weight line.
+    const dash = { gap: '1 4', bridge: '1 7' };
     L.geoJSON(links, {
-      style: (f) => ({
-        color: mcss('--syn'), weight: f.properties.kind === 'gap' ? 1.5 : 2.5,
+      // Real splits are points and synthetic links are lines, so each feature
+      // goes to the group its button controls.
+      // Leaflet applies this to the circle markers pointToLayer returns too,
+      // so a point gets its own style here or it would take the purple line one.
+      style: (f) => (f.geometry.type === 'Point' ? {
+        color: mcss('--marker-edge'), weight: 1, fillColor: mcss('--real'), fillOpacity: 1, opacity: 1, dashArray: null,
+      } : {
+        color: mcss('--syn'), weight: f.properties.kind === 'trunk' ? 2.5 : 1.8, lineCap: 'round',
         opacity: 0.95, dashArray: dash[f.properties.kind] || null,
       }),
       pointToLayer: (f, ll) => L.circleMarker(ll, {
-        radius: 4, color: mcss('--real'), weight: 2, fillOpacity: 0,
+        // Small, solid and in the real-data colour with a pale edge, so it
+        // cannot be mistaken for the hollow purple rings of meters and loggers.
+        radius: 3, color: mcss('--marker-edge'), weight: 1, fillColor: mcss('--real'), fillOpacity: 1,
       }),
-      onEachFeature: (f, lyr) => lyr.bindPopup(() => linkPopup(f.properties), { maxWidth: 380 }),
-    }).addTo(layers.links);
+      onEachFeature: (f, lyr) => {
+        lyr.bindPopup(() => linkPopup(f.properties), { maxWidth: 380 });
+        (f.properties.synthetic ? layers.joinsSyn : layers.joinsReal).addLayer(lyr);
+      },
+    });
   }
 
   layers.facilities.clearLayers();
