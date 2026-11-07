@@ -50,8 +50,9 @@ BRIDGE_LARGE_M = float(os.environ.get("SIM_BRIDGE_LARGE_M", "5000"))
 @dataclass(frozen=True)
 class Link:
     """One element the model changed or added, and why."""
-    kind: str               # split | gap | trunk | bridge
-    element_id: str         # pipe_id in the model (before the P/S prefix)
+
+    kind: str  # split | gap | trunk | bridge
+    element_id: str  # pipe_id in the model (before the P/S prefix)
     from_node: int | None
     to_node: int | None
     length_m: float
@@ -82,15 +83,29 @@ def split_at_tjunctions(pipes: list[Pipe], hits) -> tuple[list[Pipe], list[Link]
             continue
         stops = [(0.0, pipe.start_node)] + [(f, n) for f, n, _ in cuts] + [(1.0, pipe.end_node)]
         for k, ((f0, a), (f1, b)) in enumerate(zip(stops, stops[1:]), start=1):
-            piece = Pipe(f"{pipe.pipe_id}~{k}", a, b, max(pipe.length_m * (f1 - f0), 1.0),
-                         pipe.diameter_m, kind="split", source_id=pipe.pipe_id)
+            piece = Pipe(
+                f"{pipe.pipe_id}~{k}",
+                a,
+                b,
+                max(pipe.length_m * (f1 - f0), 1.0),
+                pipe.diameter_m,
+                kind="split",
+                source_id=pipe.pipe_id,
+            )
             out.append(piece)
         for f, n, gap in cuts:
-            links.append(Link(
-                "split", pipe.pipe_id, n, None, pipe.length_m,
-                f"real: dead end N{n} lies {gap:.1f} m from the side of pipe {pipe.pipe_id} "
-                f"({f:.0%} along it); the source draws a junction there but never split the "
-                f"pipe, so the topology build left them apart"))
+            links.append(
+                Link(
+                    "split",
+                    pipe.pipe_id,
+                    n,
+                    None,
+                    pipe.length_m,
+                    f"real: dead end N{n} lies {gap:.1f} m from the side of pipe {pipe.pipe_id} "
+                    f"({f:.0%} along it); the source draws a junction there but never split the "
+                    f"pipe, so the topology build left them apart",
+                )
+            )
     return out, links
 
 
@@ -140,9 +155,13 @@ def _project(coords: dict[int, tuple[float, float]]) -> dict[int, tuple[float, f
     return {n: (lon * kx, lat * 110_540.0) for n, (lon, lat) in coords.items()}
 
 
-def connect_pieces(pipes: list[Pipe], coords: dict[int, tuple[float, float]],
-                   source_nodes, small_m: float = BRIDGE_SMALL_M,
-                   large_m: float = BRIDGE_LARGE_M):
+def connect_pieces(
+    pipes: list[Pipe],
+    coords: dict[int, tuple[float, float]],
+    source_nodes,
+    small_m: float = BRIDGE_SMALL_M,
+    large_m: float = BRIDGE_LARGE_M,
+):
     """Join unfed pieces to the supplied network: short gaps, then bridges.
 
     Borůvka rounds: each round, every unfed set of pieces finds its shortest
@@ -182,7 +201,7 @@ def connect_pieces(pipes: list[Pipe], coords: dict[int, tuple[float, float]],
             if ra != rb:
                 parent[max(ra, rb)] = min(ra, rb)
 
-    piece_of = {n: find(n) for n in nodes}          # the published pieces
+    piece_of = {n: find(n) for n in nodes}  # the published pieces
     piece_pipes: dict[int, int] = defaultdict(int)
     for p in usable:
         if p.start_node in piece_of:
@@ -242,19 +261,31 @@ def connect_pieces(pipes: list[Pipe], coords: dict[int, tuple[float, float]],
     for c in candidates:
         if find(c.from_node) not in fed:
             continue
-        added.append(Pipe(c.element_id, c.from_node, c.to_node, max(c.length_m, 1.0),
-                          max(diameter[c.from_node], diameter[c.to_node], 0.1), kind=c.kind))
+        added.append(
+            Pipe(
+                c.element_id,
+                c.from_node,
+                c.to_node,
+                max(c.length_m, 1.0),
+                max(diameter[c.from_node], diameter[c.to_node], 0.1),
+                kind=c.kind,
+            )
+        )
         size = piece_pipes[piece_of[c.from_node]]
         if c.kind == "gap":
-            why = (f"synthetic: {c.length_m:.0f} m gap from N{c.from_node} to N{c.to_node}; the "
-                   f"piece of {size} pipes at N{c.from_node} had no real connection to supply, "
-                   f"and a break this short (SIM_BRIDGE_SMALL_M={small_m:g}) is most likely a "
-                   f"digitising gap")
+            why = (
+                f"synthetic: {c.length_m:.0f} m gap from N{c.from_node} to N{c.to_node}; the "
+                f"piece of {size} pipes at N{c.from_node} had no real connection to supply, "
+                f"and a break this short (SIM_BRIDGE_SMALL_M={small_m:g}) is most likely a "
+                f"digitising gap"
+            )
         else:
-            why = (f"synthetic: no real connection or short gap reaches the piece of {size} "
-                   f"pipes at N{c.from_node}; joined to the nearest other network node "
-                   f"N{c.to_node}, {c.length_m:.0f} m away (SIM_BRIDGE_LARGE_M={large_m:g}); "
-                   f"the main is invented so the piece can be modelled")
+            why = (
+                f"synthetic: no real connection or short gap reaches the piece of {size} "
+                f"pipes at N{c.from_node}; joined to the nearest other network node "
+                f"N{c.to_node}, {c.length_m:.0f} m away (SIM_BRIDGE_LARGE_M={large_m:g}); "
+                f"the main is invented so the piece can be modelled"
+            )
         links.append(Link(c.kind, c.element_id, c.from_node, c.to_node, c.length_m, why))
 
     left = {piece_of[n] for n in nodes if find(n) not in fed}
@@ -278,5 +309,4 @@ def _unfed_summary(usable, nodes, source_nodes):
                 parent[max(ra, rb)] = min(ra, rb)
     fed = {find(n) for n in source_nodes if n in parent}
     left = {find(n) for n in nodes} - fed
-    return len(left), sum(1 for p in usable
-                          if p.start_node in parent and find(p.start_node) in left)
+    return len(left), sum(1 for p in usable if p.start_node in parent and find(p.start_node) in left)

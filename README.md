@@ -176,6 +176,19 @@ Enable the hook that checks branch names before a push:
 git config core.hooksPath .githooks
 ```
 
+Code is formatted by Black and isort (Python, configured in `pyproject.toml`, line length 120)
+and SQLFluff (`postgres/init/*.sql`, configured in `.sqlfluff`; Flink SQL is excluded because
+SQLFluff has no Flink dialect). The tools are not part of any image; install the pinned,
+hash-locked versions once, and the same `.githooks` path formats staged files on every commit:
+
+```bash
+pip install --require-hashes -r dev/requirements.txt
+black . && isort . && sqlfluff fix postgres/init   # format everything by hand
+```
+
+The pre-commit hook skips with a message when a tool is missing, and leaves files with unstaged
+edits alone. CI's Format job runs `black --check`, `isort --check-only` and `sqlfluff lint`.
+
 Agent sessions are recorded with [Entire](https://entire.io), which links each Claude Code or
 Cursor session to the commits it produced. `.entire/settings.json` enables it, the agent hooks
 are in `.claude/settings.json` and `.cursor/hooks.json`, and its git hooks are in `.githooks/`

@@ -60,16 +60,42 @@ STALE_DAYS = int(os.environ.get("STORAGE_STALE_DAYS", "30"))
 NAME_MATCH_M = float(os.environ.get("STORAGE_NAME_MATCH_M", "15000"))
 # Words too common in storage names to identify one.
 GENERIC_WORDS = {
-    "RES", "RESERVOIR", "RESERV", "DAM", "RIV", "RIVER", "LAKE", "STORAGE", "BASIN",
-    "CREEK", "WEIR", "SERVICE", "EMBANKMENT", "MAIN", "SADDLE", "SECONDARY",
-    "SUBSIDIARY", "UPPER", "LOWER", "EAST", "WEST", "NORTH", "SOUTH", "NEW", "OLD",
-    "LEVEL", "TANK", "TANKS", "PRIMARY", "IRRIGATION",
+    "RES",
+    "RESERVOIR",
+    "RESERV",
+    "DAM",
+    "RIV",
+    "RIVER",
+    "LAKE",
+    "STORAGE",
+    "BASIN",
+    "CREEK",
+    "WEIR",
+    "SERVICE",
+    "EMBANKMENT",
+    "MAIN",
+    "SADDLE",
+    "SECONDARY",
+    "SUBSIDIARY",
+    "UPPER",
+    "LOWER",
+    "EAST",
+    "WEST",
+    "NORTH",
+    "SOUTH",
+    "NEW",
+    "OLD",
+    "LEVEL",
+    "TANK",
+    "TANKS",
+    "PRIMARY",
+    "IRRIGATION",
 }
 # Volume above this share of the matched asset's capacity rejects the match;
 # a little over 100% is normal when a storage spills.
 OVER_CAPACITY = 1.05
-BATCH = 20                    # series per values request
-ATTEMPTS = 4                  # the service fails transiently with DatasourceError
+BATCH = 20  # series per values request
+ATTEMPTS = 4  # the service fails transiently with DatasourceError
 
 log = logging.getLogger("storage")
 
@@ -81,7 +107,7 @@ class Series:
     name: str
     lat: float
     lon: float
-    last: str                 # ISO timestamp of the latest value, '' if none
+    last: str  # ISO timestamp of the latest value, '' if none
 
 
 # ------------------------------------------------------------------ parsing
@@ -117,8 +143,7 @@ def parse_series_list(payload, bbox, now: datetime) -> list[Series]:
         last = r.get("to") or ""
         if not last or parse_ts(last) < cutoff:
             continue
-        s = Series(str(r["ts_id"]), str(r["station_no"]), str(r["station_name"]).strip(),
-                   lat, lon, last)
+        s = Series(str(r["ts_id"]), str(r["station_no"]), str(r["station_name"]).strip(), lat, lon, last)
         # The most recent series wins if a station still has two.
         if s.station_no not in keep or s.last > keep[s.station_no].last:
             keep[s.station_no] = s
@@ -133,8 +158,9 @@ def parse_values(payload) -> dict[str, list[tuple[datetime, float]]]:
     for block in payload:
         columns = [c.strip() for c in str(block.get("columns", "")).split(",")]
         ti, vi = columns.index("Timestamp"), columns.index("Value")
-        out[str(block["ts_id"])] = [(parse_ts(row[ti]), float(row[vi]))
-                                    for row in block.get("data", []) if row[vi] is not None]
+        out[str(block["ts_id"])] = [
+            (parse_ts(row[ti]), float(row[vi])) for row in block.get("data", []) if row[vi] is not None
+        ]
     return out
 
 
@@ -153,8 +179,10 @@ def choose_match(gauge_name: str, candidates: list[tuple], max_volume: float | N
     MATCH_M. Either way an asset whose capacity is below the storage's volume
     is skipped: it is not the storage.
     """
+
     def fits(c):
         return not (c[2] and max_volume and max_volume > OVER_CAPACITY * float(c[2]))
+
     words = name_words(gauge_name)
     for c in candidates:
         if c[3] <= NAME_MATCH_M and words & name_words(c[1]) and fits(c):
@@ -193,10 +221,14 @@ def kiwis(params: dict):
 
 
 def list_series(bbox) -> list[Series]:
-    payload = kiwis({
-        "request": "getTimeseriesList", "parametertype_name": PARAMETER, "ts_name": TS_NAME,
-        "returnfields": "station_name,station_no,ts_id,station_latitude,station_longitude,coverage",
-    })
+    payload = kiwis(
+        {
+            "request": "getTimeseriesList",
+            "parametertype_name": PARAMETER,
+            "ts_name": TS_NAME,
+            "returnfields": "station_name,station_no,ts_id,station_latitude,station_longitude,coverage",
+        }
+    )
     return parse_series_list(payload, bbox, datetime.now(timezone.utc))
 
 
@@ -205,13 +237,21 @@ def fetch_values(series: list[Series], since: dict[str, datetime]) -> dict[str, 
     out: dict[str, list] = {}
     default = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
     for i in range(0, len(series), BATCH):
-        chunk = series[i:i + BATCH]
+        chunk = series[i : i + BATCH]
         start = min(since.get(s.station_no, default) for s in chunk)
-        out.update(parse_values(kiwis({
-            "request": "getTimeseriesValues", "ts_id": ",".join(s.ts_id for s in chunk),
-            # A plain date: the service is fussy about offsets and fractions.
-            "from": start.date().isoformat(), "returnfields": "Timestamp,Value",
-        })))
+        out.update(
+            parse_values(
+                kiwis(
+                    {
+                        "request": "getTimeseriesValues",
+                        "ts_id": ",".join(s.ts_id for s in chunk),
+                        # A plain date: the service is fussy about offsets and fractions.
+                        "from": start.date().isoformat(),
+                        "returnfields": "Timestamp,Value",
+                    }
+                )
+            )
+        )
     return out
 
 
@@ -257,8 +297,7 @@ def match_gauge(cur, s: Series, vols: list[float]):
     # Without this run's values (a gauge already up to date), the latest
     # stored volume decides whether an asset is big enough.
     if not vols:
-        cur.execute("SELECT max(volume_ml) FROM twin.storage_level WHERE station_no = %s",
-                    (s.station_no,))
+        cur.execute("SELECT max(volume_ml) FROM twin.storage_level WHERE station_no = %s", (s.station_no,))
         stored = cur.fetchone()[0]
         vols = [stored] if stored is not None else []
     return choose_match(s.name, candidates, max(vols) if vols else None)
@@ -270,34 +309,44 @@ def write_gauge(cur, s: Series, values: list, source: str) -> tuple[int, bool]:
     facility_id, capacity, match_m = (hit[0], hit[2], hit[3]) if hit else (None, None, None)
     # The gauge is the site of record; the asset link is a best guess, kept
     # with its distance so it can be judged.
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO ref.storage_site
             (station_no, storage_name, facility_id, match_m, source, geom, synthetic)
         VALUES (%s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), false)
         ON CONFLICT (station_no) DO UPDATE SET
             storage_name = EXCLUDED.storage_name, facility_id = EXCLUDED.facility_id,
             match_m = EXCLUDED.match_m, source = EXCLUDED.source, geom = EXCLUDED.geom
-    """, (s.station_no, s.name, facility_id, match_m, source, s.lon, s.lat))
-    rows = [(ts, s.name, vol, capacity,
-             100.0 * vol / float(capacity) if capacity else None, s.station_no)
-            for ts, vol in values]
+    """,
+        (s.station_no, s.name, facility_id, match_m, source, s.lon, s.lat),
+    )
+    rows = [
+        (ts, s.name, vol, capacity, 100.0 * vol / float(capacity) if capacity else None, s.station_no)
+        for ts, vol in values
+    ]
     # A re-read day overwrites itself: the daily mean can be revised.
-    cur.executemany("""
+    cur.executemany(
+        """
         INSERT INTO twin.storage_level
             (ts, storage_name, volume_ml, capacity_ml, percent_full, station_no, is_synthetic)
         VALUES (%s, %s, %s, %s, %s, %s, false)
         ON CONFLICT (ts, storage_name) DO UPDATE SET
             volume_ml = EXCLUDED.volume_ml, capacity_ml = EXCLUDED.capacity_ml,
             percent_full = EXCLUDED.percent_full, station_no = EXCLUDED.station_no
-    """, rows)
+    """,
+        rows,
+    )
     # Earlier days take the current match's capacity too, so a corrected or
     # newly published capacity reaches the whole history.
-    cur.execute("""
+    cur.execute(
+        """
         UPDATE twin.storage_level
         SET capacity_ml = %(c)s,
             percent_full = CASE WHEN %(c)s > 0 THEN 100.0 * volume_ml / %(c)s END
         WHERE station_no = %(s)s AND capacity_ml IS DISTINCT FROM %(c)s
-    """, {"c": capacity, "s": s.station_no})
+    """,
+        {"c": capacity, "s": s.station_no},
+    )
     return len(rows), hit is not None
 
 
@@ -315,8 +364,7 @@ def run_once(list_only: bool = False) -> int:
     source = os.environ.get("STORAGE_PROVIDER", "kiwis")
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute(SCHEMA_SQL)
-        cur.execute("SELECT station_no, max(ts) FROM twin.storage_level"
-                    " WHERE station_no IS NOT NULL GROUP BY 1")
+        cur.execute("SELECT station_no, max(ts) FROM twin.storage_level" " WHERE station_no IS NOT NULL GROUP BY 1")
         since = dict(cur.fetchall())
         values = fetch_values(series, since)
 
@@ -326,9 +374,14 @@ def run_once(list_only: bool = False) -> int:
             written += n
             unmatched += not matched
         conn.commit()
-    log.info("wrote %s daily values; %s storages matched no asset (by name within %g m,"
-             " or nearest within %g m, with capacity at least their volume)",
-             written, unmatched, NAME_MATCH_M, MATCH_M)
+    log.info(
+        "wrote %s daily values; %s storages matched no asset (by name within %g m,"
+        " or nearest within %g m, with capacity at least their volume)",
+        written,
+        unmatched,
+        NAME_MATCH_M,
+        MATCH_M,
+    )
     return written
 
 

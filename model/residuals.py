@@ -95,17 +95,25 @@ RESET_TABLE_SQL = """
     )
 """
 
+
 @dataclass(frozen=True)
 class Score:
     residual: float
-    z_score: float | None   # None while the baseline is too short
+    z_score: float | None  # None while the baseline is too short
     flagged: bool
-    status: str             # OK | WATCH | SUSPECTED_LEAK | UNKNOWN
+    status: str  # OK | WATCH | SUSPECTED_LEAK | UNKNOWN
 
 
-def classify(residual: float, n: int, mean: float | None, sd: float | None,
-             min_samples: int = MIN_SAMPLES, z_watch: float = Z_WATCH,
-             z_leak: float = Z_LEAK, sigma_floor: float = SIGMA_FLOOR_M) -> Score:
+def classify(
+    residual: float,
+    n: int,
+    mean: float | None,
+    sd: float | None,
+    min_samples: int = MIN_SAMPLES,
+    z_watch: float = Z_WATCH,
+    z_leak: float = Z_LEAK,
+    sigma_floor: float = SIGMA_FLOOR_M,
+) -> Score:
     """Score one DMA's residual against its baseline (n, mean, sd)."""
     if n < min_samples or mean is None:
         return Score(residual, None, False, "UNKNOWN")

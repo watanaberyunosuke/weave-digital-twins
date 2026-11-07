@@ -34,15 +34,13 @@ class SessionTests(unittest.TestCase):
     def test_sign_and_expiry(self):
         sid, token = access.new_session(self.secret, now=1000)
         self.assertEqual(access.unsign(token, self.secret, now=1001)["sid"], sid)
-        self.assertIsNone(access.unsign(token, self.secret,
-                                        now=1000 + access.SESSION_TTL_S[access.DEMO] + 1))
+        self.assertIsNone(access.unsign(token, self.secret, now=1000 + access.SESSION_TTL_S[access.DEMO] + 1))
 
     def test_role_is_signed_in(self):
         _, token = access.new_session(self.secret, role=access.ADMIN, now=1000)
         payload = access.unsign(token, self.secret, now=1001)
         self.assertEqual(payload["role"], access.ADMIN)
-        self.assertIsNone(access.unsign(token, self.secret,
-                                        now=1000 + access.SESSION_TTL_S[access.ADMIN] + 1))
+        self.assertIsNone(access.unsign(token, self.secret, now=1000 + access.SESSION_TTL_S[access.ADMIN] + 1))
 
     def test_forged_or_other_secret(self):
         _, token = access.new_session(self.secret)
@@ -63,7 +61,7 @@ class AdminCredentialTests(unittest.TestCase):
         self.assertTrue(access.verify_password("correct horse battery", stored))
         self.assertFalse(access.verify_password("correct horse batterY", stored))
         self.assertFalse(access.verify_password("x", "not-a-hash"))
-        self.assertNotIn("$", stored)   # compose would interpolate it
+        self.assertNotIn("$", stored)  # compose would interpolate it
 
     def test_totp_rfc6238_vector(self):
         # RFC 6238 appendix B, SHA-1: key "12345678901234567890" at T=59 -> 94287082.
@@ -80,7 +78,7 @@ class AdminCredentialTests(unittest.TestCase):
         self.assertTrue(t.blocked("a", now=2))
         self.assertFalse(t.blocked("b", now=2))
         t.fail("b", now=2)
-        self.assertTrue(t.blocked("c", now=3))    # the global ceiling
+        self.assertTrue(t.blocked("c", now=3))  # the global ceiling
         self.assertFalse(t.blocked("a", now=200))
 
 
@@ -101,26 +99,45 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(any("7 DMAs" in line for line in lines))
 
     def test_every_action_has_a_sample(self):
-        for action in ("create_topics", "load_gis", "seed", "register_connectors", "build_model",
-                       "start_flink", "reset_baseline", "load_elevation", "discover", "run_sim_once"):
+        for action in (
+            "create_topics",
+            "load_gis",
+            "seed",
+            "register_connectors",
+            "build_model",
+            "start_flink",
+            "reset_baseline",
+            "load_elevation",
+            "discover",
+            "run_sim_once",
+        ):
             self.assertNotIn("(no sample", " ".join(demo.simulated_lines(action, {}, ["c"])), action)
 
 
 def load_app(**env):
     base = {"CONSOLE_ALLOWED_HOSTS": "testserver", "CONSOLE_COOKIE_SECURE": "0"}
     with mock.patch.dict(os.environ, {**base, **env}, clear=False):
-        for k in ("CONSOLE_MODE", "CONSOLE_DEMO", "CONSOLE_DEMO_PASSWORD", "CONSOLE_SESSION_SECRET",
-                  "CONSOLE_RELAY_URL", "CONSOLE_RELAY_TOKEN", "CONSOLE_RELAY_ADMIN_TOKEN",
-                  "CONSOLE_ADMIN_PASSWORD_HASH", "CONSOLE_ADMIN_TOTP_SECRET"):
+        for k in (
+            "CONSOLE_MODE",
+            "CONSOLE_DEMO",
+            "CONSOLE_DEMO_PASSWORD",
+            "CONSOLE_SESSION_SECRET",
+            "CONSOLE_RELAY_URL",
+            "CONSOLE_RELAY_TOKEN",
+            "CONSOLE_RELAY_ADMIN_TOKEN",
+            "CONSOLE_ADMIN_PASSWORD_HASH",
+            "CONSOLE_ADMIN_TOTP_SECRET",
+        ):
             if k not in env:
                 os.environ.pop(k, None)
         import app  # noqa: PLC0415
+
         return importlib.reload(app)
 
 
 try:
     from fastapi.testclient import TestClient
-except ImportError:   # the stdlib tests above still run without the console deps
+except ImportError:  # the stdlib tests above still run without the console deps
     TestClient = None
 
 HEADERS = {"X-Weave-Console": "1"}
@@ -143,8 +160,7 @@ class PublicModeTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(self.app.app)
         # Nothing in public mode may start a process.
-        patcher = mock.patch("asyncio.create_subprocess_exec",
-                             side_effect=AssertionError("public mode ran a process"))
+        patcher = mock.patch("asyncio.create_subprocess_exec", side_effect=AssertionError("public mode ran a process"))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -165,8 +181,11 @@ class PublicModeTests(unittest.TestCase):
         cfg = self.client.get("/api/config").json()
         for key in ("gis", "kibana_url", "flink_url", "control_center_url"):
             self.assertNotIn(key, cfg)
-        for path in ("/api/gis/collections", "/api/gis/qgis/postgis-connection.xml",
-                     "/api/gis/qgis/ogcapi-connection.xml"):
+        for path in (
+            "/api/gis/collections",
+            "/api/gis/qgis/postgis-connection.xml",
+            "/api/gis/qgis/ogcapi-connection.xml",
+        ):
             self.assertEqual(self.client.get(path).status_code, 404, path)
 
     def test_wrong_password(self):
@@ -177,7 +196,7 @@ class PublicModeTests(unittest.TestCase):
         self.login()
         self.assertEqual(self.client.get("/api/session").json()["role"], "demo")
         acts = {a["id"]: a["run"] for a in self.client.get("/api/actions").json()}
-        self.assertEqual(set(acts.values()), {"simulated"})   # no relay configured
+        self.assertEqual(set(acts.values()), {"simulated"})  # no relay configured
         r = self.client.post("/api/actions/seed", json={"params": {"dmas": 4}}, headers=HEADERS)
         self.assertEqual(r.status_code, 200)
         job = self.client.get(f"/api/jobs/{r.json()['id']}").json()
@@ -202,8 +221,7 @@ class PublicModeTests(unittest.TestCase):
 
     def test_admin_login_is_off_without_its_settings(self):
         self.assertFalse(self.client.get("/api/session").json()["admin_enabled"])
-        r = self.client.post("/api/login", json={"user": "admin", "password": ADMIN_PASSWORD},
-                             headers=HEADERS)
+        r = self.client.post("/api/login", json={"user": "admin", "password": ADMIN_PASSWORD}, headers=HEADERS)
         self.assertEqual(r.status_code, 404)
 
     def test_demo_can_be_switched_off(self):
@@ -222,8 +240,7 @@ class PublicModeTests(unittest.TestCase):
 @unittest.skipIf(TestClient is None, "console requirements not installed")
 class PublicWithRelayTests(unittest.TestCase):
     def test_only_safe_actions_run_live(self):
-        app = load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090",
-                       CONSOLE_RELAY_TOKEN=TOKEN)
+        app = load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090", CONSOLE_RELAY_TOKEN=TOKEN)
         client = TestClient(app.app)
         client.post("/api/login", json={"password": PASSWORD}, headers=HEADERS)
         acts = {a["id"]: a["run"] for a in client.get("/api/actions").json()}
@@ -245,15 +262,19 @@ class FakeResponse:
 @unittest.skipIf(TestClient is None, "console requirements not installed")
 class PublicAdminLoginTests(unittest.TestCase):
     def make(self, **extra):
-        app = load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090",
-                       CONSOLE_RELAY_TOKEN=TOKEN, CONSOLE_RELAY_ADMIN_TOKEN=ADMIN_TOKEN,
-                       CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH, **extra)
+        app = load_app(
+            CONSOLE_MODE="public",
+            CONSOLE_RELAY_URL="http://admin:8090",
+            CONSOLE_RELAY_TOKEN=TOKEN,
+            CONSOLE_RELAY_ADMIN_TOKEN=ADMIN_TOKEN,
+            CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH,
+            **extra,
+        )
         app.ADMIN_THROTTLE = access.Throttle()
         return app, TestClient(app.app)
 
     def login(self, client, password=ADMIN_PASSWORD, code=""):
-        return client.post("/api/login", json={"user": "admin", "password": password, "code": code},
-                           headers=HEADERS)
+        return client.post("/api/login", json={"user": "admin", "password": password, "code": code}, headers=HEADERS)
 
     def test_admin_login_runs_everything_through_the_admin_relay(self):
         app, client = self.make()
@@ -262,9 +283,10 @@ class PublicAdminLoginTests(unittest.TestCase):
         self.assertEqual(client.get("/api/session").json()["role"], "admin")
         self.assertEqual({a["run"] for a in client.get("/api/actions").json()}, {"real"})
         relay = mock.AsyncMock(return_value=FakeResponse(body={"id": "j1"}))
-        with mock.patch.object(app, "relay_request", relay), \
-             mock.patch("asyncio.create_subprocess_exec",
-                        side_effect=AssertionError("public mode ran a process")):
+        with (
+            mock.patch.object(app, "relay_request", relay),
+            mock.patch("asyncio.create_subprocess_exec", side_effect=AssertionError("public mode ran a process")),
+        ):
             r = client.post("/api/actions/seed", json={"params": {"dmas": 4}}, headers=HEADERS)
         self.assertEqual(r.json(), {"id": "j1"})
         method, path = relay.await_args.args
@@ -291,11 +313,10 @@ class PublicAdminLoginTests(unittest.TestCase):
             self.assertTrue(anon["containers"]["hidden"])
             self.assertNotIn("kibana_url", client.get("/api/config").json())
             self.login(client)
-            self.assertEqual(client.get("/api/status").json()["containers"]["value"],
-                             [{"name": "broker"}])
+            self.assertEqual(client.get("/api/status").json()["containers"]["value"], [{"name": "broker"}])
             cfg = client.get("/api/config").json()
             self.assertIn("kibana_url", cfg)
-            self.assertNotIn("gis", cfg)   # connection details stay on the loopback console
+            self.assertNotIn("gis", cfg)  # connection details stay on the loopback console
         # Both answers came from one relayed body, so a viewer never shares
         # the admin's copy.
         self.assertEqual(relay.await_count, 1)
@@ -324,23 +345,27 @@ class PublicAdminLoginTests(unittest.TestCase):
 
     def test_tokens_must_differ(self):
         with self.assertRaises(SystemExit):
-            load_app(CONSOLE_MODE="public", CONSOLE_RELAY_URL="http://admin:8090",
-                     CONSOLE_RELAY_TOKEN=TOKEN, CONSOLE_RELAY_ADMIN_TOKEN=TOKEN)
+            load_app(
+                CONSOLE_MODE="public",
+                CONSOLE_RELAY_URL="http://admin:8090",
+                CONSOLE_RELAY_TOKEN=TOKEN,
+                CONSOLE_RELAY_ADMIN_TOKEN=TOKEN,
+            )
 
 
 @unittest.skipIf(TestClient is None, "console requirements not installed")
 class AdminRelayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = load_app(CONSOLE_MODE="admin", CONSOLE_RELAY_TOKEN=TOKEN,
-                           CONSOLE_RELAY_ADMIN_TOKEN=ADMIN_TOKEN)
+        cls.app = load_app(CONSOLE_MODE="admin", CONSOLE_RELAY_TOKEN=TOKEN, CONSOLE_RELAY_ADMIN_TOKEN=ADMIN_TOKEN)
 
     def setUp(self):
         self.client = TestClient(self.app.app)
 
     def relay(self, action, token=TOKEN):
-        return self.client.post(f"/api/relay/actions/{action}", json={"params": {}},
-                                headers={**HEADERS, "Authorization": f"Bearer {token}"})
+        return self.client.post(
+            f"/api/relay/actions/{action}", json={"params": {}}, headers={**HEADERS, "Authorization": f"Bearer {token}"}
+        )
 
     def test_admin_mode_is_unchanged(self):
         self.assertEqual(self.client.get("/api/session").json()["role"], "admin")
@@ -351,17 +376,23 @@ class AdminRelayTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/relay/status").status_code, 404)
 
     def test_demo_token_cannot_use_admin_routes(self):
-        r = self.client.post("/api/relay/admin/actions/seed", json={"params": {}},
-                             headers={**HEADERS, "Authorization": f"Bearer {TOKEN}"})
+        r = self.client.post(
+            "/api/relay/admin/actions/seed",
+            json={"params": {}},
+            headers={**HEADERS, "Authorization": f"Bearer {TOKEN}"},
+        )
         self.assertEqual(r.status_code, 404)
-        self.assertEqual(self.client.get("/api/relay/admin/jobs",
-                                         headers={"Authorization": f"Bearer {TOKEN}"}).status_code, 404)
+        self.assertEqual(
+            self.client.get("/api/relay/admin/jobs", headers={"Authorization": f"Bearer {TOKEN}"}).status_code, 404
+        )
 
     def test_admin_token_runs_any_action(self):
-        with mock.patch.object(self.app, "start_job",
-                               mock.AsyncMock(return_value={"id": "abc"})) as start:
-            r = self.client.post("/api/relay/admin/actions/seed", json={"params": {}},
-                                 headers={**HEADERS, "Authorization": f"Bearer {ADMIN_TOKEN}"})
+        with mock.patch.object(self.app, "start_job", mock.AsyncMock(return_value={"id": "abc"})) as start:
+            r = self.client.post(
+                "/api/relay/admin/actions/seed",
+                json={"params": {}},
+                headers={**HEADERS, "Authorization": f"Bearer {ADMIN_TOKEN}"},
+            )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(start.await_args.kwargs["origin"], "admin")
 
@@ -370,16 +401,14 @@ class AdminRelayTests(unittest.TestCase):
         self.assertEqual(self.relay("start_flink").status_code, 403)
 
     def test_live_runs_are_limited_across_all_demo_users(self):
-        with mock.patch.object(self.app, "start_job",
-                               mock.AsyncMock(return_value={"id": "abc"})):
+        with mock.patch.object(self.app, "start_job", mock.AsyncMock(return_value={"id": "abc"})):
             self.app.RELAY_COOLDOWN._last.clear()
             self.assertEqual(self.relay("discover").status_code, 200)
             self.assertEqual(self.relay("run_sim_once").status_code, 429)
 
     def test_safe_action_starts_a_demo_job(self):
         self.app.RELAY_COOLDOWN._last.clear()
-        with mock.patch.object(self.app, "start_job",
-                               mock.AsyncMock(return_value={"id": "abc"})) as start:
+        with mock.patch.object(self.app, "start_job", mock.AsyncMock(return_value={"id": "abc"})) as start:
             r = self.relay("run_sim_once")
         self.assertEqual(r.status_code, 200)
         start.assert_awaited_once()
@@ -399,16 +428,14 @@ class UnifiedModeTests(unittest.TestCase):
         self.app.DEMO_COOLDOWN._last.clear()
 
     def login(self, user="demo", password=PASSWORD):
-        return self.client.post("/api/login", json={"user": user, "password": password},
-                                headers=HEADERS)
+        return self.client.post("/api/login", json={"user": user, "password": password}, headers=HEADERS)
 
     def post(self, action):
         return self.client.post(f"/api/actions/{action}", json={"params": {}}, headers=HEADERS)
 
     def test_admin_login_needs_no_relay(self):
         session = self.client.get("/api/session").json()
-        self.assertEqual((session["mode"], session["role"], session["admin_enabled"]),
-                         ("unified", "public", True))
+        self.assertEqual((session["mode"], session["role"], session["admin_enabled"]), ("unified", "public", True))
 
     def test_anonymous_cannot_act_or_see_operator_details(self):
         with mock.patch.object(self.app, "start_job", side_effect=AssertionError("started")):
@@ -421,8 +448,11 @@ class UnifiedModeTests(unittest.TestCase):
         self.assertTrue(containers["hidden"])
 
     def test_relay_routes_are_off(self):
-        r = self.client.post("/api/relay/admin/actions/seed", json={"params": {}},
-                             headers={**HEADERS, "Authorization": f"Bearer {ADMIN_TOKEN}"})
+        r = self.client.post(
+            "/api/relay/admin/actions/seed",
+            json={"params": {}},
+            headers={**HEADERS, "Authorization": f"Bearer {ADMIN_TOKEN}"},
+        )
         self.assertEqual(r.status_code, 404)
 
     def test_demo_simulates_unsafe_actions_without_starting_a_job(self):
@@ -437,8 +467,7 @@ class UnifiedModeTests(unittest.TestCase):
 
     def test_demo_safe_action_runs_locally_once_per_interval(self):
         self.login()
-        with mock.patch.object(self.app, "start_job",
-                               mock.AsyncMock(return_value={"id": "abc"})) as start:
+        with mock.patch.object(self.app, "start_job", mock.AsyncMock(return_value={"id": "abc"})) as start:
             self.assertEqual(self.post("discover").status_code, 200)
             self.assertEqual(self.post("run_sim_once").status_code, 429)
         self.assertEqual(start.await_args.kwargs["origin"], "demo")
@@ -446,11 +475,15 @@ class UnifiedModeTests(unittest.TestCase):
 
     def test_demo_job_progress_comes_from_the_local_job(self):
         self.login()
-        self.app.JOBS["abc"] = {"id": "abc", "state": "succeeded", "exit_code": 0,
-                                "finished": "t", "lines": ["one", "two"]}
+        self.app.JOBS["abc"] = {
+            "id": "abc",
+            "state": "succeeded",
+            "exit_code": 0,
+            "finished": "t",
+            "lines": ["one", "two"],
+        }
         self.addCleanup(self.app.JOBS.pop, "abc", None)
-        with mock.patch.object(self.app, "start_job",
-                               mock.AsyncMock(return_value={"id": "abc"})):
+        with mock.patch.object(self.app, "start_job", mock.AsyncMock(return_value={"id": "abc"})):
             jid = self.post("discover").json()["id"]
         body = self.client.get(f"/api/jobs/{jid}").json()
         self.assertEqual((body["state"], body["lines"]), ("succeeded", ["one", "two"]))
@@ -461,10 +494,10 @@ class UnifiedModeTests(unittest.TestCase):
     def test_admin_runs_any_action_directly(self):
         self.assertEqual(self.login("admin", "wrong").status_code, 401)
         self.assertEqual(self.login("admin", ADMIN_PASSWORD).status_code, 200)
-        with mock.patch.object(self.app, "start_job",
-                               mock.AsyncMock(return_value={"id": "j1"})) as start, \
-                mock.patch.object(self.app, "relay_request",
-                                  side_effect=AssertionError("relayed")):
+        with (
+            mock.patch.object(self.app, "start_job", mock.AsyncMock(return_value={"id": "j1"})) as start,
+            mock.patch.object(self.app, "relay_request", side_effect=AssertionError("relayed")),
+        ):
             r = self.post("seed")
         self.assertEqual((r.status_code, r.json()), (200, {"id": "j1"}))
         self.assertEqual(start.await_args.kwargs["origin"], "admin")
@@ -473,9 +506,19 @@ class UnifiedModeTests(unittest.TestCase):
 
     def test_admin_sees_the_local_job_table(self):
         self.login("admin", ADMIN_PASSWORD)
-        self.app.JOBS["zz"] = {"id": "zz", "action": "seed", "label": "Seed", "params": {},
-                               "command": [], "state": "running", "origin": "demo",
-                               "started": "t", "finished": None, "exit_code": None, "lines": ["x"]}
+        self.app.JOBS["zz"] = {
+            "id": "zz",
+            "action": "seed",
+            "label": "Seed",
+            "params": {},
+            "command": [],
+            "state": "running",
+            "origin": "demo",
+            "started": "t",
+            "finished": None,
+            "exit_code": None,
+            "lines": ["x"],
+        }
         self.app.JOB_ORDER.append("zz")
         self.addCleanup(self.app.JOBS.pop, "zz", None)
         self.addCleanup(self.app.JOB_ORDER.remove, "zz")
@@ -485,8 +528,7 @@ class UnifiedModeTests(unittest.TestCase):
     def test_without_an_admin_hash_nobody_is_admin(self):
         app = load_app(CONSOLE_MODE="unified")
         client = TestClient(app.app)
-        r = client.post("/api/login", json={"user": "admin", "password": ADMIN_PASSWORD},
-                        headers=HEADERS)
+        r = client.post("/api/login", json={"user": "admin", "password": ADMIN_PASSWORD}, headers=HEADERS)
         self.assertEqual(r.status_code, 404)
         type(self).app = load_app(CONSOLE_MODE="unified", CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH)
 
@@ -510,14 +552,24 @@ class DeviceTests(unittest.TestCase):
             self.assertEqual(self.client.get("/api/device/pump/x").status_code, 404)
 
     def test_meter_reading_shape(self):
-        rows = [[{"id": "M1", "meter_id": "M1", "dma_id": "D1", "meter_type": "residential",
-                  "geom": "x"}],
-                [{"ts": "2026-10-31T12:00:00Z", "litres": 4.0, "flow_lpm": 2.0, "battery_pct": 90}],
-                [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}],
-                [{"stream": "meter_reading", "gap_start": "2026-10-31T09:00:00Z",
-                  "gap_end": "2026-10-31T11:00:00Z", "row_count": 8, "method": "m"}]]
-        with mock.patch.object(self.app, "scalar", return_value=True), \
-                mock.patch.object(self.app, "query", side_effect=rows) as q:
+        rows = [
+            [{"id": "M1", "meter_id": "M1", "dma_id": "D1", "meter_type": "residential", "geom": "x"}],
+            [{"ts": "2026-10-31T12:00:00Z", "litres": 4.0, "flow_lpm": 2.0, "battery_pct": 90}],
+            [{"ts": "2026-10-31T12:00:00Z", "litres": 9.0, "flow_lpm": 2.0, "readings": 3}],
+            [
+                {
+                    "stream": "meter_reading",
+                    "gap_start": "2026-10-31T09:00:00Z",
+                    "gap_end": "2026-10-31T11:00:00Z",
+                    "row_count": 8,
+                    "method": "m",
+                }
+            ],
+        ]
+        with (
+            mock.patch.object(self.app, "scalar", return_value=True),
+            mock.patch.object(self.app, "query", side_effect=rows) as q,
+        ):
             body = self.client.get("/api/device/meter/M1").json()
         self.assertEqual(body["latest"]["litres"], 4.0)
         # A chart can only mark filled stretches of the stream it draws.
@@ -532,8 +584,10 @@ class DeviceTests(unittest.TestCase):
 
     def test_volume_without_the_backfill_table_has_no_fills(self):
         rows = [[{"id": "M1", "meter_id": "M1"}], [], []]
-        with mock.patch.object(self.app, "scalar", return_value=False), \
-                mock.patch.object(self.app, "query", side_effect=rows):
+        with (
+            mock.patch.object(self.app, "scalar", return_value=False),
+            mock.patch.object(self.app, "query", side_effect=rows),
+        ):
             self.assertEqual(self.client.get("/api/device/meter/M1").json()["backfills"], [])
 
     def test_missing_device_is_404(self):
@@ -561,8 +615,12 @@ class ModelLinkLayerTests(unittest.TestCase):
         self.assertEqual(r.json(), {"type": "FeatureCollection", "features": []})
 
     def test_reads_the_table_once_built(self):
-        fc = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": None,
-              "properties": {"kind": "bridge", "reason": "synthetic: invented"}}]}
+        fc = {
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "geometry": None, "properties": {"kind": "bridge", "reason": "synthetic: invented"}}
+            ],
+        }
         with mock.patch.object(self.app, "scalar", side_effect=[True, fc]):
             r = self.client.get("/api/geo/model-links")
         self.assertEqual(r.json()["features"][0]["properties"]["kind"], "bridge")

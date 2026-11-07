@@ -1,0 +1,6 @@
+# Formatters and linters, used by the pre-commit hook and CI's Format job. They
+# are not part of any image. Black and isort share one line length, set in the
+# root pyproject.toml; SQLFluff reads .sqlfluff.
+black==26.10.1
+isort==9.0.2
+sqlfluff==4.5.0

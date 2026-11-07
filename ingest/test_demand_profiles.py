@@ -6,9 +6,19 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 
-from demand_profiles import (COMMERCIAL, COMMERCIAL_L_PER_M2_DAY, DAY_RANGE, INTERVAL_RANGE,
-                             LITRES_PER_PERSON_DAY, PEOPLE_PER_HOUSEHOLD, RESIDENTIAL_WEEKDAY,
-                             RESIDENTIAL_WEEKEND, day_factor, interval_litres, meter_profile)
+from demand_profiles import (
+    COMMERCIAL,
+    COMMERCIAL_L_PER_M2_DAY,
+    DAY_RANGE,
+    INTERVAL_RANGE,
+    LITRES_PER_PERSON_DAY,
+    PEOPLE_PER_HOUSEHOLD,
+    RESIDENTIAL_WEEKDAY,
+    RESIDENTIAL_WEEKEND,
+    day_factor,
+    interval_litres,
+    meter_profile,
+)
 
 # A Tuesday, so weekday shapes apply.
 TUESDAY = datetime(2026, 11, 3, tzinfo=timezone.utc)
@@ -16,8 +26,9 @@ TUESDAY = datetime(2026, 11, 3, tzinfo=timezone.utc)
 
 def day_of_intervals(profile, day, minutes=15, rng=None):
     rng = rng or random.Random(1)
-    return [interval_litres(profile, day + timedelta(minutes=minutes * i), minutes, rng)
-            for i in range(1440 // minutes)]
+    return [
+        interval_litres(profile, day + timedelta(minutes=minutes * i), minutes, rng) for i in range(1440 // minutes)
+    ]
 
 
 class ShapeTest(unittest.TestCase):
@@ -40,8 +51,7 @@ class VolumeTest(unittest.TestCase):
     def test_commercial_volume_is_area_times_rate(self):
         p = meter_profile("C1", "commercial")
         use, area = p.detail.split(", ")
-        self.assertAlmostEqual(p.daily_litres,
-                               float(area.split()[0]) * COMMERCIAL_L_PER_M2_DAY[use], delta=1.0)
+        self.assertAlmostEqual(p.daily_litres, float(area.split()[0]) * COMMERCIAL_L_PER_M2_DAY[use], delta=1.0)
 
     def test_a_day_of_readings_sums_to_about_the_daily_volume(self):
         # Interval noise and quiet zeros are drawn to keep the mean, so over
@@ -63,10 +73,8 @@ class IntervalTest(unittest.TestCase):
     def test_households_go_quiet_overnight_but_bulk_meters_do_not(self):
         night = [TUESDAY + timedelta(hours=2, minutes=15 * i) for i in range(8)]
         rng = random.Random(2)
-        house = [interval_litres(meter_profile(f"H{i}", "residential"), t, 15, rng)
-                 for i in range(50) for t in night]
-        bulk = [interval_litres(meter_profile(f"B{i}", "bulk"), t, 15, rng)
-                for i in range(50) for t in night]
+        house = [interval_litres(meter_profile(f"H{i}", "residential"), t, 15, rng) for i in range(50) for t in night]
+        bulk = [interval_litres(meter_profile(f"B{i}", "bulk"), t, 15, rng) for i in range(50) for t in night]
         self.assertGreater(sum(1 for v in house if v == 0) / len(house), 0.5)
         self.assertEqual(sum(1 for v in bulk if v == 0), 0)
 
@@ -76,6 +84,7 @@ class IntervalTest(unittest.TestCase):
         t = TUESDAY + timedelta(hours=7)
         expected = p.daily_litres * day_factor(p.meter_id, t) * 15 / 1440.0
         from demand_profiles import hourly_multiplier
+
         expected *= hourly_multiplier("residential", t)
         rng = random.Random(3)
         draws = [interval_litres(p, t, 15, rng) for _ in range(500)]
@@ -112,8 +121,9 @@ class ReadingTest(unittest.TestCase):
     def test_reading_matches_the_flink_meter_source(self):
         end = TUESDAY + timedelta(hours=8)
         [row] = readings([("DMA-001-M0001", "DMA-001", "residential")], end, 15)
-        self.assertEqual(set(row), {"meter_id", "dma_id", "litres", "flow_lpm",
-                                    "battery_pct", "event_ts", "is_synthetic"})
+        self.assertEqual(
+            set(row), {"meter_id", "dma_id", "litres", "flow_lpm", "battery_pct", "event_ts", "is_synthetic"}
+        )
         self.assertEqual(row["dma_id"], "DMA-001")
         self.assertAlmostEqual(row["flow_lpm"], row["litres"] / 15, places=2)
         self.assertEqual(row["event_ts"], int(end.timestamp() * 1000))

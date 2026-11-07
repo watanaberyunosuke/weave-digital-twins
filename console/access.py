@@ -49,7 +49,7 @@ SESSION_TTL_S = {DEMO: 8 * 3600, ADMIN: 3600}
 
 # scrypt at these costs takes tens of milliseconds and 16 MiB, which keeps a
 # guessing run slow without letting a burst of logins exhaust memory.
-_SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
+_SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 
 
 def _b64(data: bytes) -> str:
@@ -76,8 +76,7 @@ def verify_password(password: str, stored: str) -> bool:
         scheme, n, r, p, salt, digest = stored.split(":")
         if scheme != "scrypt":
             return False
-        got = hashlib.scrypt(password.encode(), salt=_unb64(salt), dklen=32,
-                             n=int(n), r=int(r), p=int(p))
+        got = hashlib.scrypt(password.encode(), salt=_unb64(salt), dklen=32, n=int(n), r=int(r), p=int(p))
     except (ValueError, TypeError):
         return False
     return hmac.compare_digest(got, _unb64(digest))
@@ -91,7 +90,7 @@ def totp(secret_b32: str, at: float | None = None, step: int = 30) -> str:
     # depend on SHA-1's collision resistance, so it is not the weak use.
     mac = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()  # NOSONAR
     offset = mac[-1] & 0x0F
-    value = struct.unpack(">I", mac[offset:offset + 4])[0] & 0x7FFFFFFF
+    value = struct.unpack(">I", mac[offset : offset + 4])[0] & 0x7FFFFFFF
     return f"{value % 1_000_000:06d}"
 
 

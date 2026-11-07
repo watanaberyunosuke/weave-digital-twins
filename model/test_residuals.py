@@ -1,6 +1,6 @@
 """Scoring a DMA's residual against its own baseline (HDH-120).
 
-    python3 -m unittest discover -s model -p 'test_*.py'
+python3 -m unittest discover -s model -p 'test_*.py'
 """
 
 import statistics

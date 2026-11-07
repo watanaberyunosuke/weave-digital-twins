@@ -34,13 +34,21 @@ def as_list(value) -> list:
 def arcgis_search(owner: str, term: str, limit: int = 100) -> list[dict]:
     query = f'owner:{owner} AND (type:"Feature Service")'
     if term:
-        query += f' AND ({term})'
+        query += f" AND ({term})"
     out, start = [], 1
     while start > 0 and len(out) < limit:
-        r = requests.get(ARCGIS_SEARCH, timeout=30, params={
-            "q": query, "f": "json", "num": 100, "start": start,
-            "sortField": "title", "sortOrder": "asc",
-        })
+        r = requests.get(
+            ARCGIS_SEARCH,
+            timeout=30,
+            params={
+                "q": query,
+                "f": "json",
+                "num": 100,
+                "start": start,
+                "sortField": "title",
+                "sortOrder": "asc",
+            },
+        )
         r.raise_for_status()
         payload = r.json()
         out.extend(payload.get("results", []))
@@ -48,8 +56,7 @@ def arcgis_search(owner: str, term: str, limit: int = 100) -> list[dict]:
     return out[:limit]
 
 
-def ckan_search(api_url: str, organizations: list[str], term: str,
-                rows: int = 100) -> list[dict]:
+def ckan_search(api_url: str, organizations: list[str], term: str, rows: int = 100) -> list[dict]:
     q = f"organization:({' OR '.join(organizations)})" if organizations else ""
     if term:
         q = f"{q} AND {term}" if q else term
@@ -78,8 +85,7 @@ def main() -> int:
     owners = [args.arcgis_owner] if args.arcgis_owner else as_list(arcgis.get("owner"))
     hub_urls = as_list(arcgis.get("hub_url"))
     ckan_api = args.ckan_api_url or ckan.get("api_url")
-    ckan_orgs = ([args.ckan_organization] if args.ckan_organization
-                 else as_list(ckan.get("organization")))
+    ckan_orgs = [args.ckan_organization] if args.ckan_organization else as_list(ckan.get("organization"))
 
     if args.source in ("arcgis", "both"):
         print("=" * 70)

@@ -1,0 +1,16 @@
+# Formatter settings only; nothing here builds or installs a package. Each
+# component's dependencies stay in its own requirements.in.
+
+[tool.black]
+# 120, not Black's default 88: the code already wraps near 100-115 columns, and
+# 88 would rewrite about 40% more lines for no gain.
+line-length = 120
+# The Python of every image (Dockerfiles use 3.12).
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+# Components import their sibling modules by bare name (import common), so
+# isort must treat those as first-party rather than guess from the install.
+src_paths = ["console", "gis", "ingest", "model", "scripts"]

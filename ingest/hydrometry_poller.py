@@ -35,13 +35,15 @@ INTERVAL_S = int(os.environ.get("HYDRO_INTERVAL_S", "900"))
 
 def sites() -> list[str]:
     """Gauge numbers for the catchments you care about — see .env.example."""
-    return [s.strip() for s in require_env(
-        "HYDRO_SITES", "a comma-separated list of gauge ids").split(",") if s.strip()]
+    return [
+        s.strip() for s in require_env("HYDRO_SITES", "a comma-separated list of gauge ids").split(",") if s.strip()
+    ]
+
 
 VARIABLES = {
     "100.00": ("level_m", "m"),
     "141.00": ("flow_cumecs", "m3/s"),
-    "10.00":  ("rainfall_mm", "mm"),
+    "10.00": ("rainfall_mm", "mm"),
 }
 
 producer = None
@@ -55,17 +57,19 @@ def fetch_timeseries(site: str, variable: str, hours: int = 6) -> dict:
     params = {
         "function": "get_ts_traces",
         "version": "2",
-        "params": json.dumps({
-            "site_list": site,
-            "datasource": "A",
-            "varfrom": variable,
-            "varto": variable,
-            "start_time": start.strftime("%Y%m%d%H%M%S"),
-            "end_time": end.strftime("%Y%m%d%H%M%S"),
-            "data_type": "mean",
-            "interval": "hour",
-            "multiplier": 1,
-        }),
+        "params": json.dumps(
+            {
+                "site_list": site,
+                "datasource": "A",
+                "varfrom": variable,
+                "varto": variable,
+                "start_time": start.strftime("%Y%m%d%H%M%S"),
+                "end_time": end.strftime("%Y%m%d%H%M%S"),
+                "data_type": "mean",
+                "interval": "hour",
+                "multiplier": 1,
+            }
+        ),
     }
     resp = requests.get(url, params=params, timeout=60)
     resp.raise_for_status()
@@ -81,19 +85,20 @@ def parse_timeseries(payload: dict, site: str, variable: str) -> list[dict]:
         for point in trace.get("trace") or []:
             raw_t = str(point.get("t"))
             try:
-                ts = datetime.strptime(raw_t, "%Y%m%d%H%M%S").replace(
-                    tzinfo=timezone.utc).isoformat()
+                ts = datetime.strptime(raw_t, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).isoformat()
             except ValueError:
                 continue
-            out.append({
-                "site_id": site,
-                "variable": var_name,
-                "unit": unit,
-                "value": point.get("v"),
-                "quality_code": str(point.get("q", "")),
-                "provider": PROVIDER,
-                "event_ts": ts,
-            })
+            out.append(
+                {
+                    "site_id": site,
+                    "variable": var_name,
+                    "unit": unit,
+                    "value": point.get("v"),
+                    "quality_code": str(point.get("q", "")),
+                    "provider": PROVIDER,
+                    "event_ts": ts,
+                }
+            )
     return out
 
 
@@ -106,7 +111,8 @@ def publish() -> int:
                 for record in parse_timeseries(payload, site, variable):
                     ts = record.pop("event_ts")
                     producer.send(
-                        TOPIC, key=f"{site}:{record['variable']}",
+                        TOPIC,
+                        key=f"{site}:{record['variable']}",
                         value=envelope(PROVIDER, record, event_ts=ts),
                     )
                     total += 1

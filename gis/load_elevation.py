@@ -36,7 +36,7 @@ import requests
 
 from load_gis import DSN, load_config, resolve_config_path
 
-ORIGIN = 20037508.342787            # Web Mercator half-extent
+ORIGIN = 20037508.342787  # Web Mercator half-extent
 EARTH_RADIUS = 6378137.0
 TILE = 256
 WEB_MERCATOR = {102100, 3857}
@@ -51,11 +51,12 @@ def service_info(url: str, level: int) -> None:
     if "error" in info:
         sys.exit(f"! elevation service error: {info['error']}")
     tiles = info.get("tileInfo") or {}
-    wkid = (tiles.get("spatialReference") or {}).get("latestWkid") or \
-        (tiles.get("spatialReference") or {}).get("wkid")
+    wkid = (tiles.get("spatialReference") or {}).get("latestWkid") or (tiles.get("spatialReference") or {}).get("wkid")
     if tiles.get("format") != "LERC" or wkid not in WEB_MERCATOR or tiles.get("rows") != TILE:
-        sys.exit(f"! {url} is not a Web Mercator LERC tile service "
-                 f"(format={tiles.get('format')}, wkid={wkid}, rows={tiles.get('rows')})")
+        sys.exit(
+            f"! {url} is not a Web Mercator LERC tile service "
+            f"(format={tiles.get('format')}, wkid={wkid}, rows={tiles.get('rows')})"
+        )
     max_lod = info.get("maxLOD", len(tiles.get("lods", [])) - 1)
     if level > max_lod:
         sys.exit(f"! level {level} is beyond the service's maxLOD {max_lod}")
@@ -65,7 +66,7 @@ def tile_position(lon: float, lat: float, level: int) -> tuple[int, int, float, 
     """(row, col) of the tile holding a point, and its pixel offset inside it."""
     x = math.radians(lon) * EARTH_RADIUS
     y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * EARTH_RADIUS
-    res = 2 * ORIGIN / TILE / 2 ** level
+    res = 2 * ORIGIN / TILE / 2**level
     px, py = (x + ORIGIN) / res, (ORIGIN - y) / res
     return int(py // TILE), int(px // TILE), px % TILE, py % TILE
 
@@ -74,17 +75,17 @@ def bilinear(grid: np.ndarray, valid: np.ndarray | None, fx: float, fy: float):
     """Interpolate the point grid; None if any of the four samples is nodata."""
     c, r = int(fx), int(fy)
     dx, dy = fx - c, fy - r
-    if valid is not None and not valid[r:r + 2, c:c + 2].all():
+    if valid is not None and not valid[r : r + 2, c : c + 2].all():
         return None
-    z = grid[r:r + 2, c:c + 2].astype(float)
-    return float(z[0, 0] * (1 - dx) * (1 - dy) + z[0, 1] * dx * (1 - dy)
-                 + z[1, 0] * (1 - dx) * dy + z[1, 1] * dx * dy)
+    z = grid[r : r + 2, c : c + 2].astype(float)
+    return float(z[0, 0] * (1 - dx) * (1 - dy) + z[0, 1] * dx * (1 - dy) + z[1, 0] * (1 - dx) * dy + z[1, 1] * dx * dy)
 
 
 def nodes_by_tile(cur, level: int, every_node: bool) -> dict:
     """Group the nodes to sample by the tile that holds them."""
-    cur.execute("SELECT node_id, ST_X(geom), ST_Y(geom) FROM asset.node"
-                + ("" if every_node else " WHERE elevation_m IS NULL"))
+    cur.execute(
+        "SELECT node_id, ST_X(geom), ST_Y(geom) FROM asset.node" + ("" if every_node else " WHERE elevation_m IS NULL")
+    )
     by_tile: dict[tuple[int, int], list[tuple[int, float, float]]] = defaultdict(list)
     for node_id, lon, lat in cur.fetchall():
         row, col, fx, fy = tile_position(lon, lat, level)
@@ -126,8 +127,7 @@ def sample_tiles(url: str, level: int, by_tile: dict):
                 missing += len(members)
             else:
                 grid, valid = decoded
-                values = [(node_id, bilinear(grid, valid, fx, fy))
-                          for node_id, fx, fy in members]
+                values = [(node_id, bilinear(grid, valid, fx, fy)) for node_id, fx, fy in members]
                 samples += [(n, round(z, 2)) for n, z in values if z is not None]
                 missing += sum(1 for _, z in values if z is None)
             if i % 100 == 0:
@@ -148,8 +148,7 @@ def write_elevations(cur, samples: list[tuple[int, float]]) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", help="region config (default: $GIS_REGION_CONFIG)")
-    ap.add_argument("--all", action="store_true",
-                    help="re-sample every node, not only those with no elevation")
+    ap.add_argument("--all", action="store_true", help="re-sample every node, not only those with no elevation")
     ap.add_argument("--level", type=int, help="override the config's tile level")
     args = ap.parse_args()
 
@@ -157,8 +156,7 @@ def main() -> None:
     elevation = cfg.get("elevation") or {}
     url = (elevation.get("tile_service") or "").rstrip("/")
     if not url:
-        print("no elevation.tile_service in the region config — nodes keep the "
-              "model's default elevation")
+        print("no elevation.tile_service in the region config — nodes keep the " "model's default elevation")
         return
     level = args.level if args.level is not None else int(elevation.get("level", 14))
     service_info(url, level)
@@ -171,8 +169,10 @@ def main() -> None:
         updated = write_elevations(cur, samples)
         conn.commit()
 
-    print(f"\n{updated} nodes given an elevation; {missing} outside the DEM or on "
-          f"nodata, {failed} on tiles that failed to fetch")
+    print(
+        f"\n{updated} nodes given an elevation; {missing} outside the DEM or on "
+        f"nodata, {failed} on tiles that failed to fetch"
+    )
 
 
 if __name__ == "__main__":

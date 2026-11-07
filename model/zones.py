@@ -58,20 +58,20 @@ HEAD_MARGIN_M = float(os.environ.get("SIM_HEAD_MARGIN_M", "5"))
 @dataclass(frozen=True)
 class Prv:
     pipe: Pipe
-    upstream: int            # node on the higher grade line
-    downstream: int          # node whose pressure the valve holds
-    setting_m: float         # pressure held at the downstream node
+    upstream: int  # node on the higher grade line
+    downstream: int  # node whose pressure the valve holds
+    setting_m: float  # pressure held at the downstream node
 
 
 @dataclass
 class ZonePlan:
     band_width_m: float
-    band_of: dict[int, int]                  # node -> band (0 is the highest)
-    band_head: dict[int, float]              # band -> grade line, m
-    reservoir_head: dict[str, float]         # facility_id -> head, m
+    band_of: dict[int, int]  # node -> band (0 is the highest)
+    band_head: dict[int, float]  # band -> grade line, m
+    reservoir_head: dict[str, float]  # facility_id -> head, m
     prvs: list[Prv] = field(default_factory=list)
-    pipes: list[Pipe] = field(default_factory=list)       # kept as pipes
-    closed: list[Pipe] = field(default_factory=list)      # boundary valves shut
+    pipes: list[Pipe] = field(default_factory=list)  # kept as pipes
+    closed: list[Pipe] = field(default_factory=list)  # boundary valves shut
     boosters: list[tuple[int, float]] = field(default_factory=list)  # (node, head)
 
     def static_pressure_range(self, elevation: dict[int, float]) -> tuple[float, float]:
@@ -80,11 +80,14 @@ class ZonePlan:
         return (min(values), max(values)) if values else (0.0, 0.0)
 
 
-def plan_zones(pipes: list[Pipe], elevation: dict[int, float],
-               reservoir_nodes: dict[str, int],
-               min_pressure_m: float = MIN_PRESSURE_M,
-               max_pressure_m: float = MAX_PRESSURE_M,
-               margin_m: float = HEAD_MARGIN_M) -> ZonePlan:
+def plan_zones(
+    pipes: list[Pipe],
+    elevation: dict[int, float],
+    reservoir_nodes: dict[str, int],
+    min_pressure_m: float = MIN_PRESSURE_M,
+    max_pressure_m: float = MAX_PRESSURE_M,
+    margin_m: float = HEAD_MARGIN_M,
+) -> ZonePlan:
     """Band the nodes by elevation and work out heads, PRVs and boosters.
 
     `pipes` is the supplied selection, `elevation` covers every node they
@@ -92,11 +95,11 @@ def plan_zones(pipes: list[Pipe], elevation: dict[int, float],
     """
     width = max_pressure_m - min_pressure_m - margin_m
     if width <= 0:
-        raise ValueError(f"no room for a band: max {max_pressure_m:g} m - min "
-                         f"{min_pressure_m:g} m - margin {margin_m:g} m <= 0")
+        raise ValueError(
+            f"no room for a band: max {max_pressure_m:g} m - min " f"{min_pressure_m:g} m - margin {margin_m:g} m <= 0"
+        )
 
-    nodes = sorted({n for p in pipes for n in (p.start_node, p.end_node)}
-                   | set(reservoir_nodes.values()))
+    nodes = sorted({n for p in pipes for n in (p.start_node, p.end_node)} | set(reservoir_nodes.values()))
     if not nodes:
         return ZonePlan(width, {}, {}, {})
     top = max(elevation[n] for n in nodes)
@@ -104,8 +107,7 @@ def plan_zones(pipes: list[Pipe], elevation: dict[int, float],
     # The tiny epsilon keeps a node exactly on a band's lower edge in that
     # band, so floating-point noise can't push it to the one below.
     band_of = {n: int(math.floor((top - elevation[n]) / width + 1e-9)) for n in nodes}
-    band_head = {b: top - b * width + min_pressure_m + margin_m
-                 for b in set(band_of.values())}
+    band_head = {b: top - b * width + min_pressure_m + margin_m for b in set(band_of.values())}
 
     kept: list[Pipe] = []
     crossings: list[Pipe] = []
@@ -131,10 +133,8 @@ def plan_zones(pipes: list[Pipe], elevation: dict[int, float],
     prvs.sort(key=lambda v: v.pipe.pipe_id)
     closed.sort(key=lambda p: p.pipe_id)
 
-    reservoir_head = {fid: band_head[band_of[node]]
-                      for fid, node in sorted(reservoir_nodes.items())}
-    boosters = _boosters(nodes, kept, prvs, band_of, band_head,
-                         set(reservoir_nodes.values()))
+    reservoir_head = {fid: band_head[band_of[node]] for fid, node in sorted(reservoir_nodes.items())}
+    boosters = _boosters(nodes, kept, prvs, band_of, band_head, set(reservoir_nodes.values()))
     return ZonePlan(width, band_of, band_head, reservoir_head, prvs, kept, closed, boosters)
 
 

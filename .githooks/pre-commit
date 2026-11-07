@@ -1,0 +1,65 @@
+#!/bin/sh
+# Formats staged Python and SQL files and stages the result.
+#
+# Black and isort cover Python; SQLFluff covers postgres/init/*.sql (flink/ is
+# excluded, see .sqlfluffignore). Versions are pinned in dev/requirements.in:
+#   pip install --require-hashes -r dev/requirements.txt
+# A missing tool is skipped with a message, never a failed commit, so a clone
+# without the dev tools can still commit; CI's Format job is the real gate.
+#
+# Only files staged in full are rewritten. A file with unstaged edits (partial
+# staging, git add -p) is left alone and reported, because re-staging it would
+# sweep the unstaged edits into the commit.
+# Bypass once with: git commit --no-verify
+
+# Git runs hooks from the top of the work tree.
+staged() { git diff --cached --name-only --diff-filter=ACM -z -- "$@"; }
+
+partial=$(git diff --name-only)
+
+# Prints the staged files matching the pathspecs, newline separated, minus any
+# with unstaged changes (those are reported on stderr).
+select_files() {
+  staged "$@" | tr '\0' '\n' | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if printf '%s\n' "$partial" | grep -qxF -- "$f"; then
+      echo "pre-commit: $f has unstaged changes; not formatted" >&2
+    else
+      printf '%s\n' "$f"
+    fi
+  done
+}
+
+# Runs "$@" on the files in $files (one per line), then re-stages them.
+run_on() {
+  # xargs -I would run once per file; a null-separated pipe keeps names safe.
+  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 "$@" || return 1
+  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 git add --
+}
+
+status=0
+
+files=$(select_files '*.py')
+if [ -n "$files" ]; then
+  if command -v isort >/dev/null 2>&1 && command -v black >/dev/null 2>&1; then
+    run_on isort -q || status=1
+    run_on black -q || status=1
+  else
+    echo "pre-commit: black/isort not installed; skipping Python formatting (pip install --require-hashes -r dev/requirements.txt)" >&2
+  fi
+fi
+
+files=$(select_files 'postgres/init/*.sql')
+if [ -n "$files" ]; then
+  if command -v sqlfluff >/dev/null 2>&1; then
+    # fix exits non-zero when violations remain that it cannot rewrite.
+    run_on sqlfluff fix --disable-progress-bar -q || {
+      echo "pre-commit: sqlfluff found problems it cannot fix; run: sqlfluff lint postgres/init" >&2
+      status=1
+    }
+  else
+    echo "pre-commit: sqlfluff not installed; skipping SQL formatting (pip install --require-hashes -r dev/requirements.txt)" >&2
+  fi
+fi
+
+exit $status

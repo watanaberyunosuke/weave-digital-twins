@@ -44,34 +44,106 @@ from dataclasses import dataclass
 from datetime import datetime
 
 # --- sourced figures --------------------------------------------------------
-LITRES_PER_PERSON_DAY = 169.0          # Melbourne 2024/25
-PEOPLE_PER_HOUSEHOLD = 2.6             # Greater Melbourne, 2021 Census
-COMMERCIAL_L_PER_M2_DAY = {            # Sydney Water, March 2025
+LITRES_PER_PERSON_DAY = 169.0  # Melbourne 2024/25
+PEOPLE_PER_HOUSEHOLD = 2.6  # Greater Melbourne, 2021 Census
+COMMERCIAL_L_PER_M2_DAY = {  # Sydney Water, March 2025
     "office": 0.4,
     "retail": 1.5,
     "shopping_centre": 2.0,
     "cafe": 2.5,
     "medical": 1.5,
 }
-PEAK_DAY_RATIO_MAX = 1.5               # upper end of the indoor-driven range
+PEAK_DAY_RATIO_MAX = 1.5  # upper end of the indoor-driven range
 
 # --- assumptions -------------------------------------------------------------
 # Hourly multipliers, normalised below to average 1 over the day. Residential:
 # a morning peak around 7-8 am and a broader evening peak, little overnight.
-_RESIDENTIAL_WEEKDAY = [0.35, 0.25, 0.20, 0.20, 0.25, 0.50, 1.30, 1.90, 1.70, 1.30, 1.10, 1.00,
-                        0.95, 0.90, 0.85, 0.90, 1.05, 1.35, 1.60, 1.55, 1.30, 1.00, 0.70, 0.50]
+_RESIDENTIAL_WEEKDAY = [
+    0.35,
+    0.25,
+    0.20,
+    0.20,
+    0.25,
+    0.50,
+    1.30,
+    1.90,
+    1.70,
+    1.30,
+    1.10,
+    1.00,
+    0.95,
+    0.90,
+    0.85,
+    0.90,
+    1.05,
+    1.35,
+    1.60,
+    1.55,
+    1.30,
+    1.00,
+    0.70,
+    0.50,
+]
 # Weekends start later and spread the morning peak.
-_RESIDENTIAL_WEEKEND = [0.40, 0.30, 0.25, 0.20, 0.20, 0.30, 0.60, 1.10, 1.60, 1.80, 1.60, 1.30,
-                        1.20, 1.10, 1.00, 1.00, 1.10, 1.30, 1.50, 1.45, 1.20, 0.95, 0.70, 0.50]
+_RESIDENTIAL_WEEKEND = [
+    0.40,
+    0.30,
+    0.25,
+    0.20,
+    0.20,
+    0.30,
+    0.60,
+    1.10,
+    1.60,
+    1.80,
+    1.60,
+    1.30,
+    1.20,
+    1.10,
+    1.00,
+    1.00,
+    1.10,
+    1.30,
+    1.50,
+    1.45,
+    1.20,
+    0.95,
+    0.70,
+    0.50,
+]
 # Commercial: trading hours, with a small base overnight (cooling, cisterns).
-_COMMERCIAL = [0.10, 0.10, 0.10, 0.10, 0.10, 0.15, 0.40, 1.00, 1.80, 2.00, 2.00, 2.00,
-               2.10, 2.00, 1.90, 1.80, 1.60, 1.00, 0.50, 0.30, 0.20, 0.15, 0.10, 0.10]
-COMMERCIAL_WEEKEND_FACTOR = 0.4        # weekend volume against a weekday
-HOUSEHOLD_SPREAD = 0.35                # lognormal sigma on household volume
+_COMMERCIAL = [
+    0.10,
+    0.10,
+    0.10,
+    0.10,
+    0.10,
+    0.15,
+    0.40,
+    1.00,
+    1.80,
+    2.00,
+    2.00,
+    2.00,
+    2.10,
+    2.00,
+    1.90,
+    1.80,
+    1.60,
+    1.00,
+    0.50,
+    0.30,
+    0.20,
+    0.15,
+    0.10,
+    0.10,
+]
+COMMERCIAL_WEEKEND_FACTOR = 0.4  # weekend volume against a weekday
+HOUSEHOLD_SPREAD = 0.35  # lognormal sigma on household volume
 FLOOR_AREA_MEDIAN_M2 = 300.0
-FLOOR_AREA_SPREAD = 0.8                # lognormal sigma on floor area
+FLOOR_AREA_SPREAD = 0.8  # lognormal sigma on floor area
 FLOOR_AREA_RANGE_M2 = (50.0, 5000.0)
-BULK_DWELLINGS = (10, 60)              # dwellings behind one bulk meter
+BULK_DWELLINGS = (10, 60)  # dwellings behind one bulk meter
 # Uniform ranges either side of the expected value. The day range stays well
 # inside the published peak-day ratio of 1.5.
 DAY_RANGE = float(os.environ.get("METER_DAY_RANGE", "0.15"))
@@ -100,9 +172,9 @@ COMMERCIAL = _normalised(_COMMERCIAL)
 @dataclass(frozen=True)
 class Profile:
     meter_id: str
-    meter_type: str          # residential | commercial | bulk
-    daily_litres: float      # average weekday volume
-    detail: str              # what the volume was drawn from, for logs
+    meter_type: str  # residential | commercial | bulk
+    daily_litres: float  # average weekday volume
+    detail: str  # what the volume was drawn from, for logs
 
 
 def _rng(*parts) -> random.Random:
@@ -120,13 +192,12 @@ def meter_profile(meter_id: str, meter_type: str) -> Profile:
     household = LITRES_PER_PERSON_DAY * PEOPLE_PER_HOUSEHOLD
     # A lognormal's mean is its median times exp(sigma²/2); dividing that out
     # keeps the population mean on the sourced figure.
-    unbias = math.exp(HOUSEHOLD_SPREAD ** 2 / 2)
+    unbias = math.exp(HOUSEHOLD_SPREAD**2 / 2)
     if meter_type == "commercial":
         use = rng.choice(sorted(COMMERCIAL_L_PER_M2_DAY))
         lo, hi = FLOOR_AREA_RANGE_M2
         area = min(hi, max(lo, _lognormal(rng, FLOOR_AREA_MEDIAN_M2, FLOOR_AREA_SPREAD)))
-        return Profile(meter_id, meter_type, area * COMMERCIAL_L_PER_M2_DAY[use],
-                       f"{use}, {area:.0f} m²")
+        return Profile(meter_id, meter_type, area * COMMERCIAL_L_PER_M2_DAY[use], f"{use}, {area:.0f} m²")
     if meter_type == "bulk":
         dwellings = rng.randint(*BULK_DWELLINGS)
         return Profile(meter_id, meter_type, dwellings * household, f"{dwellings} dwellings")
@@ -149,8 +220,7 @@ def day_factor(meter_id: str, when: datetime, salt: int = _RUN_SALT) -> float:
     return min(PEAK_DAY_RATIO_MAX, rng.uniform(1.0 - DAY_RANGE, 1.0 + DAY_RANGE))
 
 
-def interval_litres(profile: Profile, start: datetime, minutes: int,
-                    rng: random.Random | None = None) -> float:
+def interval_litres(profile: Profile, start: datetime, minutes: int, rng: random.Random | None = None) -> float:
     """Litres through the meter in the interval starting at `start`, drawn
     afresh each call within INTERVAL_RANGE of the expected volume."""
     rng = rng or _DEFAULT_RNG
@@ -160,5 +230,5 @@ def interval_litres(profile: Profile, start: datetime, minutes: int,
         p_zero = 1.0 - m / QUIET_MULTIPLIER
         if rng.random() < p_zero:
             return 0.0
-        mean /= 1.0 - p_zero          # the intervals that do draw carry the mean
+        mean /= 1.0 - p_zero  # the intervals that do draw carry the mean
     return mean * rng.uniform(1.0 - INTERVAL_RANGE, 1.0 + INTERVAL_RANGE)

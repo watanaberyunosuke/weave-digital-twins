@@ -15,7 +15,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-for dir in model ingest console .github/ci; do
+for dir in model ingest console dev .github/ci; do
   echo "-> $dir"
   (cd "$ROOT/$dir" && pip-compile --quiet --generate-hashes --allow-unsafe \
      --strip-extras --no-emit-index-url --output-file=requirements.txt "$@" \

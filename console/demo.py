@@ -70,15 +70,20 @@ class _Fields(dict):
 
 
 def simulated_lines(action: str, params: dict, command: list[str]) -> list[str]:
-    scope = "every DMA" if action == "reset_baseline" and not params.get("dma") else (
-        f"DMA {params['dma']}" if action == "reset_baseline" else
-        "every node" if params.get("all") else "nodes without an elevation")
+    scope = (
+        "every DMA"
+        if action == "reset_baseline" and not params.get("dma")
+        else (
+            f"DMA {params['dma']}"
+            if action == "reset_baseline"
+            else "every node" if params.get("all") else "nodes without an elevation"
+        )
+    )
     fields = {**{k: v for k, v in params.items()}, "scope": scope}
     if not fields.get("limit"):
         fields["limit"] = "none"
     # Validated params always carry every field; the fallback only keeps a
     # sample readable if one is ever missing.
     safe_fields = _Fields(fields)
-    body = [line.format_map(safe_fields)
-            for line in _SAMPLES.get(action, ["(no sample for this action)"])]
+    body = [line.format_map(safe_fields) for line in _SAMPLES.get(action, ["(no sample for this action)"])]
     return [BANNER, "$ " + " ".join(command), *body, "exit 0 (simulated)"]

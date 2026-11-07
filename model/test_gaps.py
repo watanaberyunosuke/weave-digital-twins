@@ -9,7 +9,7 @@ import unittest
 from gaps import connect_pieces, split_at_tjunctions
 from subgraph import Pipe, select_supplied_subgraph
 
-M = 1 / 111_000   # about a metre in degrees, near enough for test layouts
+M = 1 / 111_000  # about a metre in degrees, near enough for test layouts
 
 
 def pipe(pid, a, b, length=100.0, dia=0.15):
@@ -52,7 +52,7 @@ class ConnectTest(unittest.TestCase):
 
     def test_short_break_is_a_gap(self):
         pipes, coords = self.layout()
-        coords.update({10: (230 * M, 0), 11: (330 * M, 0)})   # 30 m beyond node 3
+        coords.update({10: (230 * M, 0), 11: (330 * M, 0)})  # 30 m beyond node 3
         pipes.append(pipe("c", 10, 11))
         out, links, unjoined = connect_pieces(pipes, coords, [1], small_m=50, large_m=5000)
         [link] = links

@@ -15,8 +15,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from gaps import (BRIDGE_LARGE_M, BRIDGE_SMALL_M, TJUNCTION_M, Link, connect_pieces,
-                  split_at_tjunctions)
+from gaps import BRIDGE_LARGE_M, BRIDGE_SMALL_M, TJUNCTION_M, Link, connect_pieces, split_at_tjunctions
 from subgraph import Pipe, Selection, select_supplied_subgraph
 
 # Both the simulator and the seeder read these, so compose passes them to both
@@ -100,18 +99,23 @@ class Modelled:
     # (facility_id, lat, lon, node_id, ground_elevation_m, snap_distance_m)
     reservoirs: list[tuple]
     too_far: list[tuple]
-    pipe_count: int             # usable pipes in the whole graph
+    pipe_count: int  # usable pipes in the whole graph
     selection: Selection
     links: list[Link] = field(default_factory=list)  # splits, gaps, bridges, with reasons
-    unjoined: tuple = (0, 0)    # pieces and pipes still without supply
-    pipes: list = field(default_factory=list)        # every pipe the walk could use
+    unjoined: tuple = (0, 0)  # pieces and pipes still without supply
+    pipes: list = field(default_factory=list)  # every pipe the walk could use
     snap_notes: list[str] = field(default_factory=list)  # reservoirs snapped past a node
-    limits: dict = field(default_factory=dict)       # snap distance per supply type
+    limits: dict = field(default_factory=dict)  # snap distance per supply type
 
 
-def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNAP_M,
-                    tjunction_m: float = TJUNCTION_M, small_m: float = BRIDGE_SMALL_M,
-                    large_m: float = BRIDGE_LARGE_M) -> Modelled:
+def select_modelled(
+    cur,
+    max_pipes: int = MAX_PIPES,
+    max_snap_m: float = MAX_SNAP_M,
+    tjunction_m: float = TJUNCTION_M,
+    small_m: float = BRIDGE_SMALL_M,
+    large_m: float = BRIDGE_LARGE_M,
+) -> Modelled:
     """Snap supply reservoirs to the graph, join the pieces (real splits
     first, then synthetic gaps and bridges), then walk out to the pipe cap."""
     cur.execute("""
@@ -121,8 +125,10 @@ def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNA
         FROM asset.pipe
         WHERE start_node IS NOT NULL AND end_node IS NOT NULL
     """)
-    pipes = [Pipe(pipe_id, s, e, max(float(length or 1), 1.0), max(float(dia or 0.15), 0.05))
-             for pipe_id, s, e, length, dia in cur.fetchall()]
+    pipes = [
+        Pipe(pipe_id, s, e, max(float(length or 1), 1.0), max(float(dia or 0.15), 0.05))
+        for pipe_id, s, e, length, dia in cur.fetchall()
+    ]
     # A reservoir snaps to its nearest node that has a usable pipe (one that
     # didn't collapse to zero length); node_id breaks distance ties so the snap
     # is the same every build. Passing over a nearer node is noted with why.
@@ -137,14 +143,16 @@ def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNA
         rows = sorted(by_facility[fid], key=lambda r: r[7])
         pick = next((r for r in rows if r[4] in usable), None)
         if pick is None:
-            snap_notes.append(f"reservoir {fid}: none of its {len(rows)} nearest nodes has a "
-                              f"usable pipe, so it is left out")
+            snap_notes.append(
+                f"reservoir {fid}: none of its {len(rows)} nearest nodes has a " f"usable pipe, so it is left out"
+            )
             continue
         if pick is not rows[0]:
             snap_notes.append(
                 f"reservoir {fid}: nearest node N{rows[0][4]} ({rows[0][6]:.0f} m) has no usable "
                 f"pipe (only zero-length after snapping), so it snaps to N{pick[4]} "
-                f"({pick[6]:.0f} m)")
+                f"({pick[6]:.0f} m)"
+            )
         fid_, lat, lon, kind, node, elev, dist, _rank = pick
         entry = (fid_, lat, lon, node, elev, dist)
         (reservoirs if dist <= limits.get(kind, max_snap_m) else too_far).append(entry)
@@ -164,12 +172,12 @@ def select_modelled(cur, max_pipes: int = MAX_PIPES, max_snap_m: float = MAX_SNA
         links += joins
 
     selection = select_supplied_subgraph(pipes, sources, max_pipes)
-    return Modelled(reservoirs, too_far, pipe_count, selection, links, unjoined,
-                    pipes, snap_notes, limits)
+    return Modelled(reservoirs, too_far, pipe_count, selection, links, unjoined, pipes, snap_notes, limits)
 
 
-def excluded_pipes(m: Modelled, max_pipes: int = MAX_PIPES,
-                   large_m: float = BRIDGE_LARGE_M) -> dict[str, tuple[str, str]]:
+def excluded_pipes(
+    m: Modelled, max_pipes: int = MAX_PIPES, large_m: float = BRIDGE_LARGE_M
+) -> dict[str, tuple[str, str]]:
     """Every real pipe the model leaves out, with a code and the reason.
 
     A split pipe counts as modelled if any of its pieces is. Pipes the
@@ -183,13 +191,17 @@ def excluded_pipes(m: Modelled, max_pipes: int = MAX_PIPES,
         if aid is None or aid in kept or aid in out:
             continue
         if p.start_node == p.end_node:
-            out[aid] = ("zero_length",
-                        "both ends snapped to the same node: shorter than the snap tolerance, "
-                        "so it is a joint, not a pipe; the pipes it joined still meet there")
+            out[aid] = (
+                "zero_length",
+                "both ends snapped to the same node: shorter than the snap tolerance, "
+                "so it is a joint, not a pipe; the pipes it joined still meet there",
+            )
         elif p.start_node in m.selection.reachable:
             out[aid] = ("over_cap", f"connected to supply but beyond SIM_MAX_PIPES={max_pipes}")
         else:
-            out[aid] = ("unsupplied",
-                        f"in a piece no reservoir reaches, with no real connection and no other "
-                        f"network within SIM_BRIDGE_LARGE_M={large_m:g} m to join it to")
+            out[aid] = (
+                "unsupplied",
+                f"in a piece no reservoir reaches, with no real connection and no other "
+                f"network within SIM_BRIDGE_LARGE_M={large_m:g} m to join it to",
+            )
     return out

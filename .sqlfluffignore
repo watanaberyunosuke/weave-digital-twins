@@ -1,0 +1,4 @@
+# SQLFluff has no Flink dialect. The closest ones (ansi, sparksql) cannot parse
+# WATERMARK FOR, EXECUTE STATEMENT SET or the WITH ('connector' = ...) options,
+# so any fix would rewrite valid Flink SQL.
+flink/

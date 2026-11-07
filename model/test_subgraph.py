@@ -16,6 +16,7 @@ from subgraph import EPANET_MAX_ID, Pipe, element_name, select_supplied_subgraph
 
 def grid(width: int, height: int, first_node: int = 1) -> list[Pipe]:
     """A looped grid of pipes, node ids row by row from first_node."""
+
     def nid(x, y):
         return first_node + y * width + x
 
@@ -48,7 +49,7 @@ def supplied(selection, sources) -> bool:
 class SelectSuppliedSubgraph(unittest.TestCase):
 
     def test_above_cap_is_connected_to_supply_and_exactly_capped(self):
-        pipes = grid(10, 10)                      # 180 pipes
+        pipes = grid(10, 10)  # 180 pipes
         sel = select_supplied_subgraph(pipes, [1], cap=50)
         self.assertEqual(len(sel.pipes), 50)
         self.assertEqual(sel.capped_pipes, len(pipes) - 50)
@@ -60,12 +61,11 @@ class SelectSuppliedSubgraph(unittest.TestCase):
         shuffled = pipes[:]
         random.Random(7).shuffle(shuffled)
         second = select_supplied_subgraph(shuffled, [64, 1, 1], cap=40)
-        self.assertEqual([p.pipe_id for p in first.pipes],
-                         [p.pipe_id for p in second.pipes])
+        self.assertEqual([p.pipe_id for p in first.pipes], [p.pipe_id for p in second.pipes])
 
     def test_unsupplied_component_is_left_out_and_counted(self):
-        fed = grid(4, 4, first_node=1)            # 24 pipes, holds the source
-        island = grid(3, 3, first_node=1000)      # 12 pipes, no source
+        fed = grid(4, 4, first_node=1)  # 24 pipes, holds the source
+        island = grid(3, 3, first_node=1000)  # 12 pipes, no source
         sel = select_supplied_subgraph(fed + island, [1], cap=1000)
         self.assertEqual(len(sel.pipes), len(fed))
         self.assertEqual(sel.unsupplied_pipes, len(island))
@@ -74,8 +74,7 @@ class SelectSuppliedSubgraph(unittest.TestCase):
 
     def test_loops_between_reached_nodes_are_kept(self):
         # A square: four pipes, one loop. A tree walk would keep three.
-        square = [Pipe("a", 1, 2, 1, 0.1), Pipe("b", 2, 3, 1, 0.1),
-                  Pipe("c", 3, 4, 1, 0.1), Pipe("d", 4, 1, 1, 0.1)]
+        square = [Pipe("a", 1, 2, 1, 0.1), Pipe("b", 2, 3, 1, 0.1), Pipe("c", 3, 4, 1, 0.1), Pipe("d", 4, 1, 1, 0.1)]
         sel = select_supplied_subgraph(square, [1], cap=10)
         self.assertEqual(sorted(p.pipe_id for p in sel.pipes), ["a", "b", "c", "d"])
 
@@ -124,19 +123,30 @@ class EpanetSolve(unittest.TestCase):
         for n in sorted(sel.nodes):
             wn.add_junction(f"N{n}", base_demand=0.001, elevation=10.0)
         wn.add_reservoir(element_name("R", "reservoir:1"), base_head=80.0)
-        wn.add_pipe(element_name("L", "reservoir:1"), element_name("R", "reservoir:1"),
-                    "N1", length=10.0, diameter=0.6, roughness=100)
+        wn.add_pipe(
+            element_name("L", "reservoir:1"),
+            element_name("R", "reservoir:1"),
+            "N1",
+            length=10.0,
+            diameter=0.6,
+            roughness=100,
+        )
         for p in sel.pipes:
-            wn.add_pipe(element_name("P", p.pipe_id), f"N{p.start_node}", f"N{p.end_node}",
-                        length=p.length_m, diameter=p.diameter_m, roughness=100)
+            wn.add_pipe(
+                element_name("P", p.pipe_id),
+                f"N{p.start_node}",
+                f"N{p.end_node}",
+                length=p.length_m,
+                diameter=p.diameter_m,
+                roughness=100,
+            )
         wn.options.time.duration = 0
         # EPANET writes temp.* scratch files into the working directory unless
         # given a prefix, which left them in the repository root.
         with tempfile.TemporaryDirectory() as tmp:
             results = wntr.sim.EpanetSimulator(wn).run_sim(file_prefix=str(Path(tmp) / "solve"))
         pressure = results.node["pressure"]
-        self.assertEqual(set(pressure.columns) - set(wn.reservoir_name_list),
-                         {f"N{n}" for n in sel.nodes})
+        self.assertEqual(set(pressure.columns) - set(wn.reservoir_name_list), {f"N{n}" for n in sel.nodes})
         self.assertTrue((pressure.iloc[-1] > 0).all())
 
 
