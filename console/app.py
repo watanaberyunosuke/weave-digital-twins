@@ -18,6 +18,12 @@ CONSOLE_MODE=public serves the same page to anyone, read-only and without the
 Docker socket, with demo and admin logins (see access.py); the admin login
 acts through the admin console's relay routes. Admin mode, the default, is
 the loopback console and is unchanged.
+
+CONSOLE_MODE=unified is both in one service: the same page and logins as
+public mode, but the service holds the Docker socket itself, so the admin
+login runs steps directly and no relay or second service is involved. Only
+the role check keeps an anonymous or demo visitor away from the socket there,
+which is why it is opt-in.
 """
 
 from __future__ import annotations
@@ -58,16 +64,21 @@ ALLOWED_HOSTS = {h.strip() for h in
 STATIC = Path(__file__).parent / "static"
 
 MODE = os.environ.get("CONSOLE_MODE", "admin")
-if MODE not in ("admin", "public"):
-    raise SystemExit(f"CONSOLE_MODE must be admin or public, not {MODE!r}")
+if MODE not in ("admin", "public", "unified"):
+    raise SystemExit(f"CONSOLE_MODE must be admin, public or unified, not {MODE!r}")
+# PUBLIC is the separate, socketless service; UNIFIED is one service that
+# serves the roles and holds the socket. Both have logins.
 PUBLIC = MODE == "public"
+UNIFIED = MODE == "unified"
+LOGINS = PUBLIC or UNIFIED
 # Public mode: the demo login is open to everyone and its password is shown
 # on the form, so it is configuration, not a secret (see access.py).
-DEMO_ENABLED = PUBLIC and os.environ.get("CONSOLE_DEMO", "1") != "0"
+DEMO_ENABLED = LOGINS and os.environ.get("CONSOLE_DEMO", "1") != "0"
 DEMO_PASSWORD = os.environ.get("CONSOLE_DEMO_PASSWORD", "demo")
 # The admin login on the public page: the operator's password as a scrypt
 # hash, optionally with an authenticator secret. It is on only when the relay
-# to the admin console is configured, since that is the only way it can act.
+# to the admin console is configured (or the service is unified and acts
+# itself), since that is the only way it can act.
 ADMIN_HASH = os.environ.get("CONSOLE_ADMIN_PASSWORD_HASH", "")
 ADMIN_TOTP = os.environ.get("CONSOLE_ADMIN_TOTP_SECRET", "")
 # Signs session cookies. Unset, a fresh one per start: a restart then just
@@ -92,7 +103,8 @@ NOT_FOUND, NO_SUCH_JOB = "not found", "no such job"
 # Job ids are uuid4 hex prefixes; anything else is refused before it can
 # become part of a relayed path.
 JOB_ID = re.compile(r"[0-9a-f]{1,32}")
-ADMIN_ENABLED = PUBLIC and bool(ADMIN_HASH) and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)
+ADMIN_ENABLED = bool(ADMIN_HASH) and (
+    UNIFIED or (PUBLIC and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)))
 
 # The three topics create-topics.sh makes; a step is done when all exist.
 TOPICS = [
@@ -137,11 +149,11 @@ async def guard(request: Request, call_next):
 
 def _session(request: Request) -> dict | None:
     return access.unsign(request.cookies.get(access.SESSION_COOKIE, ""), SESSION_SECRET) \
-        if PUBLIC else None
+        if LOGINS else None
 
 
 def role(request: Request) -> str:
-    if not PUBLIC:
+    if not LOGINS:
         return access.ADMIN
     who = (_session(request) or {}).get("role")
     # A login that has since been switched off stops counting at once.
@@ -162,10 +174,17 @@ def remote_admin(request: Request) -> bool:
     return PUBLIC and role(request) == access.ADMIN
 
 
-def admin_only():
+def local_admin(request: Request) -> bool:
+    """The caller may see and run everything this process holds: the loopback
+    console's one user, or the admin login on a unified service."""
+    return not PUBLIC and role(request) == access.ADMIN
+
+
+def admin_only(request: Request):
     # Not routed in public mode at all, so the public console can't leak
-    # database connection details or anything else meant for the operator.
-    if PUBLIC:
+    # database connection details or anything else meant for the operator;
+    # a unified service shows them to the admin login only.
+    if PUBLIC or not local_admin(request):
         raise HTTPException(404, NOT_FOUND)
 
 
@@ -174,18 +193,18 @@ def _bearer(request: Request) -> str:
 
 
 def relay_auth(request: Request):
-    if PUBLIC or not access.token_matches(_bearer(request), RELAY_TOKEN):
+    if LOGINS or not access.token_matches(_bearer(request), RELAY_TOKEN):
         raise HTTPException(404, NOT_FOUND)
 
 
 def relay_admin_auth(request: Request):
-    if PUBLIC or not access.token_matches(_bearer(request), RELAY_ADMIN_TOKEN):
+    if LOGINS or not access.token_matches(_bearer(request), RELAY_ADMIN_TOKEN):
         raise HTTPException(404, NOT_FOUND)
 
 
 def relay_any_auth(request: Request):
     tok = _bearer(request)
-    if PUBLIC or not (access.token_matches(tok, RELAY_TOKEN)
+    if LOGINS or not (access.token_matches(tok, RELAY_TOKEN)
                       or access.token_matches(tok, RELAY_ADMIN_TOKEN)):
         raise HTTPException(404, NOT_FOUND)
 
@@ -353,7 +372,7 @@ async def status(request: Request):
     body = await shared_status()
     # Container names are the operator's: the public page shows them only to
     # the admin login, from the same cached body everyone else gets.
-    if PUBLIC and not remote_admin(request):
+    if LOGINS and role(request) != access.ADMIN:
         body = body | {"containers": PUBLIC_CONTAINERS}
     return body
 
@@ -418,7 +437,7 @@ def config(request: Request):
         # links only to the admin login. The GIS connection details stay on
         # the loopback console: they name the database host and its password.
         **(admin_links() if role(request) == access.ADMIN else {}),
-        **({} if PUBLIC else {"gis": gis_connections()}),
+        **({"gis": gis_connections()} if local_admin(request) else {}),
     }
 
 
@@ -562,7 +581,7 @@ def basemaps() -> list[dict]:
                     "attribution": os.environ.get("CONSOLE_TILE_ATTRIBUTION", "")})
     # The tile URL carries the API key to the browser, which on a public page
     # means to anyone; offer Google there only when deliberately allowed.
-    if PUBLIC and os.environ.get("CONSOLE_PUBLIC_GOOGLE") != "1":
+    if LOGINS and os.environ.get("CONSOLE_PUBLIC_GOOGLE") != "1":
         return out
     for map_type, label, kind in (("roadmap", "Google Maps", "fixed"),
                                   ("satellite", "Google Satellite", "imagery")):
@@ -579,7 +598,7 @@ def basemaps() -> list[dict]:
 @app.get("/api/basemaps/google-attribution")
 def google_attribution(map_id: str, zoom: int, north: float, south: float,
                        east: float, west: float):
-    if PUBLIC and os.environ.get("CONSOLE_PUBLIC_GOOGLE") != "1":
+    if LOGINS and os.environ.get("CONSOLE_PUBLIC_GOOGLE") != "1":
         raise HTTPException(404, "Google basemaps are not configured")
     # Google's terms require the copyright for the area in view, which only
     # its viewport endpoint knows; proxied so the key stays in one place.
@@ -1245,7 +1264,7 @@ def run_mode(action: str, who: str) -> str:
     if who == access.ADMIN:
         return "real"
     if who == access.DEMO:
-        live = RELAY_URL and RELAY_TOKEN
+        live = UNIFIED or (RELAY_URL and RELAY_TOKEN)
         return "real" if action in access.SAFE_ACTIONS and live else "simulated"
     return "none"
 
@@ -1346,13 +1365,19 @@ async def demo_action(action: str, params: dict, sid: str) -> dict:
         raise HTTPException(429, f"another demo run just happened; live runs are limited to one "
                                  f"every {DEMO_RUN_INTERVAL_S} s across all demo users. "
                                  f"Try again in {wait} s, or run it simulated.")
-    r = await relay_request("POST", relay_path("/api/relay/actions", action),
-                            json={"params": params})
-    if r.status_code != 200:
-        raise relay_error(r)
+    if UNIFIED:
+        # Same safe list and the same one-run-per-interval limit as the relay
+        # applies, enforced here because there is no second console to do it.
+        started = await start_job(action, params, origin="demo")
+    else:
+        r = await relay_request("POST", relay_path("/api/relay/actions", action),
+                                json={"params": params})
+        if r.status_code != 200:
+            raise relay_error(r)
+        started = r.json()
     DEMO_COOLDOWN.mark(ALL_DEMO_USERS)
     job |= {"state": "running", "exit_code": None, "finished": None,
-            "simulated": False, "remote_id": r.json()["id"]}
+            "simulated": False, "remote_id": started["id"]}
     remember_demo_job(sid, job)
     return {"id": job["id"]}
 
@@ -1426,7 +1451,7 @@ async def list_jobs(request: Request):
         if r.status_code != 200:
             raise relay_error(r)
         return r.json()
-    if PUBLIC:
+    if not local_admin(request):
         sid = session_id(request)
         return [_summary(j) for j in reversed(SIM_JOBS.get(sid, {}).values())] if sid else []
     return [_summary(JOBS[j]) for j in reversed(JOB_ORDER) if j in JOBS]
@@ -1436,7 +1461,7 @@ async def list_jobs(request: Request):
 async def get_job(jid: str, request: Request, since: int = Query(0, ge=0)):
     if remote_admin(request):
         return await remote_admin_job(jid, since)
-    if PUBLIC:
+    if not local_admin(request):
         job = SIM_JOBS.get(session_id(request) or "", {}).get(jid)
         if not job:
             raise HTTPException(404, NO_SUCH_JOB)
@@ -1463,6 +1488,12 @@ async def remote_admin_job(jid: str, since: int) -> dict:
 
 
 async def refresh_relayed(job: dict) -> None:
+    if UNIFIED:   # the run is a local job; copy its progress into the session's view
+        src = JOBS.get(job["remote_id"])
+        if src:
+            job["lines"].extend(src["lines"][len(job["lines"]):])
+            job.update({k: src[k] for k in ("state", "exit_code", "finished")})
+        return
     try:
         r = await relay_request("GET", relay_path("/api/relay/jobs", job["remote_id"]),
                                 params={"since": len(job["lines"])})

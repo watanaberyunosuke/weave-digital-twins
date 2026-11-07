@@ -387,6 +387,116 @@ class AdminRelayTests(unittest.TestCase):
 
 
 @unittest.skipIf(TestClient is None, "console requirements not installed")
+class UnifiedModeTests(unittest.TestCase):
+    """One service holding the socket: the role check is the only guard."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = load_app(CONSOLE_MODE="unified", CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH)
+
+    def setUp(self):
+        self.client = TestClient(self.app.app)
+        self.app.DEMO_COOLDOWN._last.clear()
+
+    def login(self, user="demo", password=PASSWORD):
+        return self.client.post("/api/login", json={"user": user, "password": password},
+                                headers=HEADERS)
+
+    def post(self, action):
+        return self.client.post(f"/api/actions/{action}", json={"params": {}}, headers=HEADERS)
+
+    def test_admin_login_needs_no_relay(self):
+        session = self.client.get("/api/session").json()
+        self.assertEqual((session["mode"], session["role"], session["admin_enabled"]),
+                         ("unified", "public", True))
+
+    def test_anonymous_cannot_act_or_see_operator_details(self):
+        with mock.patch.object(self.app, "start_job", side_effect=AssertionError("started")):
+            self.assertEqual(self.post("seed").status_code, 401)
+        cfg = self.client.get("/api/config").json()
+        for key in ("gis", "kibana_url", "flink_url", "control_center_url"):
+            self.assertNotIn(key, cfg)
+        self.assertEqual(self.client.get("/api/gis/collections").status_code, 404)
+        containers = self.client.get("/api/status").json()["containers"]
+        self.assertTrue(containers["hidden"])
+
+    def test_relay_routes_are_off(self):
+        r = self.client.post("/api/relay/admin/actions/seed", json={"params": {}},
+                             headers={**HEADERS, "Authorization": f"Bearer {ADMIN_TOKEN}"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_demo_simulates_unsafe_actions_without_starting_a_job(self):
+        self.assertEqual(self.login().status_code, 200)
+        with mock.patch.object(self.app, "start_job", side_effect=AssertionError("started")):
+            self.assertEqual(self.post("seed").status_code, 200)
+            self.assertEqual(self.post("start_flink").status_code, 200)
+        acts = {a["id"]: a["run"] for a in self.client.get("/api/actions").json()}
+        self.assertEqual(acts["seed"], "simulated")
+        self.assertEqual(acts["discover"], "real")
+        self.assertEqual(self.client.get("/api/gis/collections").status_code, 404)
+
+    def test_demo_safe_action_runs_locally_once_per_interval(self):
+        self.login()
+        with mock.patch.object(self.app, "start_job",
+                               mock.AsyncMock(return_value={"id": "abc"})) as start:
+            self.assertEqual(self.post("discover").status_code, 200)
+            self.assertEqual(self.post("run_sim_once").status_code, 429)
+        self.assertEqual(start.await_args.kwargs["origin"], "demo")
+        start.assert_awaited_once()
+
+    def test_demo_job_progress_comes_from_the_local_job(self):
+        self.login()
+        self.app.JOBS["abc"] = {"id": "abc", "state": "succeeded", "exit_code": 0,
+                                "finished": "t", "lines": ["one", "two"]}
+        self.addCleanup(self.app.JOBS.pop, "abc", None)
+        with mock.patch.object(self.app, "start_job",
+                               mock.AsyncMock(return_value={"id": "abc"})):
+            jid = self.post("discover").json()["id"]
+        body = self.client.get(f"/api/jobs/{jid}").json()
+        self.assertEqual((body["state"], body["lines"]), ("succeeded", ["one", "two"]))
+        # A demo user lists only their own session's jobs, never the local table.
+        self.assertEqual([j["id"] for j in self.client.get("/api/jobs").json()], [jid])
+        self.assertNotIn("remote_id", body)
+
+    def test_admin_runs_any_action_directly(self):
+        self.assertEqual(self.login("admin", "wrong").status_code, 401)
+        self.assertEqual(self.login("admin", ADMIN_PASSWORD).status_code, 200)
+        with mock.patch.object(self.app, "start_job",
+                               mock.AsyncMock(return_value={"id": "j1"})) as start, \
+                mock.patch.object(self.app, "relay_request",
+                                  side_effect=AssertionError("relayed")):
+            r = self.post("seed")
+        self.assertEqual((r.status_code, r.json()), (200, {"id": "j1"}))
+        self.assertEqual(start.await_args.kwargs["origin"], "admin")
+        self.assertIn("gis", self.client.get("/api/config").json())
+        self.assertIn("kibana_url", self.client.get("/api/config").json())
+
+    def test_admin_sees_the_local_job_table(self):
+        self.login("admin", ADMIN_PASSWORD)
+        self.app.JOBS["zz"] = {"id": "zz", "action": "seed", "label": "Seed", "params": {},
+                               "command": [], "state": "running", "origin": "demo",
+                               "started": "t", "finished": None, "exit_code": None, "lines": ["x"]}
+        self.app.JOB_ORDER.append("zz")
+        self.addCleanup(self.app.JOBS.pop, "zz", None)
+        self.addCleanup(self.app.JOB_ORDER.remove, "zz")
+        self.assertIn("zz", [j["id"] for j in self.client.get("/api/jobs").json()])
+        self.assertEqual(self.client.get("/api/jobs/zz").json()["lines"], ["x"])
+
+    def test_without_an_admin_hash_nobody_is_admin(self):
+        app = load_app(CONSOLE_MODE="unified")
+        client = TestClient(app.app)
+        r = client.post("/api/login", json={"user": "admin", "password": ADMIN_PASSWORD},
+                        headers=HEADERS)
+        self.assertEqual(r.status_code, 404)
+        type(self).app = load_app(CONSOLE_MODE="unified", CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH)
+
+    def test_unknown_mode_is_refused(self):
+        with self.assertRaises(SystemExit):
+            load_app(CONSOLE_MODE="both")
+        type(self).app = load_app(CONSOLE_MODE="unified", CONSOLE_ADMIN_PASSWORD_HASH=ADMIN_HASH)
+
+
+@unittest.skipIf(TestClient is None, "console requirements not installed")
 class DeviceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
