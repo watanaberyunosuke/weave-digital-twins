@@ -47,6 +47,25 @@ jobs:
       - run: scripts/lock-requirements.sh
       - run: git diff --exit-code -- '*requirements.txt'
 
+  # Formatting cannot drift because this is the only gate before a Dependabot
+  # merge. Versions come from the hash-locked dev/requirements.txt, so the hook
+  # and this job format identically. SQLFluff lints postgres/init only; Flink
+  # SQL has no dialect (see .sqlfluffignore).
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: dev/requirements.txt
+      - run: pip install --require-hashes --only-binary ":all:" -r dev/requirements.txt
+      - run: black --check .
+      - run: isort --check-only .
+      - run: sqlfluff lint postgres/init
+
   component:
     name: ${{ matrix.component }}
     runs-on: ubuntu-latest
@@ -105,7 +124,7 @@ jobs:
 
   dependabot-merge:
     name: Merge Dependabot patch update
-    needs: [syntax, component]
+    needs: [syntax, format, component]
     # github.actor rules out a commit someone else pushed to a Dependabot branch.
     if: >-
       github.event_name == 'pull_request' &&

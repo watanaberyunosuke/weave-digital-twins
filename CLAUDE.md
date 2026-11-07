@@ -10,7 +10,7 @@ The clone is the stack, but **not on its own**: [scripts/fetch-confluent-stack.s
 
 ## Commands
 
-Everything runs in containers; there is no local build and no linter. Syntax-check before running, and run the unit tests (standard library only; the EPANET solve test skips unless `wntr` is installed):
+Everything runs in containers; there is no local build; the only linters are the formatters below. Syntax-check before running, and run the unit tests (standard library only; the EPANET solve test skips unless `wntr` is installed):
 
 ```bash
 python3 -m py_compile gis/*.py ingest/*.py scripts/seed_synthetic_network.py model/*.py console/*.py
@@ -19,6 +19,9 @@ python3 -m unittest discover -s console -p 'test_*.py'   # role tests skip witho
 # GIS loader fixtures need PostGIS and a role that can create databases; they skip without one
 WEAVE_TEST_DSN=postgresql://weave:weave@localhost:5432/weave_twin python3 -m unittest discover -s gis -p 'test_*.py'
 bash -n scripts/*.sh
+bash -n .githooks/pre-commit
+pip install --require-hashes -r dev/requirements.txt   # Black, isort, SQLFluff (pinned in dev/requirements.in)
+black . && isort . && sqlfluff fix postgres/init       # format; CI runs black --check, isort --check-only, sqlfluff lint postgres/init
 node --check console/static/app.js
 ```
 
@@ -188,6 +191,7 @@ Expect the first build to be messy: real GIS has fragments, missing diameters an
 - Branches are `<type>/hdh-<n>-<short-description>`, lowercase and hyphen-separated: `feature/` new capability, `enhancement/` improvement to existing behaviour, `fix/` defect, `chore/` maintenance, `docs/` documentation only. The Linear id stays in the name because that is how a pull request links to its ticket. [.githooks/pre-push.pre-entire](.githooks/pre-push.pre-entire) rejects pushes from any other branch name except `main`; enable it once per clone with `git config core.hooksPath .githooks`. It runs after Entire's `pre-push`, which `entire enable` installs in front of it because the hooks path is `.githooks`.
 - Commits and pull requests are authored as the repository owner and carry no AI attribution: no `Co-Authored-By` trailer, no "generated with" line and no session link. The one exception is the `Entire-Checkpoint` trailer Entire's git hooks add, which names a checkpoint kept only in the local clone. This applies in cloud sessions too, which read this file but not the machine-wide settings that hide attribution locally.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml) is the only gate before a Dependabot patch update merges itself, so when a component gains a module or a test, add its import or test there too. Keep `import wntr` explicit: the EPANET test skips rather than fails when wntr can't load.
+- Formatting is automatic: Black and isort for Python (`pyproject.toml`, line length 120, py312) and SQLFluff for `postgres/init/*.sql` (`.sqlfluff`, dialect `postgres`, column alignment kept). `flink/` is excluded in `.sqlfluffignore` because SQLFluff has no Flink dialect and the nearest ones cannot parse `WATERMARK FOR` or `EXECUTE STATEMENT SET`. [.githooks/pre-commit](.githooks/pre-commit) formats staged files and re-stages them (same `core.hooksPath` setting as the branch-name hook); it skips with a message when a tool is missing and leaves files with unstaged edits alone. The tools are pinned in `dev/requirements.in` (locked like a component, no image uses them) and CI's `Format` job is the real gate. Keep any mass reformat in its own commit so `git blame` can skip it.
 - Each component's dependencies are pinned in `requirements.in`; `requirements.txt` is the hash-locked file generated from it by [scripts/lock-requirements.sh](scripts/lock-requirements.sh), and the images and CI install it with `--require-hashes`. Edit the `.in` file and regenerate, never the lock by hand; the CI `Locks` job fails when they disagree.
 - Agent sessions are recorded with Entire: `.entire/settings.json` keeps checkpoints as local git refs and never pushes them (`push_sessions` false), because the repository is public. The agent hooks in `.claude/settings.json` and `.cursor/hooks.json`, and the Entire hooks in `.githooks/`, do nothing when the Entire CLI is not installed.
 - Weave services whose command is a plain process (Python, `sleep`, uvicorn) set `init: true`. As PID 1 they ignore SIGTERM and never reap orphans; a zombie in the console made `docker compose stop` fail and left Docker Desktop holding the stack's ports, so the next start hung until Docker Desktop was restarted.
