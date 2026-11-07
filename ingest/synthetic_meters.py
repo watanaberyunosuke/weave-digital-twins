@@ -42,8 +42,9 @@ log = logging.getLogger("synthetic-meters")
 def read_meters() -> list[tuple[str, str, str]]:
     """Every registered meter, re-read each run because seeding truncates them."""
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT meter_id, dma_id, coalesce(meter_type, 'residential') "
-                    "FROM ref.water_meter ORDER BY meter_id")
+        cur.execute(
+            "SELECT meter_id, dma_id, coalesce(meter_type, 'residential') " "FROM ref.water_meter ORDER BY meter_id"
+        )
         return cur.fetchall()
 
 
@@ -59,15 +60,17 @@ def readings(meters, interval_end: datetime, minutes: int) -> list[dict]:
     out = []
     for meter_id, dma_id, meter_type in meters:
         litres = interval_litres(meter_profile(meter_id, meter_type), start, minutes)
-        out.append({
-            "meter_id": meter_id,
-            "dma_id": dma_id,
-            "litres": round(litres, 2),
-            "flow_lpm": round(litres / minutes, 3),
-            "battery_pct": battery_pct(meter_id),
-            "event_ts": event_ms,
-            "is_synthetic": True,
-        })
+        out.append(
+            {
+                "meter_id": meter_id,
+                "dma_id": dma_id,
+                "litres": round(litres, 2),
+                "flow_lpm": round(litres / minutes, 3),
+                "battery_pct": battery_pct(meter_id),
+                "event_ts": event_ms,
+                "is_synthetic": True,
+            }
+        )
     return out
 
 

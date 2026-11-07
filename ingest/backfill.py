@@ -113,11 +113,13 @@ def load_pressure_spec(path: str = PRESSURE_SCHEMA) -> PressureSpec:
     the seeder rewrites that file and an old copy would name ids no longer in use."""
     with open(path, encoding="utf-8") as fh:
         schema = json.load(fh)
-    args = {f["name"]: f["type"]["arg.properties"] for f in schema["fields"]
-            if isinstance(f["type"], dict) and "arg.properties" in f["type"]}
+    args = {
+        f["name"]: f["type"]["arg.properties"]
+        for f in schema["fields"]
+        if isinstance(f["type"], dict) and "arg.properties" in f["type"]
+    }
     span = lambda name: (args[name]["range"]["min"], args[name]["range"]["max"])  # noqa: E731
-    return PressureSpec(args["logger_id"]["options"], args["dma_id"]["options"],
-                        span("pressure_m"), span("flow_ls"))
+    return PressureSpec(args["logger_id"]["options"], args["dma_id"]["options"], span("pressure_m"), span("flow_ls"))
 
 
 def closed_gaps(buckets: list[datetime], min_gap: timedelta) -> list[tuple[datetime, datetime]]:
@@ -147,12 +149,16 @@ def meter_rows(meters, ends: list[datetime]):
     minutes = METER_INTERVAL_S // 60
     for end in ends:
         for r in readings(meters, end, minutes):
-            yield (end, r["meter_id"], r["dma_id"], r["litres"], r["flow_lpm"],
-                   r["battery_pct"], r["is_synthetic"])
+            yield (end, r["meter_id"], r["dma_id"], r["litres"], r["flow_lpm"], r["battery_pct"], r["is_synthetic"])
 
 
-def pressure_rows(spec: PressureSpec, start: datetime, end: datetime,
-                  every_s: float = PRESSURE_EVERY_S, rng: random.Random | None = None):
+def pressure_rows(
+    spec: PressureSpec,
+    start: datetime,
+    end: datetime,
+    every_s: float = PRESSURE_EVERY_S,
+    rng: random.Random | None = None,
+):
     """Same shape as Datagen's: a random logger and a random DMA, drawn apart from
     each other, at a random wait around the live rate. Pressure carries no daily
     pattern because the live feed has none, so a filled hour matches a live one."""
@@ -162,20 +168,26 @@ def pressure_rows(spec: PressureSpec, start: datetime, end: datetime,
         when += timedelta(seconds=rng.uniform(0, 2 * every_s))
         if when >= end:
             return
-        yield (when, rng.choice(spec.loggers), rng.choice(spec.dmas),
-               rng.uniform(*spec.pressure_m), rng.uniform(*spec.flow_ls), True)
+        yield (
+            when,
+            rng.choice(spec.loggers),
+            rng.choice(spec.dmas),
+            rng.uniform(*spec.pressure_m),
+            rng.uniform(*spec.flow_ls),
+            True,
+        )
 
 
 def recent_buckets(cur, table: str, since: datetime) -> list[datetime]:
     # One-minute buckets because the rows of one meter run land over a moment,
     # and they must count as one point in time.
-    cur.execute(f"SELECT DISTINCT time_bucket('1 minute', ts) AS t FROM twin.{table} "
-                "WHERE ts >= %s ORDER BY t", (since,))
+    cur.execute(
+        f"SELECT DISTINCT time_bucket('1 minute', ts) AS t FROM twin.{table} " "WHERE ts >= %s ORDER BY t", (since,)
+    )
     return [row[0] for row in cur.fetchall()]
 
 
-def write_fill(conn, stream: str, columns: str, rows, gap: tuple[datetime, datetime],
-               method: str) -> int:
+def write_fill(conn, stream: str, columns: str, rows, gap: tuple[datetime, datetime], method: str) -> int:
     """One gap, one transaction: the rows, their log entry and the balance they
     change land together, so a failure leaves the gap there to be found again."""
     count = 0
@@ -185,12 +197,18 @@ def write_fill(conn, stream: str, columns: str, rows, gap: tuple[datetime, datet
                 copy.write_row(row)
                 count += 1
         if count:
-            cur.execute("INSERT INTO twin.backfill_log (stream, gap_start, gap_end, row_count, method) "
-                        "VALUES (%s, %s, %s, %s, %s)", (stream, gap[0], gap[1], count, method))
-            cur.execute(RECOMPUTE_BALANCE, {
-                "lo": floor_to(gap[0], BALANCE_WINDOW_S),
-                "hi": floor_to(gap[1], BALANCE_WINDOW_S) + timedelta(seconds=BALANCE_WINDOW_S),
-            })
+            cur.execute(
+                "INSERT INTO twin.backfill_log (stream, gap_start, gap_end, row_count, method) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (stream, gap[0], gap[1], count, method),
+            )
+            cur.execute(
+                RECOMPUTE_BALANCE,
+                {
+                    "lo": floor_to(gap[0], BALANCE_WINDOW_S),
+                    "hi": floor_to(gap[1], BALANCE_WINDOW_S) + timedelta(seconds=BALANCE_WINDOW_S),
+                },
+            )
     conn.commit()
     if count:
         log.info("%s: filled %s to %s with %s rows", stream, gap[0].isoformat(), gap[1].isoformat(), count)
@@ -202,15 +220,21 @@ def fill_meters(conn, gaps) -> int:
         return 0
     with conn.cursor() as cur:
         # Today's registry, because a gap can span a re-seed and the old ids are gone.
-        cur.execute("SELECT meter_id, dma_id, coalesce(meter_type, 'residential') "
-                    "FROM ref.water_meter ORDER BY meter_id")
+        cur.execute(
+            "SELECT meter_id, dma_id, coalesce(meter_type, 'residential') " "FROM ref.water_meter ORDER BY meter_id"
+        )
         meters = cur.fetchall()
     total = 0
     for gap in gaps:
         ends = missing_interval_ends(gap[0], gap[1], METER_INTERVAL_S)
-        total += write_fill(conn, "meter_reading",
-                            "ts, meter_id, dma_id, litres, flow_lpm, battery_pct, is_synthetic",
-                            meter_rows(meters, ends), gap, METER_METHOD)
+        total += write_fill(
+            conn,
+            "meter_reading",
+            "ts, meter_id, dma_id, litres, flow_lpm, battery_pct, is_synthetic",
+            meter_rows(meters, ends),
+            gap,
+            METER_METHOD,
+        )
     return total
 
 
@@ -219,9 +243,14 @@ def fill_pressure(conn, gaps, spec: PressureSpec) -> int:
     for gap in gaps:
         # The start is a one-minute bucket, so its rows run up to a minute past it.
         start = gap[0] + timedelta(minutes=1)
-        total += write_fill(conn, "pressure_reading",
-                            "ts, logger_id, dma_id, pressure_m, flow_ls, is_synthetic",
-                            pressure_rows(spec, start, gap[1]), gap, PRESSURE_METHOD)
+        total += write_fill(
+            conn,
+            "pressure_reading",
+            "ts, logger_id, dma_id, pressure_m, flow_ls, is_synthetic",
+            pressure_rows(spec, start, gap[1]),
+            gap,
+            PRESSURE_METHOD,
+        )
     return total
 
 

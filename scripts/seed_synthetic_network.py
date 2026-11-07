@@ -58,13 +58,17 @@ def load_modelled_pipes(conn) -> None:
             with cur.copy("COPY modelled_pipe (pipe_id) FROM STDIN") as copy:
                 for pipe_id in selected:
                     copy.write_row((pipe_id,))
-            print(f"seeding on the {len(selected)} real pipes the model keeps "
-                  f"(SIM_MAX_PIPES={MAX_PIPES}); {synthetic} synthetic links in the model "
-                  f"carry no meters")
+            print(
+                f"seeding on the {len(selected)} real pipes the model keeps "
+                f"(SIM_MAX_PIPES={MAX_PIPES}); {synthetic} synthetic links in the model "
+                f"carry no meters"
+            )
         else:
             cur.execute("INSERT INTO modelled_pipe SELECT pipe_id FROM asset.pipe")
-            print("! no supplied network to model (no reservoir in reach, or topology not built);"
-                  " seeding on every pipe, so DMAs will get no residuals")
+            print(
+                "! no supplied network to model (no reservoir in reach, or topology not built);"
+                " seeding on every pipe, so DMAs will get no residuals"
+            )
     conn.commit()
 
 
@@ -173,24 +177,33 @@ def emit_schemas(dma_ids: list[str]) -> None:
     # reports every meter with its own DMA and a typical daily pattern, where
     # Datagen drew meter and DMA independently from a sample of 200.
 
-    write_schema("pressure_reading.avsc", {
-        "type": "record",
-        "name": "PressureReading",
-        "namespace": f"{NAMESPACE}.water",
-        "fields": [
-            {"name": "logger_id", "type": {"type": "string",
-                ARG_PROPERTIES: {"options": [f"{d}-P1" for d in dma_ids] +
-                                              [f"{d}-P2" for d in dma_ids]}}},
-            {"name": "dma_id", "type": {"type": "string",
-                ARG_PROPERTIES: {"options": dma_ids}}},
-            {"name": "pressure_m", "type": {"type": "double",
-                ARG_PROPERTIES: {"range": {"min": 18.0, "max": 62.0}}}},
-            {"name": "flow_ls", "type": {"type": "double",
-                ARG_PROPERTIES: {"range": {"min": 0.5, "max": 85.0}}}},
-            {"name": "event_ts", "type": {"type": "long",
-                ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 300000}}}},
-        ],
-    })
+    write_schema(
+        "pressure_reading.avsc",
+        {
+            "type": "record",
+            "name": "PressureReading",
+            "namespace": f"{NAMESPACE}.water",
+            "fields": [
+                {
+                    "name": "logger_id",
+                    "type": {
+                        "type": "string",
+                        ARG_PROPERTIES: {"options": [f"{d}-P1" for d in dma_ids] + [f"{d}-P2" for d in dma_ids]},
+                    },
+                },
+                {"name": "dma_id", "type": {"type": "string", ARG_PROPERTIES: {"options": dma_ids}}},
+                {
+                    "name": "pressure_m",
+                    "type": {"type": "double", ARG_PROPERTIES: {"range": {"min": 18.0, "max": 62.0}}},
+                },
+                {"name": "flow_ls", "type": {"type": "double", ARG_PROPERTIES: {"range": {"min": 0.5, "max": 85.0}}}},
+                {
+                    "name": "event_ts",
+                    "type": {"type": "long", ARG_PROPERTIES: {"iteration": {"start": 1767225600000, "step": 300000}}},
+                },
+            ],
+        },
+    )
 
 
 def main() -> int:

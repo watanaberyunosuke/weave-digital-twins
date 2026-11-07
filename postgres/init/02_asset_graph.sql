@@ -15,52 +15,52 @@ CREATE SCHEMA IF NOT EXISTS ref;
 -- properties are kept as JSONB rather than forced into a fixed schema.
 
 CREATE TABLE asset.gis_raw (
-    layer        TEXT NOT NULL,
-    source_fid   TEXT NOT NULL,
-    props        JSONB,
-    geom         GEOMETRY(Geometry, 4326),
-    loaded_at    TIMESTAMPTZ DEFAULT now(),
+    layer      TEXT        NOT NULL,
+    source_fid TEXT        NOT NULL,
+    props      JSONB,
+    geom       GEOMETRY (GEOMETRY, 4326),
+    loaded_at  TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (layer, source_fid)
 );
-CREATE INDEX ON asset.gis_raw USING GIST (geom);
+CREATE INDEX ON asset.gis_raw USING gist (geom);
 CREATE INDEX ON asset.gis_raw (layer);
 
 -- Conformed pipe network. Edges of the graph.
 CREATE TABLE asset.pipe (
-    pipe_id       TEXT PRIMARY KEY,
-    layer         TEXT,                 -- which GIS layer it came from
-    owner         TEXT,                 -- asset owner, per the source layer
-    asset_name    TEXT,
-    diameter_mm   NUMERIC,
-    material      TEXT,
-    length_m      NUMERIC,
-    geom          GEOMETRY(LineString, 4326) NOT NULL,
-    source        TEXT,                 -- region.source_id from the region config
-    start_node    BIGINT,               -- populated by build_topology()
-    end_node      BIGINT
+    pipe_id     TEXT                        PRIMARY KEY,
+    layer       TEXT,                 -- which GIS layer it came from
+    owner       TEXT,                 -- asset owner, per the source layer
+    asset_name  TEXT,
+    diameter_mm NUMERIC,
+    material    TEXT,
+    length_m    NUMERIC,
+    geom        GEOMETRY (LINESTRING, 4326) NOT NULL,
+    source      TEXT,                 -- region.source_id from the region config
+    start_node  BIGINT,               -- populated by build_topology()
+    end_node    BIGINT
 );
-CREATE INDEX ON asset.pipe USING GIST (geom);
+CREATE INDEX ON asset.pipe USING gist (geom);
 
 -- Nodes of the graph, derived from pipe endpoints by build_topology().
 CREATE TABLE asset.node (
-    node_id    BIGINT PRIMARY KEY,
-    geom       GEOMETRY(Point, 4326) NOT NULL,
-    node_type  TEXT DEFAULT 'junction', -- junction | reservoir | tank | source
+    node_id     BIGINT                 PRIMARY KEY,
+    geom        GEOMETRY (POINT, 4326) NOT NULL,
+    node_type   TEXT                   DEFAULT 'junction', -- junction | reservoir | tank | source
     elevation_m NUMERIC
 );
-CREATE INDEX ON asset.node USING GIST (geom);
+CREATE INDEX ON asset.node USING gist (geom);
 
 -- Point assets: reservoirs, storage dams, pump sets.
 CREATE TABLE asset.facility (
-    facility_id   TEXT PRIMARY KEY,
-    facility_type TEXT NOT NULL,        -- service_reservoir | storage_dam | pump_set
+    facility_id   TEXT                   PRIMARY KEY,
+    facility_type TEXT                   NOT NULL,        -- service_reservoir | storage_dam | pump_set
     name          TEXT,
     capacity_ml   NUMERIC,
     props         JSONB,
-    geom          GEOMETRY(Point, 4326) NOT NULL,
+    geom          GEOMETRY (POINT, 4326) NOT NULL,
     source        TEXT
 );
-CREATE INDEX ON asset.facility USING GIST (geom);
+CREATE INDEX ON asset.facility USING gist (geom);
 CREATE INDEX ON asset.facility (facility_type);
 
 -- ==================================================== WATER: synthetic DMAs
@@ -69,73 +69,73 @@ CREATE INDEX ON asset.facility (facility_type);
 -- rather than floating at random coordinates.
 
 CREATE TABLE asset.dma (
-    dma_id       TEXT PRIMARY KEY,
-    name         TEXT,
-    pipe_count   INTEGER,
+    dma_id         TEXT    PRIMARY KEY,
+    name           TEXT,
+    pipe_count     INTEGER,
     total_length_m NUMERIC,
-    geom         GEOMETRY(Polygon, 4326),
-    centroid     GEOMETRY(Point, 4326),
-    synthetic    BOOLEAN DEFAULT true
+    geom           GEOMETRY (POLYGON, 4326),
+    centroid       GEOMETRY (POINT, 4326),
+    synthetic      BOOLEAN DEFAULT true
 );
-CREATE INDEX ON asset.dma USING GIST (geom);
+CREATE INDEX ON asset.dma USING gist (geom);
 
 -- Synthetic meter and logger registry, seeded from real DMAs.
 CREATE TABLE ref.water_meter (
-    meter_id      TEXT PRIMARY KEY,
-    dma_id        TEXT REFERENCES asset.dma(dma_id),
-    meter_type    TEXT,                 -- residential | commercial | bulk
-    nearest_pipe  TEXT REFERENCES asset.pipe(pipe_id),
-    geom          GEOMETRY(Point, 4326),
-    synthetic     BOOLEAN DEFAULT true
+    meter_id     TEXT    PRIMARY KEY,
+    dma_id       TEXT    REFERENCES asset.dma (dma_id),
+    meter_type   TEXT,                 -- residential | commercial | bulk
+    nearest_pipe TEXT    REFERENCES asset.pipe (pipe_id),
+    geom         GEOMETRY (POINT, 4326),
+    synthetic    BOOLEAN DEFAULT true
 );
-CREATE INDEX ON ref.water_meter USING GIST (geom);
+CREATE INDEX ON ref.water_meter USING gist (geom);
 CREATE INDEX ON ref.water_meter (dma_id);
 
 CREATE TABLE ref.pressure_logger (
-    logger_id     TEXT PRIMARY KEY,
-    dma_id        TEXT REFERENCES asset.dma(dma_id),
-    node_id       BIGINT,
-    geom          GEOMETRY(Point, 4326),
-    synthetic     BOOLEAN DEFAULT true
+    logger_id TEXT    PRIMARY KEY,
+    dma_id    TEXT    REFERENCES asset.dma (dma_id),
+    node_id   BIGINT,
+    geom      GEOMETRY (POINT, 4326),
+    synthetic BOOLEAN DEFAULT true
 );
-CREATE INDEX ON ref.pressure_logger USING GIST (geom);
+CREATE INDEX ON ref.pressure_logger USING gist (geom);
 
 -- ====================================================== WATER: real gauges
 -- Public gauge network. Real identifiers, real locations.
 CREATE TABLE ref.hydrometry_site (
-    site_id      TEXT PRIMARY KEY,
-    site_name    TEXT,
-    provider     TEXT,                  -- HYDRO_PROVIDER of the feeding poller
-    variable     TEXT,                  -- flow | level | rainfall | quality
-    unit         TEXT,
-    geom         GEOMETRY(Point, 4326),
-    props        JSONB
+    site_id   TEXT PRIMARY KEY,
+    site_name TEXT,
+    provider  TEXT,                  -- HYDRO_PROVIDER of the feeding poller
+    variable  TEXT,                  -- flow | level | rainfall | quality
+    unit      TEXT,
+    geom      GEOMETRY (POINT, 4326),
+    props     JSONB
 );
-CREATE INDEX ON ref.hydrometry_site USING GIST (geom);
+CREATE INDEX ON ref.hydrometry_site USING gist (geom);
 
 -- Real reservoir storage gauges (ingest/storage_poller.py). facility_id is the
 -- nearest supply asset within STORAGE_MATCH_M, a best guess kept with its
 -- distance; a gauge with no asset nearby still stands on its own point.
 CREATE TABLE ref.storage_site (
-    station_no   TEXT PRIMARY KEY,
+    station_no   TEXT    PRIMARY KEY,
     storage_name TEXT,
     facility_id  TEXT,
     match_m      DOUBLE PRECISION,
     source       TEXT,
-    geom         GEOMETRY(Point, 4326),
+    geom         GEOMETRY (POINT, 4326),
     synthetic    BOOLEAN DEFAULT false
 );
-CREATE INDEX storage_site_geom_idx ON ref.storage_site USING GIST (geom);
+CREATE INDEX storage_site_geom_idx ON ref.storage_site USING gist (geom);
 
 -- ============================================================= TRANSPORT
 CREATE TABLE asset.transit_stop (
-    stop_id    TEXT PRIMARY KEY,
-    stop_name  TEXT,
-    mode       TEXT,
-    geom       GEOMETRY(Point, 4326),
-    source     TEXT DEFAULT 'gtfs'
+    stop_id   TEXT PRIMARY KEY,
+    stop_name TEXT,
+    mode      TEXT,
+    geom      GEOMETRY (POINT, 4326),
+    source    TEXT DEFAULT 'gtfs'
 );
-CREATE INDEX ON asset.transit_stop USING GIST (geom);
+CREATE INDEX ON asset.transit_stop USING gist (geom);
 
 -- ============================================== derive graph from pipe geom
 -- Snaps pipe endpoints onto shared nodes: an endpoint within `tolerance`

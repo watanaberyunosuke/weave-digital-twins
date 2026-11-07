@@ -41,16 +41,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-import access
-import demo
 import httpx
 import psycopg
 import yaml
-from psycopg.rows import dict_row
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from psycopg.rows import dict_row
 from pydantic import BaseModel
+
+import access
+import demo
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 CONNECT_URL = os.environ.get("CONNECT_URL", "http://connect:8083")
@@ -59,8 +60,7 @@ KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "broker:29092")
 WEAVE_DIR = Path(os.environ.get("WEAVE_DIR", "/weave"))
 INP_PATH = Path(os.environ.get("INP_PATH", "/sim/network.inp"))
 REGION_CONFIG = os.environ.get("GIS_REGION_CONFIG", "")
-ALLOWED_HOSTS = {h.strip() for h in
-                 os.environ.get("CONSOLE_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")}
+ALLOWED_HOSTS = {h.strip() for h in os.environ.get("CONSOLE_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")}
 STATIC = Path(__file__).parent / "static"
 
 MODE = os.environ.get("CONSOLE_MODE", "admin")
@@ -93,8 +93,7 @@ COOKIE_SECURE = os.environ.get("CONSOLE_COOKIE_SECURE", "1") != "0"
 RELAY_URL = os.environ.get("CONSOLE_RELAY_URL", "").rstrip("/")
 RELAY_TOKEN = os.environ.get("CONSOLE_RELAY_TOKEN", "")
 RELAY_ADMIN_TOKEN = os.environ.get("CONSOLE_RELAY_ADMIN_TOKEN", "")
-for _name, _tok in (("CONSOLE_RELAY_TOKEN", RELAY_TOKEN),
-                    ("CONSOLE_RELAY_ADMIN_TOKEN", RELAY_ADMIN_TOKEN)):
+for _name, _tok in (("CONSOLE_RELAY_TOKEN", RELAY_TOKEN), ("CONSOLE_RELAY_ADMIN_TOKEN", RELAY_ADMIN_TOKEN)):
     if _tok and len(_tok) < 32:
         raise SystemExit(f"{_name} must be at least 32 characters")
 if RELAY_TOKEN and RELAY_TOKEN == RELAY_ADMIN_TOKEN:
@@ -103,12 +102,12 @@ NOT_FOUND, NO_SUCH_JOB = "not found", "no such job"
 # Job ids are uuid4 hex prefixes; anything else is refused before it can
 # become part of a relayed path.
 JOB_ID = re.compile(r"[0-9a-f]{1,32}")
-ADMIN_ENABLED = bool(ADMIN_HASH) and (
-    UNIFIED or (PUBLIC and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)))
+ADMIN_ENABLED = bool(ADMIN_HASH) and (UNIFIED or (PUBLIC and bool(RELAY_URL) and bool(RELAY_ADMIN_TOKEN)))
 
 # The three topics create-topics.sh makes; a step is done when all exist.
 TOPICS = [
-    "water.hydrometry.raw.v1", "water.meter-readings.raw.v1",
+    "water.hydrometry.raw.v1",
+    "water.meter-readings.raw.v1",
     "water.pressure-readings.raw.v1",
 ]
 
@@ -148,8 +147,7 @@ async def guard(request: Request, call_next):
 
 
 def _session(request: Request) -> dict | None:
-    return access.unsign(request.cookies.get(access.SESSION_COOKIE, ""), SESSION_SECRET) \
-        if LOGINS else None
+    return access.unsign(request.cookies.get(access.SESSION_COOKIE, ""), SESSION_SECRET) if LOGINS else None
 
 
 def role(request: Request) -> str:
@@ -204,8 +202,7 @@ def relay_admin_auth(request: Request):
 
 def relay_any_auth(request: Request):
     tok = _bearer(request)
-    if LOGINS or not (access.token_matches(tok, RELAY_TOKEN)
-                      or access.token_matches(tok, RELAY_ADMIN_TOKEN)):
+    if LOGINS or not (access.token_matches(tok, RELAY_TOKEN) or access.token_matches(tok, RELAY_ADMIN_TOKEN)):
         raise HTTPException(404, NOT_FOUND)
 
 
@@ -288,16 +285,19 @@ def probe_db() -> dict:
                (SELECT count(*) FROM ref.hydrometry_site)                       AS hydrometry_sites,
                (SELECT max(ts) FROM twin.sim_residual)                          AS last_residual_ts
     """)[0]
-    row["dma_status"] = {r["status"]: r["n"] for r in query(
-        "SELECT COALESCE(status, 'UNKNOWN') AS status, count(*) AS n "
-        "FROM twin.dma_latest GROUP BY 1")}
+    row["dma_status"] = {
+        r["status"]: r["n"]
+        for r in query("SELECT COALESCE(status, 'UNKNOWN') AS status, count(*) AS n " "FROM twin.dma_latest GROUP BY 1")
+    }
     return row
 
 
 def probe_topics() -> list[str]:
     from kafka import KafkaConsumer
-    consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP,
-                             request_timeout_ms=4000, api_version_auto_timeout_ms=3000)
+
+    consumer = KafkaConsumer(
+        bootstrap_servers=KAFKA_BOOTSTRAP, request_timeout_ms=4000, api_version_auto_timeout_ms=3000
+    )
     try:
         return sorted(consumer.topics())
     finally:
@@ -311,17 +311,19 @@ def probe_connectors() -> list[dict]:
     for name, body in r.json().items():
         st = body.get("status", {})
         tasks = st.get("tasks", [])
-        out.append({"name": name,
-                    "state": st.get("connector", {}).get("state"),
-                    "tasks": [t.get("state") for t in tasks]})
+        out.append(
+            {"name": name, "state": st.get("connector", {}).get("state"), "tasks": [t.get("state") for t in tasks]}
+        )
     return sorted(out, key=lambda c: c["name"])
 
 
 def probe_flink() -> list[dict]:
     r = httpx.get(f"{FLINK_URL}/jobs/overview", timeout=3)
     r.raise_for_status()
-    return [{"id": j["jid"], "name": j["name"], "state": j["state"],
-             "start": j.get("start-time")} for j in r.json().get("jobs", [])]
+    return [
+        {"id": j["jid"], "name": j["name"], "state": j["state"], "start": j.get("start-time")}
+        for j in r.json().get("jobs", [])
+    ]
 
 
 def probe_containers() -> list[dict]:
@@ -331,8 +333,9 @@ def probe_containers() -> list[dict]:
         args[3:3] = ["--filter", f"label=com.docker.compose.project={project}"]
     out = subprocess.run(args, capture_output=True, text=True, timeout=5, check=True).stdout
     rows = [json.loads(line) for line in out.splitlines() if line.strip()]
-    return sorted(({"name": r["Names"], "state": r["State"], "status": r["Status"]}
-                   for r in rows), key=lambda c: c["name"])
+    return sorted(
+        ({"name": r["Names"], "state": r["State"], "status": r["Status"]} for r in rows), key=lambda c: c["name"]
+    )
 
 
 _project_cache: dict[str, str | None] = {}
@@ -343,10 +346,22 @@ def own_compose_project() -> str | None:
     # called on this machine.
     if "p" not in _project_cache:
         try:
-            _project_cache["p"] = subprocess.run(
-                ["docker", "inspect", os.environ.get("HOSTNAME", ""), "--format",
-                 '{{index .Config.Labels "com.docker.compose.project"}}'],
-                capture_output=True, text=True, timeout=5, check=True).stdout.strip() or None
+            _project_cache["p"] = (
+                subprocess.run(
+                    [
+                        "docker",
+                        "inspect",
+                        os.environ.get("HOSTNAME", ""),
+                        "--format",
+                        '{{index .Config.Labels "com.docker.compose.project"}}',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=True,
+                ).stdout.strip()
+                or None
+            )
         except Exception:  # noqa: BLE001 — fall back to listing everything
             _project_cache["p"] = None
     return _project_cache["p"]
@@ -356,8 +371,7 @@ def probe_model() -> dict:
     if not INP_PATH.exists():
         return {"built": False}
     st = INP_PATH.stat()
-    return {"built": True, "size": st.st_size,
-            "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()}
+    return {"built": True, "size": st.st_size, "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()}
 
 
 def probe_schemas() -> list[str]:
@@ -389,8 +403,7 @@ async def shared_status():
         body = await public_status()
     else:
         names = ["db", "topics", "connectors", "flink", "containers", "model", "schemas"]
-        fns = [probe_db, probe_topics, probe_connectors, probe_flink,
-               probe_containers, probe_model, probe_schemas]
+        fns = [probe_db, probe_topics, probe_connectors, probe_flink, probe_containers, probe_model, probe_schemas]
         results = await asyncio.gather(*(asyncio.to_thread(safe, f) for f in fns))
         body = dict(zip(names, results))
         body["expected_topics"] = TOPICS
@@ -414,11 +427,19 @@ async def public_status() -> dict:
             r.raise_for_status()
             return r.json()
         except (HTTPException, httpx.HTTPError, ValueError) as exc:
-            print(f"! relay status failed: {exc}")   # falls back to local probes
+            print(f"! relay status failed: {exc}")  # falls back to local probes
     gone = {"ok": False, "error": "not visible from the public console", "value": None}
-    return {"db": await asyncio.to_thread(safe, probe_db), "topics": gone,
-            "connectors": gone, "flink": gone, "containers": PUBLIC_CONTAINERS,
-            "model": gone, "schemas": gone, "expected_topics": TOPICS, "job": None}
+    return {
+        "db": await asyncio.to_thread(safe, probe_db),
+        "topics": gone,
+        "connectors": gone,
+        "flink": gone,
+        "containers": PUBLIC_CONTAINERS,
+        "model": gone,
+        "schemas": gone,
+        "expected_topics": TOPICS,
+        "job": None,
+    }
 
 
 @app.get("/api/config")
@@ -431,7 +452,7 @@ def config(request: Request):
         "layers": region_layers(),
         "basemaps": providers,
         "basemap_default": default if default in ids else "none",
-        "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),   # auto | dark | light
+        "tile_style": os.environ.get("CONSOLE_TILE_STYLE", "auto"),  # auto | dark | light
         "mode": MODE,
         # The admin tools are the operator's, so the public page shows their
         # links only to the admin login. The GIS connection details stay on
@@ -445,16 +466,20 @@ def admin_links() -> dict:
     return {
         "kibana_url": os.environ.get("KIBANA_PUBLIC_URL", "http://localhost:5601"),
         "flink_url": os.environ.get("FLINK_PUBLIC_URL", "http://localhost:9081"),
-        "control_center_url": os.environ.get("CONTROL_CENTER_PUBLIC_URL",
-                                             "http://localhost:9021"),
+        "control_center_url": os.environ.get("CONTROL_CENTER_PUBLIC_URL", "http://localhost:9021"),
     }
 
 
 @app.get("/api/session")
 def get_session(request: Request):
-    return {"mode": MODE, "role": role(request), "demo_enabled": DEMO_ENABLED,
-            "demo_password": DEMO_PASSWORD if DEMO_ENABLED else None,
-            "admin_enabled": ADMIN_ENABLED, "admin_code": ADMIN_ENABLED and bool(ADMIN_TOTP)}
+    return {
+        "mode": MODE,
+        "role": role(request),
+        "demo_enabled": DEMO_ENABLED,
+        "demo_password": DEMO_PASSWORD if DEMO_ENABLED else None,
+        "admin_enabled": ADMIN_ENABLED,
+        "admin_code": ADMIN_ENABLED and bool(ADMIN_TOTP),
+    }
 
 
 class LoginRequest(BaseModel):
@@ -469,7 +494,8 @@ def check_admin_login(req: LoginRequest, key: str) -> None:
     if ADMIN_THROTTLE.blocked(key):
         raise HTTPException(429, "too many attempts; try again later")
     ok = access.verify_password(req.password, ADMIN_HASH) and (
-        not ADMIN_TOTP or access.verify_totp(req.code, ADMIN_TOTP))
+        not ADMIN_TOTP or access.verify_totp(req.code, ADMIN_TOTP)
+    )
     if not ok:
         ADMIN_THROTTLE.fail(key)
         raise HTTPException(401, "wrong password or code")
@@ -496,8 +522,14 @@ def login(req: LoginRequest, request: Request):
         SIM_JOBS.pop(old, None)
     _sid, cookie = access.new_session(SESSION_SECRET, role=who)
     resp = JSONResponse({"role": who})
-    resp.set_cookie(access.SESSION_COOKIE, cookie, max_age=access.SESSION_TTL_S[who],
-                    httponly=True, secure=COOKIE_SECURE, samesite="strict")
+    resp.set_cookie(
+        access.SESSION_COOKIE,
+        cookie,
+        max_age=access.SESSION_TTL_S[who],
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="strict",
+    )
     return resp
 
 
@@ -518,28 +550,61 @@ def logout(request: Request):
 # tiles never are. Google tiles are never altered, as its terms require.
 OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 BUILTIN_BASEMAPS = [
-    {"id": "osm", "label": "OpenStreetMap", "kind": "light", "max_zoom": 19,
-     "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "attribution": OSM_CREDIT},
-    {"id": "carto-light", "label": "CARTO Positron", "kind": "light", "max_zoom": 20,
-     "dark_variant": "carto-dark", "subdomains": "abcd",
-     "url": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-     "attribution": f'{OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>'},
-    {"id": "carto-dark", "label": "CARTO Dark Matter", "kind": "dark", "max_zoom": 20,
-     "subdomains": "abcd",
-     "url": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-     "attribution": f'{OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>'},
-    {"id": "esri-imagery", "label": "Esri World Imagery", "kind": "imagery", "max_zoom": 19,
-     "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-     "attribution": "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, "
-                    "and the GIS User Community"},
-    {"id": "esri-topo", "label": "Esri World Topographic", "kind": "light", "max_zoom": 19,
-     "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
-     "attribution": "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, FAO, NOAA, USGS, "
-                    f"{OSM_CREDIT}, and the GIS User Community"},
-    {"id": "opentopomap", "label": "OpenTopoMap", "kind": "light", "max_zoom": 17,
-     "subdomains": "abc", "url": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-     "attribution": f'{OSM_CREDIT}, SRTM | Style: &copy; '
-                    '<a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)'},
+    {
+        "id": "osm",
+        "label": "OpenStreetMap",
+        "kind": "light",
+        "max_zoom": 19,
+        "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "attribution": OSM_CREDIT,
+    },
+    {
+        "id": "carto-light",
+        "label": "CARTO Positron",
+        "kind": "light",
+        "max_zoom": 20,
+        "dark_variant": "carto-dark",
+        "subdomains": "abcd",
+        "url": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        "attribution": f'{OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    },
+    {
+        "id": "carto-dark",
+        "label": "CARTO Dark Matter",
+        "kind": "dark",
+        "max_zoom": 20,
+        "subdomains": "abcd",
+        "url": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        "attribution": f'{OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    },
+    {
+        "id": "esri-imagery",
+        "label": "Esri World Imagery",
+        "kind": "imagery",
+        "max_zoom": 19,
+        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "attribution": "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, "
+        "and the GIS User Community",
+    },
+    {
+        "id": "esri-topo",
+        "label": "Esri World Topographic",
+        "kind": "light",
+        "max_zoom": 19,
+        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        "attribution": "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, FAO, NOAA, USGS, "
+        f"{OSM_CREDIT}, and the GIS User Community",
+    },
+    {
+        "id": "opentopomap",
+        "label": "OpenTopoMap",
+        "kind": "light",
+        "max_zoom": 17,
+        "subdomains": "abc",
+        "url": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        "attribution": f"{OSM_CREDIT}, SRTM | Style: &copy; "
+        '<a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+    },
 ]
 
 GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
@@ -559,10 +624,12 @@ def google_session(map_type: str) -> str | None:
     if cached and cached["expiry"] - time.time() > 3600:
         return cached["session"]
     try:
-        r = httpx.post("https://tile.googleapis.com/v1/createSession",
-                       params={"key": GOOGLE_KEY}, timeout=5,
-                       json={"mapType": map_type, "region": region,
-                             "language": os.environ.get("GOOGLE_MAPS_LANGUAGE", "en")})
+        r = httpx.post(
+            "https://tile.googleapis.com/v1/createSession",
+            params={"key": GOOGLE_KEY},
+            timeout=5,
+            json={"mapType": map_type, "region": region, "language": os.environ.get("GOOGLE_MAPS_LANGUAGE", "en")},
+        )
         r.raise_for_status()
         body = r.json()
         _google_sessions[map_type] = {"session": body["session"], "expiry": int(body["expiry"])}
@@ -576,28 +643,41 @@ def basemaps() -> list[dict]:
     out = [{"id": "none", "label": "None (no tile requests)", "kind": "none"}] + BUILTIN_BASEMAPS
     custom = os.environ.get("CONSOLE_TILE_URL", "")
     if custom:
-        out.append({"id": "custom", "label": "Custom (CONSOLE_TILE_URL)", "kind": "light",
-                    "max_zoom": 19, "url": custom,
-                    "attribution": os.environ.get("CONSOLE_TILE_ATTRIBUTION", "")})
+        out.append(
+            {
+                "id": "custom",
+                "label": "Custom (CONSOLE_TILE_URL)",
+                "kind": "light",
+                "max_zoom": 19,
+                "url": custom,
+                "attribution": os.environ.get("CONSOLE_TILE_ATTRIBUTION", ""),
+            }
+        )
     # The tile URL carries the API key to the browser, which on a public page
     # means to anyone; offer Google there only when deliberately allowed.
     if LOGINS and os.environ.get("CONSOLE_PUBLIC_GOOGLE") != "1":
         return out
-    for map_type, label, kind in (("roadmap", "Google Maps", "fixed"),
-                                  ("satellite", "Google Satellite", "imagery")):
+    for map_type, label, kind in (("roadmap", "Google Maps", "fixed"), ("satellite", "Google Satellite", "imagery")):
         session = google_session(map_type)
         if session:
-            out.append({"id": f"google-{map_type}", "label": label, "kind": kind, "max_zoom": 22,
-                        "google": True, "session": session,
-                        "url": f"https://tile.googleapis.com/v1/2dtiles/{{z}}/{{x}}/{{y}}"
-                               f"?session={session}&key={GOOGLE_KEY}",
-                        "attribution": "Google"})
+            out.append(
+                {
+                    "id": f"google-{map_type}",
+                    "label": label,
+                    "kind": kind,
+                    "max_zoom": 22,
+                    "google": True,
+                    "session": session,
+                    "url": f"https://tile.googleapis.com/v1/2dtiles/{{z}}/{{x}}/{{y}}"
+                    f"?session={session}&key={GOOGLE_KEY}",
+                    "attribution": "Google",
+                }
+            )
     return out
 
 
 @app.get("/api/basemaps/google-attribution")
-def google_attribution(map_id: str, zoom: int, north: float, south: float,
-                       east: float, west: float):
+def google_attribution(map_id: str, zoom: int, north: float, south: float, east: float, west: float):
     if LOGINS and os.environ.get("CONSOLE_PUBLIC_GOOGLE") != "1":
         raise HTTPException(404, "Google basemaps are not configured")
     # Google's terms require the copyright for the area in view, which only
@@ -605,9 +685,19 @@ def google_attribution(map_id: str, zoom: int, north: float, south: float,
     session = google_session(map_id.removeprefix("google-"))
     if not session:
         raise HTTPException(404, "Google basemaps are not configured")
-    r = httpx.get("https://tile.googleapis.com/tile/v1/viewport", timeout=5, params={
-        "session": session, "key": GOOGLE_KEY, "zoom": zoom,
-        "north": north, "south": south, "east": east, "west": west})
+    r = httpx.get(
+        "https://tile.googleapis.com/tile/v1/viewport",
+        timeout=5,
+        params={
+            "session": session,
+            "key": GOOGLE_KEY,
+            "zoom": zoom,
+            "north": north,
+            "south": south,
+            "east": east,
+            "west": west,
+        },
+    )
     if r.status_code != 200:
         raise HTTPException(502, "Google viewport lookup failed")
     return {"copyright": r.json().get("copyright", "")}
@@ -642,18 +732,18 @@ def gis_collections():
         r.raise_for_status()
     except Exception as exc:  # noqa: BLE001 — shown in the panel
         raise HTTPException(503, f"feature server: {str(exc).splitlines()[0]}") from exc
-    return [{"id": c["id"], "title": c.get("title") or c["id"],
-             "description": c.get("description", "")} for c in r.json().get("collections", [])]
+    return [
+        {"id": c["id"], "title": c.get("title") or c["id"], "description": c.get("description", "")}
+        for c in r.json().get("collections", [])
+    ]
 
 
 def _xml_attr(value: str) -> str:
-    return (value.replace("&", "&amp;").replace('"', "&quot;")
-                 .replace("<", "&lt;").replace(">", "&gt;"))
+    return value.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _download(body: str, filename: str, media: str = "application/xml") -> Response:
-    return Response(body, media_type=media,
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return Response(body, media_type=media, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/api/gis/qgis/postgis-connection.xml", dependencies=[Depends(admin_only)])
@@ -669,7 +759,9 @@ def qgis_postgis_connection():
         ' saveUsername="true" savePassword="true" authcfg=""'
         ' estimatedMetadata="false" geometryColumnsOnly="false" dontResolveType="false"'
         ' allowGeometrylessTables="false" publicOnly="false" projectsInDatabase="false"/>\n'
-        "</qgsPgConnections>\n", "weave-postgis.xml")
+        "</qgsPgConnections>\n",
+        "weave-postgis.xml",
+    )
 
 
 @app.get("/api/gis/qgis/ogcapi-connection.xml", dependencies=[Depends(admin_only)])
@@ -679,15 +771,16 @@ def qgis_ogcapi_connection():
     # the whole layer; one page as large as the server allows avoids that.
     url = _xml_attr(GIS["ogcapi_url"].rstrip("/") + "/")
     return _download(
-        "<!DOCTYPE connections>\n"
-        '<qgsWFSConnections version="1.0">\n'
+        "<!DOCTYPE connections>\n" '<qgsWFSConnections version="1.0">\n'
         # No credential attributes: the API is anonymous, QGIS reads a
         # missing attribute as empty, and an empty password="" reads to
         # secret scanners as a hardcoded password.
         f'  <wfs name="Weave twin (OGC API)" url="{url}" version="OGC_API_FEATURES"'
         ' ignoreAxisOrientation="0" invertAxisOrientation="0"'
         f' pagingenabled="enabled" pagesize="{OGCAPI_PAGE_SIZE}"/>\n'
-        "</qgsWFSConnections>\n", "weave-ogcapi.xml")
+        "</qgsWFSConnections>\n",
+        "weave-ogcapi.xml",
+    )
 
 
 def region_layers() -> list[str]:
@@ -724,8 +817,9 @@ def exclusions_built() -> bool:
 
 
 @app.get("/api/geo/pipes")
-def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
-              bbox: str | None = Query(None, pattern=r"^-?[\d.]+(,-?[\d.]+){3}$")):
+def geo_pipes(
+    limit: int = Query(5000, ge=1, le=50000), bbox: str | None = Query(None, pattern=r"^-?[\d.]+(,-?[\d.]+){3}$")
+):
     # Largest mains first, so a capped draw still shows the trunk network.
     # model is 'in', a reason code from asset.model_exclusion, or null before
     # the first build.
@@ -739,7 +833,8 @@ def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
         x1, y1, x2, y2 = (float(v) for v in bbox.split(","))
         where = "WHERE geom && ST_MakeEnvelope(%(x1)s, %(y1)s, %(x2)s, %(y2)s, 4326)"
         params.update(x1=x1, y1=y1, x2=x2, y2=y2)
-    return geojson(f"""
+    return geojson(
+        f"""
         SELECT json_build_object('type', 'Feature',
                'geometry', ST_AsGeoJSON(ST_Simplify(geom, 0.00002), 6)::json,
                'properties', json_build_object(
@@ -749,7 +844,9 @@ def geo_pipes(limit: int = Query(5000, ge=1, le=50000),
         FROM (SELECT * FROM asset.pipe {where}
               ORDER BY diameter_mm DESC NULLS LAST LIMIT %(limit)s) p
         {join}
-    """, params)
+    """,
+        params,
+    )
 
 
 @app.get("/api/geo/facilities")
@@ -853,15 +950,20 @@ def geo_storages():
 @app.get("/api/storage/{station_no}")
 def storage_detail(station_no: str, days: int = Query(90, ge=1, le=3650)):
     """One storage's daily volumes, oldest first."""
+
     def run():
         if not storage_loaded():
             raise HTTPException(404, f"no storage {station_no}")
-        series = query("""
+        series = query(
+            """
             SELECT ts, volume_ml, percent_full FROM twin.storage_level
             WHERE station_no = %(s)s AND ts > now() - make_interval(days => %(d)s)
             ORDER BY ts
-        """, {"s": station_no, "d": days})
+        """,
+            {"s": station_no, "d": days},
+        )
         return {"station_no": station_no, "days": days, "series": series}
+
     return db_or_503(run)
 
 
@@ -869,7 +971,8 @@ def storage_detail(station_no: str, days: int = Query(90, ge=1, le=3650)):
 def geo_meters(dma_id: str | None = None, limit: int = Query(20000, ge=1, le=200000)):
     # The whole registry by default, capped: a few thousand synthetic points
     # draw fine on a canvas, a utility-scale fleet would not.
-    return geojson("""
+    return geojson(
+        """
         SELECT feature FROM (
             SELECT json_build_object('type', 'Feature',
                    'geometry', ST_AsGeoJSON(geom, 6)::json,
@@ -887,7 +990,9 @@ def geo_meters(dma_id: str | None = None, limit: int = Query(20000, ge=1, le=200
             FROM ref.pressure_logger
             WHERE geom IS NOT NULL AND (%(d)s::text IS NULL OR dma_id = %(d)s)
         ) m LIMIT %(limit)s
-    """, {"d": dma_id, "limit": limit})
+    """,
+        {"d": dma_id, "limit": limit},
+    )
 
 
 # ----------------------------------------------------------------- telemetry
@@ -915,33 +1020,40 @@ def baseline_progress(dma_id: str) -> dict:
     r = RESIDUAL_RULES
     # run_sim.py creates the reset table on first use, so it can be missing.
     has_reset = scalar("SELECT to_regclass('twin.residual_baseline_reset') IS NOT NULL")
-    reset = """AND ts > coalesce((SELECT max(reset_at) FROM twin.residual_baseline_reset
-                                   WHERE dma_id IN (%(d)s, '*')), '-infinity')""" if has_reset else ""
-    n = scalar(f"""
+    reset = (
+        """AND ts > coalesce((SELECT max(reset_at) FROM twin.residual_baseline_reset
+                                   WHERE dma_id IN (%(d)s, '*')), '-infinity')"""
+        if has_reset
+        else ""
+    )
+    n = scalar(
+        f"""
         SELECT count(*) FROM twin.sim_residual
         WHERE dma_id = %(d)s AND variable = 'pressure' AND residual IS NOT NULL
           AND ts > now() - make_interval(secs => %(baseline_s)s)
           {reset}
           AND NOT (coalesce(flagged, false) AND ts > now() - make_interval(secs => %(relearn_s)s))
-    """, {"d": dma_id, "baseline_s": r["baseline_days"] * 86400,
-          "relearn_s": r["relearn_hours"] * 3600})
+    """,
+        {"d": dma_id, "baseline_s": r["baseline_days"] * 86400, "relearn_s": r["relearn_hours"] * 3600},
+    )
     # A DMA the model does not reach gets no residual at all, so it would stay
     # UNKNOWN for good; the page must not promise it a status in a few hours.
     # Every DMA scored in one solve shares that solve's ts.
-    last = query("""
+    last = query(
+        """
         SELECT EXISTS (SELECT 1 FROM twin.sim_residual) AS any_run,
                EXISTS (SELECT 1 FROM twin.sim_residual
                        WHERE dma_id = %(d)s AND ts = (SELECT max(ts) FROM twin.sim_residual)) AS in_last_run
-    """, {"d": dma_id})[0]
+    """,
+        {"d": dma_id},
+    )[0]
     return {"samples": n or 0, "any_run": last["any_run"], "in_last_run": last["in_last_run"], **r}
 
 
 DEVICES = {
     # kind: (registry, id column, readings, the reading columns to show)
-    "meter": ("ref.water_meter", "meter_id", "twin.meter_reading",
-              ["litres", "flow_lpm", "battery_pct"]),
-    "logger": ("ref.pressure_logger", "logger_id", "twin.pressure_reading",
-               ["pressure_m", "flow_ls"]),
+    "meter": ("ref.water_meter", "meter_id", "twin.meter_reading", ["litres", "flow_lpm", "battery_pct"]),
+    "logger": ("ref.pressure_logger", "logger_id", "twin.pressure_reading", ["pressure_m", "flow_ls"]),
 }
 
 
@@ -951,12 +1063,15 @@ def backfills(streams: list[str], hours: int) -> list[dict]:
     that service first runs."""
     if not scalar("SELECT to_regclass('twin.backfill_log') IS NOT NULL"):
         return []
-    return query("""
+    return query(
+        """
         SELECT stream, gap_start, gap_end, row_count, method
         FROM twin.backfill_log
         WHERE stream = ANY(%s) AND gap_end > now() - make_interval(hours => %s)
         ORDER BY gap_start
-    """, (streams, hours))
+    """,
+        (streams, hours),
+    )
 
 
 @app.get("/api/device/{kind}/{device_id}")
@@ -971,30 +1086,44 @@ def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168
     registry, id_col, readings, cols = DEVICES[kind]
 
     def run():
-        info = query(f"SELECT {id_col} AS id, * FROM {registry} WHERE {id_col} = %s",
-                     (device_id,))
+        info = query(f"SELECT {id_col} AS id, * FROM {registry} WHERE {id_col} = %s", (device_id,))
         if not info:
             raise HTTPException(404, f"no {kind} {device_id}")
         info = {k: v for k, v in info[0].items() if k != "geom"}
-        latest = query(f"""
+        latest = query(
+            f"""
             SELECT ts, {", ".join(cols)} FROM {readings}
             WHERE {id_col} = %(id)s AND ts > now() - make_interval(hours => %(h)s)
             ORDER BY ts DESC LIMIT 1
-        """, {"id": device_id, "h": hours})
+        """,
+            {"id": device_id, "h": hours},
+        )
         # A meter's litres are per reading, so a bucket sums them; a logger's
         # pressure is a level, so a bucket averages it.
-        bucket = ("sum(litres) AS litres, avg(flow_lpm) AS flow_lpm" if kind == "meter"
-                  else "avg(pressure_m) AS pressure_m, avg(flow_ls) AS flow_ls")
-        series = query(f"""
+        bucket = (
+            "sum(litres) AS litres, avg(flow_lpm) AS flow_lpm"
+            if kind == "meter"
+            else "avg(pressure_m) AS pressure_m, avg(flow_ls) AS flow_ls"
+        )
+        series = query(
+            f"""
             SELECT date_bin('15 minutes', ts, TIMESTAMPTZ '2000-01-01') AS ts,
                    {bucket}, count(*) AS readings
             FROM {readings}
             WHERE {id_col} = %(id)s AND ts > now() - make_interval(hours => %(h)s)
             GROUP BY 1 ORDER BY 1
-        """, {"id": device_id, "h": hours})
-        return {"kind": kind, "info": info, "latest": latest[0] if latest else None,
-                "series": series, "hours": hours,
-                "backfills": backfills([readings.removeprefix("twin.")], hours)}
+        """,
+            {"id": device_id, "h": hours},
+        )
+        return {
+            "kind": kind,
+            "info": info,
+            "latest": latest[0] if latest else None,
+            "series": series,
+            "hours": hours,
+            "backfills": backfills([readings.removeprefix("twin.")], hours),
+        }
+
     return db_or_503(run)
 
 
@@ -1008,41 +1137,53 @@ def db_or_503(fn):
 @app.get("/api/dma/{dma_id}")
 def dma_detail(dma_id: str, hours: int = Query(24, ge=1, le=168)):
     def run():
-        info = query("""
+        info = query(
+            """
             SELECT d.dma_id, d.name, d.pipe_count, d.total_length_m, d.synthetic,
                    l.ts, l.status, l.loss_pct, l.min_pressure_m,
                    (SELECT count(*) FROM ref.water_meter m WHERE m.dma_id = d.dma_id) AS meters,
                    (SELECT count(*) FROM ref.pressure_logger p WHERE p.dma_id = d.dma_id) AS loggers
             FROM asset.dma d LEFT JOIN twin.dma_latest l USING (dma_id)
             WHERE d.dma_id = %s
-        """, (dma_id,))
+        """,
+            (dma_id,),
+        )
         if not info:
             raise HTTPException(404, f"no DMA {dma_id}")
         window = f"{hours} hours"
         return {
             "info": info[0],
             "baseline": baseline_progress(dma_id),
-            "balance": query("""
+            "balance": query(
+                """
                 SELECT window_start AS ts, consumption_l, inflow_l, loss_pct,
                        min_pressure_m, meter_count
                 FROM twin.dma_balance
                 WHERE dma_id = %s AND window_start > now() - %s::interval
                 ORDER BY window_start
-            """, (dma_id, window)),
-            "residuals": query("""
+            """,
+                (dma_id, window),
+            ),
+            "residuals": query(
+                """
                 SELECT ts, variable, modelled, observed, residual, z_score, flagged
                 FROM twin.sim_residual
                 WHERE dma_id = %s AND ts > now() - %s::interval
                 ORDER BY ts
-            """, (dma_id, window)),
+            """,
+                (dma_id, window),
+            ),
             "backfills": backfills(["meter_reading", "pressure_reading"], hours),
         }
+
     return db_or_503(run)
 
 
 @app.get("/api/anomalies")
 def anomalies(hours: int = Query(24, ge=1, le=168)):
-    return db_or_503(lambda: query("""
+    return db_or_503(
+        lambda: query(
+            """
         SELECT r.ts, r.dma_id, d.name, r.variable, r.modelled, r.observed,
                r.residual, r.z_score, r.flagged, l.status
         FROM twin.sim_residual r
@@ -1051,7 +1192,10 @@ def anomalies(hours: int = Query(24, ge=1, le=168)):
         WHERE r.ts > now() - %s::interval AND (r.flagged OR abs(r.residual) > 2)
         ORDER BY r.ts DESC, abs(r.residual) DESC
         LIMIT 300
-    """, (f"{hours} hours",)))
+    """,
+            (f"{hours} hours",),
+        )
+    )
 
 
 @app.get("/api/freshness")
@@ -1067,35 +1211,44 @@ def freshness():
             """)[0]
             out.append({"table": f"twin.{table}", "origin": origin, **row})
         return out
+
     return db_or_503(run)
 
 
 @app.get("/api/feeds")
 def feeds(hours: int = Query(24, ge=1, le=168)):
     window = f"{hours} hours"
-    return db_or_503(lambda: {
-        "hydrometry_latest": query("""
+    return db_or_503(
+        lambda: {
+            "hydrometry_latest": query(
+                """
             SELECT DISTINCT ON (h.site_id, h.variable)
                    h.site_id, s.site_name, h.variable, h.value, h.quality_code,
                    h.provider, h.ts, h.is_synthetic
             FROM twin.hydrometry h LEFT JOIN ref.hydrometry_site s USING (site_id)
             WHERE h.ts > now() - %s::interval
             ORDER BY h.site_id, h.variable, h.ts DESC
-        """, (window,)),
-        "hydrometry_series": query("""
+        """,
+                (window,),
+            ),
+            "hydrometry_series": query(
+                """
             SELECT site_id, variable, ts, value
             FROM twin.hydrometry
             WHERE ts > now() - %s::interval
             ORDER BY site_id, variable, ts
-        """, (window,)),
-    })
+        """,
+                (window,),
+            ),
+        }
+    )
 
 
 # -------------------------------------------------------------- operations
 class Param(BaseModel):
     name: str
     label: str
-    kind: str                 # int | bool | choice | text
+    kind: str  # int | bool | choice | text
     default: int | bool | str | None = None
     min: int | None = None
     max: int | None = None
@@ -1113,33 +1266,29 @@ ACTIONS: dict[str, dict] = {
         "label": "Load GIS network",
         "step": 2,
         "description": "Pages public GIS features into asset.gis_raw and the conformed "
-                       "tables. Use a limit while iterating; a full load is slow.",
+        "tables. Use a limit while iterating; a full load is slow.",
         "params": [
             Param(name="layer", label="Layer", kind="choice", default="(all)"),
-            Param(name="limit", label="Feature limit (0 = none)", kind="int",
-                  default=500, min=0, max=10_000_000),
-            Param(name="build_topology", label="Build topology after load",
-                  kind="bool", default=True),
+            Param(name="limit", label="Feature limit (0 = none)", kind="int", default=500, min=0, max=10_000_000),
+            Param(name="build_topology", label="Build topology after load", kind="bool", default=True),
         ],
     },
     "seed": {
         "label": "Derive synthetic DMAs and meters",
         "step": 3,
         "destructive": "Truncates asset.dma, ref.water_meter and ref.pressure_logger, "
-                       "and rewrites schemas/. Re-register the connectors afterwards.",
+        "and rewrites schemas/. Re-register the connectors afterwards.",
         "description": "Clusters real pipes into DMAs, places meters on real geometry, "
-                       "and writes Datagen schemas drawn from the new ids.",
+        "and writes Datagen schemas drawn from the new ids.",
         "params": [
             Param(name="dmas", label="DMAs", kind="int", default=40, min=1, max=2000),
-            Param(name="meters_per_dma", label="Meters per DMA", kind="int",
-                  default=25, min=1, max=5000),
+            Param(name="meters_per_dma", label="Meters per DMA", kind="int", default=25, min=1, max=5000),
         ],
     },
     "register_connectors": {
         "label": "Register Datagen connectors",
         "step": 4,
-        "description": "Deletes then re-posts each Datagen connector. Needs schemas/ "
-                       "from the seeding step.",
+        "description": "Deletes then re-posts each Datagen connector. Needs schemas/ " "from the seeding step.",
         "params": [],
     },
     "build_model": {
@@ -1152,39 +1301,38 @@ ACTIONS: dict[str, dict] = {
         "label": "Start Flink pipelines",
         "step": 6,
         "description": "Runs 01_sources, 02_sinks and 03_pipelines in one SQL client "
-                       "session. Refused while a Flink job is running, because a second "
-                       "statement set would write every row twice.",
+        "session. Refused while a Flink job is running, because a second "
+        "statement set would write every row twice.",
         "params": [],
     },
     "run_sim_once": {
         "label": "Run one simulation",
         "step": 7,
         "description": "One hydraulic solve plus residuals and DMA status. The simulator "
-                       "container also does this on its own every SIM_INTERVAL_S.",
+        "container also does this on its own every SIM_INTERVAL_S.",
         "params": [],
     },
     "reset_baseline": {
         "label": "Reset residual baselines",
         "step": None,
         "description": "Starts DMA residual baselines afresh after a lasting change such "
-                       "as a model recalibration. Earlier residuals stay in the database "
-                       "but stop counting, so the DMA shows insufficient data until it has enough "
-                       "new ones. Blank resets every DMA.",
+        "as a model recalibration. Earlier residuals stay in the database "
+        "but stop counting, so the DMA shows insufficient data until it has enough "
+        "new ones. Blank resets every DMA.",
         "params": [Param(name="dma", label="DMA id (blank = all)", kind="text", default="")],
     },
     "load_elevation": {
         "label": "Sample node elevations",
         "step": None,
         "description": "Fills asset.node.elevation_m from the region config's DEM tile "
-                       "service. Run after the topology build, then rebuild the model.",
-        "params": [Param(name="all", label="Re-sample every node", kind="bool",
-                         default=False)],
+        "service. Run after the topology build, then rebuild the model.",
+        "params": [Param(name="all", label="Re-sample every node", kind="bool", default=False)],
     },
     "discover": {
         "label": "Discover catalogue layers",
         "step": None,
         "description": "Searches the region's ArcGIS/CKAN catalogue for candidate layers "
-                       "to add to the region config. Read-only.",
+        "to add to the region config. Read-only.",
         "params": [Param(name="search", label="Search term", kind="text", default="")],
     },
 }
@@ -1205,9 +1353,15 @@ def build_command(action: str, p: dict) -> list[str]:
             cmd += ["--build-topology"]
         return cmd
     if action == "seed":
-        return exec_ + ["gis-loader", "python", "scripts/seed_synthetic_network.py",
-                        "--dmas", str(p["dmas"]),
-                        "--meters-per-dma", str(p["meters_per_dma"])]
+        return exec_ + [
+            "gis-loader",
+            "python",
+            "scripts/seed_synthetic_network.py",
+            "--dmas",
+            str(p["dmas"]),
+            "--meters-per-dma",
+            str(p["meters_per_dma"]),
+        ]
     if action == "register_connectors":
         return ["bash", str(WEAVE_DIR / "scripts/register-connectors.sh")]
     if action == "build_model":
@@ -1217,9 +1371,15 @@ def build_command(action: str, p: dict) -> list[str]:
     if action == "start_flink":
         # Tables are session-scoped in the SQL client, so the three files have
         # to run in one session — hence one concatenated script.
-        return ["docker", "exec", "flink-sql-client", "sh", "-c",
-                "cat /sql/01_sources.sql /sql/02_sinks.sql /sql/03_pipelines.sql "
-                "> /tmp/weave_pipelines.sql && sql-client.sh -f /tmp/weave_pipelines.sql"]
+        return [
+            "docker",
+            "exec",
+            "flink-sql-client",
+            "sh",
+            "-c",
+            "cat /sql/01_sources.sql /sql/02_sinks.sql /sql/03_pipelines.sql "
+            "> /tmp/weave_pipelines.sql && sql-client.sh -f /tmp/weave_pipelines.sql",
+        ]
     if action == "reset_baseline":
         cmd = run_sim + ["--reset-baseline"]
         return cmd + (["--dma", p["dma"]] if p["dma"] else [])
@@ -1272,9 +1432,10 @@ def run_mode(action: str, who: str) -> str:
 @app.get("/api/actions")
 def list_actions(request: Request):
     who = role(request)
-    return [{"id": k, "run": run_mode(k, who),
-             **{**v, "params": [p.model_dump() for p in v["params"]]}}
-            for k, v in ACTIONS.items()]
+    return [
+        {"id": k, "run": run_mode(k, who), **{**v, "params": [p.model_dump() for p in v["params"]]}}
+        for k, v in ACTIONS.items()
+    ]
 
 
 class RunRequest(BaseModel):
@@ -1331,9 +1492,10 @@ async def run_action(action: str, req: RunRequest, request: Request):
     params = validate(action, req.params)
     if who == access.DEMO:
         return await demo_action(action, params, session_id(request))
-    if PUBLIC:   # the admin, signed in on the public page
-        r = await relay_request("POST", relay_path("/api/relay/admin/actions", action), admin=True,
-                                json={"params": params})
+    if PUBLIC:  # the admin, signed in on the public page
+        r = await relay_request(
+            "POST", relay_path("/api/relay/admin/actions", action), admin=True, json={"params": params}
+        )
         if r.status_code != 200:
             raise relay_error(r)
         _status_cache["body"] = None
@@ -1353,31 +1515,44 @@ def remember_demo_job(sid: str, job: dict) -> None:
 async def demo_action(action: str, params: dict, sid: str) -> dict:
     cmd = build_command(action, params)
     now = datetime.now(timezone.utc).isoformat()
-    job = {"id": uuid.uuid4().hex[:10], "action": action, "label": ACTIONS[action]["label"],
-           "params": params, "command": cmd, "started": now, "lines": []}
+    job = {
+        "id": uuid.uuid4().hex[:10],
+        "action": action,
+        "label": ACTIONS[action]["label"],
+        "params": params,
+        "command": cmd,
+        "started": now,
+        "lines": [],
+    }
     if run_mode(action, access.DEMO) == "simulated":
-        job |= {"state": "succeeded", "exit_code": 0, "finished": now, "simulated": True,
-                "lines": demo.simulated_lines(action, params, cmd)}
+        job |= {
+            "state": "succeeded",
+            "exit_code": 0,
+            "finished": now,
+            "simulated": True,
+            "lines": demo.simulated_lines(action, params, cmd),
+        }
         remember_demo_job(sid, job)
         return {"id": job["id"]}
     wait = DEMO_COOLDOWN.wait_s(ALL_DEMO_USERS)
     if wait:
-        raise HTTPException(429, f"another demo run just happened; live runs are limited to one "
-                                 f"every {DEMO_RUN_INTERVAL_S} s across all demo users. "
-                                 f"Try again in {wait} s, or run it simulated.")
+        raise HTTPException(
+            429,
+            f"another demo run just happened; live runs are limited to one "
+            f"every {DEMO_RUN_INTERVAL_S} s across all demo users. "
+            f"Try again in {wait} s, or run it simulated.",
+        )
     if UNIFIED:
         # Same safe list and the same one-run-per-interval limit as the relay
         # applies, enforced here because there is no second console to do it.
         started = await start_job(action, params, origin="demo")
     else:
-        r = await relay_request("POST", relay_path("/api/relay/actions", action),
-                                json={"params": params})
+        r = await relay_request("POST", relay_path("/api/relay/actions", action), json={"params": params})
         if r.status_code != 200:
             raise relay_error(r)
         started = r.json()
     DEMO_COOLDOWN.mark(ALL_DEMO_USERS)
-    job |= {"state": "running", "exit_code": None, "finished": None,
-            "simulated": False, "remote_id": started["id"]}
+    job |= {"state": "running", "exit_code": None, "finished": None, "simulated": False, "remote_id": started["id"]}
     remember_demo_job(sid, job)
     return {"id": job["id"]}
 
@@ -1387,8 +1562,11 @@ async def start_job(action: str, params: dict, origin: str) -> dict:
         jobs = (await asyncio.to_thread(safe, probe_flink))["value"] or []
         running = [j for j in jobs if j["state"] == "RUNNING"]
         if running:
-            raise HTTPException(409, f"Flink already has {len(running)} running job(s): "
-                                     f"{running[0]['name']}. Cancel it in the Flink UI first.")
+            raise HTTPException(
+                409,
+                f"Flink already has {len(running)} running job(s): "
+                f"{running[0]['name']}. Cancel it in the Flink UI first.",
+            )
     if action == "register_connectors":
         # The script waits for Connect indefinitely, which would hold the job
         # lock until someone restarts the console.
@@ -1404,10 +1582,19 @@ async def start_job(action: str, params: dict, origin: str) -> dict:
         raise HTTPException(409, f"busy: {busy['label'] if busy else 'another job'} is running")
 
     jid = uuid.uuid4().hex[:10]
-    JOBS[jid] = {"id": jid, "action": action, "label": ACTIONS[action]["label"],
-                 "params": params, "command": cmd, "state": "running", "origin": origin,
-                 "started": datetime.now(timezone.utc).isoformat(),
-                 "finished": None, "exit_code": None, "lines": []}
+    JOBS[jid] = {
+        "id": jid,
+        "action": action,
+        "label": ACTIONS[action]["label"],
+        "params": params,
+        "command": cmd,
+        "state": "running",
+        "origin": origin,
+        "started": datetime.now(timezone.utc).isoformat(),
+        "finished": None,
+        "exit_code": None,
+        "lines": [],
+    }
     JOB_ORDER.append(jid)
     evicted = set(JOBS) - set(JOB_ORDER)
     for old in evicted:
@@ -1422,8 +1609,8 @@ async def _run(jid: str, cmd: list[str]):
     env = {**os.environ, "CONNECT_URL": CONNECT_URL}
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            cwd=WEAVE_DIR, env=env)
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=WEAVE_DIR, env=env
+        )
         async for raw in proc.stdout:
             job["lines"].append(raw.decode(errors="replace").rstrip("\n"))
             if len(job["lines"]) > MAX_LINES:
@@ -1440,8 +1627,7 @@ async def _run(jid: str, cmd: list[str]):
 
 
 def _summary(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("lines", "remote_id")} | {
-        "line_count": len(job["lines"])}
+    return {k: v for k, v in job.items() if k not in ("lines", "remote_id")} | {"line_count": len(job["lines"])}
 
 
 @app.get("/api/jobs")
@@ -1472,14 +1658,15 @@ async def get_job(jid: str, request: Request, since: int = Query(0, ge=0)):
         if not job:
             raise HTTPException(404, NO_SUCH_JOB)
     return {k: v for k, v in job.items() if k != "remote_id"} | {
-        "offset": len(job["lines"]), "lines": job["lines"][since:]}
+        "offset": len(job["lines"]),
+        "lines": job["lines"][since:],
+    }
 
 
 async def remote_admin_job(jid: str, since: int) -> dict:
     if not JOB_ID.fullmatch(jid):
         raise HTTPException(404, NO_SUCH_JOB)
-    r = await relay_request("GET", relay_path("/api/relay/admin/jobs", jid), admin=True,
-                            params={"since": since})
+    r = await relay_request("GET", relay_path("/api/relay/admin/jobs", jid), admin=True, params={"since": since})
     if r.status_code == 404:
         raise HTTPException(404, NO_SUCH_JOB)
     if r.status_code != 200:
@@ -1488,18 +1675,19 @@ async def remote_admin_job(jid: str, since: int) -> dict:
 
 
 async def refresh_relayed(job: dict) -> None:
-    if UNIFIED:   # the run is a local job; copy its progress into the session's view
+    if UNIFIED:  # the run is a local job; copy its progress into the session's view
         src = JOBS.get(job["remote_id"])
         if src:
-            job["lines"].extend(src["lines"][len(job["lines"]):])
+            job["lines"].extend(src["lines"][len(job["lines"]) :])
             job.update({k: src[k] for k in ("state", "exit_code", "finished")})
         return
     try:
-        r = await relay_request("GET", relay_path("/api/relay/jobs", job["remote_id"]),
-                                params={"since": len(job["lines"])})
+        r = await relay_request(
+            "GET", relay_path("/api/relay/jobs", job["remote_id"]), params={"since": len(job["lines"])}
+        )
         r.raise_for_status()
     except (HTTPException, httpx.HTTPError):
-        return   # shown as still running; the next poll tries again
+        return  # shown as still running; the next poll tries again
     body = r.json()
     job["lines"].extend(body["lines"])
     job.update({k: body[k] for k in ("state", "exit_code", "finished")})
@@ -1526,8 +1714,12 @@ def relay_job(jid: str, since: int = Query(0, ge=0)):
     job = JOBS.get(jid)
     if not job or job.get("origin") != "demo":
         raise HTTPException(404, NO_SUCH_JOB)
-    return {"state": job["state"], "exit_code": job["exit_code"], "finished": job["finished"],
-            "lines": job["lines"][since:]}
+    return {
+        "state": job["state"],
+        "exit_code": job["exit_code"],
+        "finished": job["finished"],
+        "lines": job["lines"][since:],
+    }
 
 
 @app.get("/api/relay/status", dependencies=[Depends(relay_any_auth)])
@@ -1556,7 +1748,9 @@ def relay_admin_job(jid: str, since: int = Query(0, ge=0)):
     if not job:
         raise HTTPException(404, NO_SUCH_JOB)
     return {k: v for k, v in job.items() if k != "remote_id"} | {
-        "offset": len(job["lines"]), "lines": job["lines"][since:]}
+        "offset": len(job["lines"]),
+        "lines": job["lines"][since:],
+    }
 
 
 # ---------------------------------------------------------------------- page

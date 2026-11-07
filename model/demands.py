@@ -33,9 +33,9 @@ DEMAND_WINDOW = "1 hour"
 
 @dataclass
 class Demands:
-    by_node: dict[int, float]   # m³/s per graph node
-    meters: int                 # meters mapped to a node
-    silent: int                 # of those, with no valid reading in the window
+    by_node: dict[int, float]  # m³/s per graph node
+    meters: int  # meters mapped to a node
+    silent: int  # of those, with no valid reading in the window
 
 
 def junction_demands(rows) -> Demands:

@@ -24,14 +24,22 @@ GRANT SELECT ON ALL TABLES IN SCHEMA asset, ref, twin TO weave_reader;
 -- become readable without another grant. TimescaleDB copies a hypertable's
 -- grants to each new chunk.
 ALTER DEFAULT PRIVILEGES FOR ROLE weave IN SCHEMA asset, ref, twin
-    GRANT SELECT ON TABLES TO weave_reader;
+GRANT SELECT ON TABLES TO weave_reader;
 
 -- DMA outlines with their current model status, so a GIS client can colour
 -- DMAs the way the console does; twin.dma_latest itself has no geometry.
 CREATE OR REPLACE VIEW asset.dma_status AS
-SELECT d.dma_id, d.name, d.pipe_count, d.total_length_m, d.synthetic,
-       l.ts AS status_ts, COALESCE(l.status, 'UNKNOWN') AS status,
-       l.loss_pct, l.min_pressure_m, d.geom
+SELECT
+    d.dma_id,
+    d.name,
+    d.pipe_count,
+    d.total_length_m,
+    d.synthetic,
+    l.ts AS status_ts,
+    COALESCE(l.status, 'UNKNOWN') AS status,
+    l.loss_pct,
+    l.min_pressure_m,
+    d.geom
 FROM asset.dma d
 LEFT JOIN twin.dma_latest l USING (dma_id);
 

@@ -57,17 +57,16 @@ class Pipe:
 
 @dataclass
 class Selection:
-    pipes: list[Pipe]                       # in selection (walk) order
-    nodes: set[int]                         # every node the selected pipes touch
-    unsupplied_pipes: int = 0               # in components no source reaches
-    capped_pipes: int = 0                   # reachable, but beyond the cap
-    skipped_pipes: int = 0                  # self-loops after snapping
+    pipes: list[Pipe]  # in selection (walk) order
+    nodes: set[int]  # every node the selected pipes touch
+    unsupplied_pipes: int = 0  # in components no source reaches
+    capped_pipes: int = 0  # reachable, but beyond the cap
+    skipped_pipes: int = 0  # self-loops after snapping
     sources_without_pipes: list[int] = field(default_factory=list)
-    reachable: frozenset = frozenset()      # nodes connected to a source, cap ignored
+    reachable: frozenset = frozenset()  # nodes connected to a source, cap ignored
 
 
-def select_supplied_subgraph(pipes: list[Pipe], sources: list[int],
-                             cap: int) -> Selection:
+def select_supplied_subgraph(pipes: list[Pipe], sources: list[int], cap: int) -> Selection:
     """Walk outward from the sources and keep pipes until the cap is reached.
 
     A plain LIMIT keeps an arbitrary subset whose pieces may have no path to
@@ -118,8 +117,7 @@ def _adjacency(pipes: list[Pipe]) -> tuple[dict[int, list[Pipe]], int]:
     return adjacency, skipped
 
 
-def _walk(adjacency: dict[int, list[Pipe]], start: list[int],
-          cap: int) -> list[Pipe]:
+def _walk(adjacency: dict[int, list[Pipe]], start: list[int], cap: int) -> list[Pipe]:
     """Breadth-first from the sources, taking each pipe once, up to the cap."""
     reached: set[int] = set(start)
     queue = deque(start)

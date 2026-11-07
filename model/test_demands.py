@@ -22,8 +22,7 @@ class JunctionDemandsTest(unittest.TestCase):
         # Rows are already one per meter, so a meter that sent six readings
         # and one that sent one count once each.
         frequent, rare = ("m1", 7, 10.0), ("m2", 7, 20.0)
-        self.assertEqual(junction_demands([frequent, rare]).by_node,
-                         junction_demands([rare, frequent]).by_node)
+        self.assertEqual(junction_demands([frequent, rare]).by_node, junction_demands([rare, frequent]).by_node)
 
     def test_silent_meters_add_nothing_and_are_counted(self):
         result = junction_demands([("m1", 7, 10.0), ("m2", 7, None), ("m3", 8, None)])
@@ -62,8 +61,7 @@ class ApplyDemandsTest(unittest.TestCase):
     def solve(self, demands: Demands) -> tuple[float, float]:
         wn = self.wntr.network.WaterNetworkModel(self.inp)
         unmodelled = apply_demands(wn, demands)
-        results = self.wntr.sim.EpanetSimulator(wn).run_sim(
-            file_prefix=os.path.join(self.tmp.name, "solve"))
+        results = self.wntr.sim.EpanetSimulator(wn).run_sim(file_prefix=os.path.join(self.tmp.name, "solve"))
         return float(results.link["flowrate"]["P1"].iloc[-1]), unmodelled
 
     def test_each_solve_uses_the_readings_it_is_given(self):
