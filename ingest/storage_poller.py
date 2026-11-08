@@ -198,9 +198,12 @@ def parse_ts(text: str) -> datetime:
 
 
 # ------------------------------------------------------------------ service
-def kiwis(params: dict):
-    """One KiWIS query, retried with backoff on the service's transient errors."""
-    url = require_env("STORAGE_URL", "the KiWIS endpoint that serves storage volumes")
+def kiwis(params: dict, url: str | None = None):
+    """One KiWIS query, retried with backoff on the service's transient errors.
+
+    url defaults to STORAGE_URL; hydrometry_poller.py passes its own.
+    """
+    url = url or require_env("STORAGE_URL", "the KiWIS endpoint that serves storage volumes")
     base = {"service": "kisters", "type": "queryServices", "datasource": "0", "format": "json"}
     for attempt in range(1, ATTEMPTS + 1):
         resp = requests.get(url, params={**base, **params}, timeout=60)
