@@ -244,6 +244,24 @@ def fetch_records(site: str, variable: str, var_name: str, start: datetime, end:
     return parse_timeseries(fetch_timeseries(site, variable, start, end), site, variable)
 
 
+def send_records(site: str, var_name: str, records: list[dict], last: datetime | None, floor: datetime) -> int:
+    key = (site, var_name)
+    for record in records:
+        ts = record.pop("event_ts")
+        # Flink dates the row by the message timestamp
+        # (flink/sql/03_pipelines.sql), so the message carries the
+        # measurement's time; sent at publish time, a backfilled week would
+        # all land on the minute it was fetched.
+        producer.send(
+            TOPIC,
+            key=f"{site}:{record['variable']}",
+            value=envelope(PROVIDER, record, event_ts=ts),
+            timestamp_ms=event_ms(ts),
+        )
+        published[key] = max(published.get(key, last or floor), datetime.fromisoformat(ts))
+    return len(records)
+
+
 def publish() -> int:
     total = 0
     now = datetime.now(timezone.utc)
@@ -266,20 +284,8 @@ def publish() -> int:
             last = max(filter(None, (stored.get(key), published.get(key))), default=None)
             start = max(last, floor) if last else floor
             try:
-                for record in newer_than(fetch_records(site, variable, var_name, start, now), last):
-                    ts = record.pop("event_ts")
-                    # Flink dates the row by the message timestamp
-                    # (flink/sql/03_pipelines.sql), so the message carries the
-                    # measurement's time; sent at publish time, a backfilled
-                    # week would all land on the minute it was fetched.
-                    producer.send(
-                        TOPIC,
-                        key=f"{site}:{record['variable']}",
-                        value=envelope(PROVIDER, record, event_ts=ts),
-                        timestamp_ms=event_ms(ts),
-                    )
-                    published[key] = max(published.get(key, last or floor), datetime.fromisoformat(ts))
-                    total += 1
+                records = newer_than(fetch_records(site, variable, var_name, start, now), last)
+                total += send_records(site, var_name, records, last, floor)
             except Exception as exc:
                 print(f"  ! {site}/{variable or var_name}: {exc}")
     producer.flush()
