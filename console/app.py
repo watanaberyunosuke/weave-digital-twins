@@ -52,6 +52,7 @@ from pydantic import BaseModel
 
 import access
 import demo
+import schema_check
 
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 CONNECT_URL = os.environ.get("CONNECT_URL", "http://connect:8083")
@@ -61,6 +62,8 @@ WEAVE_DIR = Path(os.environ.get("WEAVE_DIR", "/weave"))
 INP_PATH = Path(os.environ.get("INP_PATH", "/sim/network.inp"))
 REGION_CONFIG = os.environ.get("GIS_REGION_CONFIG", "")
 ALLOWED_HOSTS = {h.strip() for h in os.environ.get("CONSOLE_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")}
+# The compose service name Prometheus scrapes /metrics through (see guard()).
+METRICS_HOST = "console"
 STATIC = Path(__file__).parent / "static"
 
 MODE = os.environ.get("CONSOLE_MODE", "admin")
@@ -134,7 +137,12 @@ async def guard(request: Request, call_next):
     # this app never answers, so another site open in the browser can't
     # trigger an operation through it.
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
-    if host not in ALLOWED_HOSTS:
+    # Prometheus scrapes as the compose service name, which a .env narrowing
+    # CONSOLE_ALLOWED_HOSTS would otherwise refuse. It is let through for
+    # /metrics alone: no public domain is a bare "console", so a rebinding
+    # page can't send it, and /metrics is a read.
+    scrape = host == METRICS_HOST and request.method == "GET" and request.url.path == "/metrics"
+    if host not in ALLOWED_HOSTS and not scrape:
         return JSONResponse({"detail": "host not allowed"}, status_code=403)
     if request.method == "POST" and request.headers.get("x-weave-console") != "1":
         return JSONResponse({"detail": "missing X-Weave-Console header"}, status_code=403)
@@ -1253,6 +1261,294 @@ def feeds(hours: int = Query(24, ge=1, le=168)):
     )
 
 
+# ------------------------------------------------------- metrics and alerts
+# Prometheus scrapes /metrics (monitoring/prometheus/prometheus-generated.yml) and evaluates the
+# rules in monitoring/prometheus/weave-alerts.yml; Alertmanager holds what fires. The
+# console only reads both, so it gains no write path: the Alerts tab shows
+# Alertmanager's active alerts, each rule's state, and the schema warnings
+# below.
+PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
+ALERTMANAGER_URL = os.environ.get("ALERTMANAGER_URL", "http://alertmanager:9093")
+SCHEMA_REGISTRY_URL = os.environ.get("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
+CONTRACTS_DIR = WEAVE_DIR / "kafka" / "contracts"
+# Messages sampled per topic for the contract check: the most recent ones,
+# because a contract break that matters is one still being produced.
+SCHEMA_SAMPLE = int(os.environ.get("CONSOLE_SCHEMA_SAMPLE", "50"))
+
+
+def _metric_line(name: str, labels: dict, value) -> str:
+    def esc(v) -> str:
+        return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+    inner = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
+    # repr keeps full precision; ":g" would round a Unix time to the nearest
+    # 100 s or so, enough to fire or hide a staleness alert.
+    return f"{name}{{{inner}}} {float(value)!r}" if inner else f"{name} {float(value)!r}"
+
+
+def metrics_text() -> str:
+    """Pipeline health in Prometheus text format, from what the console reads.
+
+    Every telemetry series carries its origin (real, synthetic, derived,
+    model) so an alert on synthetic data can never read as one on observed
+    data. A probe that fails leaves its series out and sets weave_probe_up
+    to 0, so a broken probe can't pass for a fresh feed.
+    """
+    out: list[str] = []
+
+    def family(name: str, kind: str, text: str, rows: list[tuple[dict, float]]):
+        out.extend([f"# HELP {name} {text}", f"# TYPE {name} {kind}"])
+        out.extend(_metric_line(name, labels, v) for labels, v in rows)
+
+    probes: list[tuple[dict, float]] = []
+
+    def probe(name: str, fn):
+        try:
+            result = fn()
+            probes.append(({"probe": name}, 1))
+            return result
+        except Exception as exc:  # noqa: BLE001 — reported as weave_probe_up 0
+            print(f"! metrics probe {name} failed: {str(exc).splitlines()[0][:200]}")
+            probes.append(({"probe": name}, 0))
+            return None
+
+    def fresh():
+        rows = []
+        for table, col, origin in TELEMETRY:
+            rows.append(
+                (
+                    table,
+                    origin,
+                    query(f"""
+                SELECT extract(epoch FROM max({col})) AS latest,
+                       count(*) FILTER (WHERE {col} > now() - interval '1 hour') AS last_hour
+                FROM twin.{table}
+                WHERE {col} > now() - interval '7 days'
+            """)[0],
+                )
+            )
+        return rows
+
+    tel = probe("postgres_telemetry", fresh) or []
+    family(
+        "weave_telemetry_latest_timestamp_seconds",
+        "gauge",
+        "Unix time of the newest row in each twin telemetry table (last 7 days).",
+        [({"table": f"twin.{t}", "origin": o}, r["latest"]) for t, o, r in tel if r["latest"] is not None],
+    )
+    family(
+        "weave_telemetry_rows_last_hour",
+        "gauge",
+        "Rows dated in the last hour in each twin telemetry table.",
+        [({"table": f"twin.{t}", "origin": o}, r["last_hour"]) for t, o, r in tel],
+    )
+
+    dma = (
+        probe(
+            "postgres_dma_status",
+            lambda: query(
+                "SELECT COALESCE(status, 'UNKNOWN') AS status, count(*) AS n FROM twin.dma_latest GROUP BY 1"
+            ),
+        )
+        or []
+    )
+    family(
+        "weave_dma_status",
+        "gauge",
+        "DMAs by latest residual status. Scored from synthetic meter and logger data against the model.",
+        [({"status": r["status"], "origin": "model"}, r["n"]) for r in dma],
+    )
+
+    fills = (
+        probe(
+            "postgres_backfill",
+            lambda: query("""
+                SELECT stream, COALESCE(sum(row_count), 0) AS rows
+                FROM twin.backfill_log
+                WHERE filled_at > now() - interval '24 hours'
+                GROUP BY stream
+            """),
+        )
+        or []
+    )
+    family(
+        "weave_backfill_rows_last_day",
+        "gauge",
+        "Rows written by gap fills and model replays in the last 24 hours, by stream. Always synthetic or model.",
+        [({"stream": r["stream"]}, r["rows"]) for r in fills],
+    )
+
+    conns = probe("connect", probe_connectors) or []
+    family(
+        "weave_connector_running",
+        "gauge",
+        "1 when a Kafka Connect connector and all its tasks are RUNNING.",
+        [
+            ({"connector": c["name"]}, int(c["state"] == "RUNNING" and all(t == "RUNNING" for t in c["tasks"])))
+            for c in conns
+        ],
+    )
+    family("weave_probe_up", "gauge", "1 when the console could read this source for these metrics.", probes)
+    return "\n".join(out) + "\n"
+
+
+@app.get("/metrics")
+async def metrics():
+    # The public console has no Connect or Kafka to read and nothing scrapes it.
+    if PUBLIC:
+        raise HTTPException(404, NOT_FOUND)
+    body = await asyncio.to_thread(metrics_text)
+    return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+def registry_versions(subject: str) -> list[dict]:
+    """Every registered version of a subject, oldest first, schemas decoded."""
+    r = httpx.get(f"{SCHEMA_REGISTRY_URL}/subjects/{quote(subject, safe='')}/versions", timeout=3)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    out = []
+    for v in sorted(r.json()):
+        body = httpx.get(f"{SCHEMA_REGISTRY_URL}/subjects/{quote(subject, safe='')}/versions/{v}", timeout=3)
+        body.raise_for_status()
+        out.append({"version": v, "schema": json.loads(body.json()["schema"])})
+    return out
+
+
+def sample_topic(topic: str, n: int) -> list[bytes]:
+    """The last n message values on a topic, across its partitions."""
+    from kafka import KafkaConsumer, TopicPartition
+
+    consumer = KafkaConsumer(
+        bootstrap_servers=KAFKA_BOOTSTRAP,
+        enable_auto_commit=False,
+        consumer_timeout_ms=3000,
+        request_timeout_ms=5000,
+        api_version_auto_timeout_ms=3000,
+    )
+    try:
+        parts = [TopicPartition(topic, p) for p in (consumer.partitions_for_topic(topic) or [])]
+        if not parts:
+            return []
+        consumer.assign(parts)
+        ends = consumer.end_offsets(parts)
+        starts = consumer.beginning_offsets(parts)
+        for tp in parts:
+            consumer.seek(tp, max(starts[tp], ends[tp] - n))
+        values: list[tuple[int, bytes]] = []
+        remaining = {tp for tp in parts if consumer.position(tp) < ends[tp]}
+        deadline = time.monotonic() + 5
+        while remaining and time.monotonic() < deadline:
+            for tp, records in consumer.poll(timeout_ms=1000).items():
+                values.extend((rec.timestamp, rec.value) for rec in records if rec.value is not None)
+                if consumer.position(tp) >= ends[tp]:
+                    remaining.discard(tp)
+        return [v for _, v in sorted(values, key=lambda x: x[0])[-n:]]
+    finally:
+        consumer.close()
+
+
+def schema_report() -> dict:
+    topics = []
+    warnings: list[dict] = []
+    for topic in TOPICS:
+        path = CONTRACTS_DIR / f"{topic}.json"
+        contract = json.loads(path.read_text()) if path.exists() else None
+        versions = registry_versions(f"{topic}-value")
+        try:
+            samples = sample_topic(topic, SCHEMA_SAMPLE)
+            sample_error = None
+        except Exception as exc:  # noqa: BLE001 — one topic's broker error is shown, the rest still checked
+            samples, sample_error = [], str(exc).splitlines()[0][:200]
+        found = schema_check.check_topic(topic, contract, versions, samples)
+        if sample_error:
+            found.append(
+                {
+                    "topic": topic,
+                    "code": "sample_failed",
+                    "level": "warning",
+                    "message": f"Could not read recent messages to check: {sample_error}",
+                }
+            )
+        warnings.extend(found)
+        topics.append(
+            {
+                "topic": topic,
+                "subject": f"{topic}-value",
+                "version": versions[-1]["version"] if versions else None,
+                "versions": len(versions),
+                "sampled": len(samples),
+                "in_repo": contract is not None,
+            }
+        )
+    return {"topics": topics, "warnings": warnings}
+
+
+_schema_cache: dict = {"at": 0.0, "body": None}
+
+
+def cached_schema_report() -> dict:
+    # Each check opens a Kafka consumer per topic, so the result is shared
+    # between tabs and refreshes for 30 seconds.
+    if _schema_cache["body"] is None or time.monotonic() - _schema_cache["at"] > 30:
+        _schema_cache.update(at=time.monotonic(), body=safe(schema_report, {"topics": [], "warnings": []}))
+    return _schema_cache["body"]
+
+
+def alertmanager_alerts() -> list[dict]:
+    r = httpx.get(f"{ALERTMANAGER_URL}/api/v2/alerts", timeout=3)
+    r.raise_for_status()
+    return sorted(
+        (
+            {
+                "name": a["labels"].get("alertname"),
+                "severity": a["labels"].get("severity", "none"),
+                "labels": a["labels"],
+                "summary": a.get("annotations", {}).get("summary", ""),
+                "description": a.get("annotations", {}).get("description", ""),
+                "state": a.get("status", {}).get("state"),
+                "since": a.get("startsAt"),
+            }
+            for a in r.json()
+        ),
+        key=lambda a: ({"critical": 0, "warning": 1}.get(a["severity"], 2), a["name"] or ""),
+    )
+
+
+def prometheus_rules() -> list[dict]:
+    r = httpx.get(f"{PROMETHEUS_URL}/api/v1/rules", params={"type": "alert"}, timeout=3)
+    r.raise_for_status()
+    return [
+        {
+            "group": g["name"],
+            "name": rule["name"],
+            "state": rule.get("state"),
+            "health": rule.get("health"),
+            "error": rule.get("lastError") or None,
+            "severity": rule.get("labels", {}).get("severity"),
+            # Summaries are templates Prometheus renders only on a firing
+            # alert; descriptions are plain text, so the rule list shows those.
+            "description": rule.get("annotations", {}).get("description", ""),
+            "active": len(rule.get("alerts", [])),
+        }
+        for g in r.json()["data"]["groups"]
+        for rule in g.get("rules", [])
+    ]
+
+
+@app.get("/api/alerts")
+async def alerts():
+    if PUBLIC:
+        gone = {"ok": False, "error": "not visible from the public console", "value": None}
+        return {"alerts": gone, "rules": gone, "schemas": gone}
+    a, r, s = await asyncio.gather(
+        asyncio.to_thread(safe, alertmanager_alerts, []),
+        asyncio.to_thread(safe, prometheus_rules, []),
+        asyncio.to_thread(cached_schema_report),
+    )
+    return {"alerts": a, "rules": r, "schemas": s}
+
+
 # -------------------------------------------------------------- operations
 class Param(BaseModel):
     name: str
@@ -1348,6 +1644,16 @@ ACTIONS: dict[str, dict] = {
         "new ones. Blank resets every DMA.",
         "params": [Param(name="dma", label="DMA id (blank = all)", kind="text", default="")],
     },
+    "register_schemas": {
+        "label": "Register topic schemas",
+        "step": None,
+        "description": "Registers each topic's contract from kafka/contracts in Schema "
+        "Registry with schema evolution on (BACKWARD unless SCHEMA_COMPATIBILITY says "
+        "otherwise). A compatible change becomes a new version; an incompatible one is "
+        "refused and the registered version stays. The Alerts tab warns on both, and on "
+        "messages that break the registered contract.",
+        "params": [],
+    },
     "load_elevation": {
         "label": "Sample node elevations",
         "step": None,
@@ -1414,6 +1720,8 @@ def build_command(action: str, p: dict) -> list[str]:
     if action == "reset_baseline":
         cmd = run_sim + ["--reset-baseline"]
         return cmd + (["--dma", p["dma"]] if p["dma"] else [])
+    if action == "register_schemas":
+        return ["bash", str(WEAVE_DIR / "scripts/register-schemas.sh")]
     if action == "load_elevation":
         cmd = exec_ + ["gis-loader", "python", "gis/load_elevation.py"]
         return cmd + (["--all"] if p["all"] else [])
@@ -1637,7 +1945,7 @@ async def start_job(action: str, params: dict, origin: str) -> dict:
 
 async def _run(jid: str, cmd: list[str]):
     job = JOBS[jid]
-    env = {**os.environ, "CONNECT_URL": CONNECT_URL}
+    env = {**os.environ, "CONNECT_URL": CONNECT_URL, "SCHEMA_REGISTRY_URL": SCHEMA_REGISTRY_URL}
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=WEAVE_DIR, env=env

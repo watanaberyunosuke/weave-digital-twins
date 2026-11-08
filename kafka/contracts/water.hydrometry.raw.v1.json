@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HydrometryReading",
+  "description": "A real gauge reading from ingest/hydrometry_poller.py, as flink/sql/01_sources.sql reads it. Real feeds only, so is_synthetic is always false.",
+  "type": "object",
+  "properties": {
+    "source": {"type": "string"},
+    "ingest_ts": {"type": "string"},
+    "event_ts": {"type": "string"},
+    "is_synthetic": {"const": false},
+    "site_id": {"type": "string"},
+    "variable": {"type": "string"},
+    "unit": {"type": ["string", "null"]},
+    "value": {"type": ["number", "null"]},
+    "quality_code": {"type": ["string", "null"]},
+    "provider": {"type": "string"}
+  },
+  "required": ["source", "event_ts", "is_synthetic", "site_id", "variable", "value", "provider"],
+  "additionalProperties": false
+}

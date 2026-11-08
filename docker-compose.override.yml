@@ -50,10 +50,21 @@ services:
     logging: *json-logs
     ports: !override
       - "127.0.0.1:9021:9021"
+  # CONFIG_PATH points the image's start script at Weave's config instead of
+  # upstream's: upstream's OTLP settings plus scrape jobs for Flink, the
+  # console and the simulator, and the pipeline rules in
+  # monitoring/prometheus/weave-alerts.yml. Control Center still writes its
+  # triggers into ./vol/config, which that config reads from /mnt/config.
+  # (Mounting one file over /mnt/config/prometheus-generated.yml doesn't
+  # work: Docker Desktop lets the directory mount shadow it.)
   prometheus:
     logging: *json-logs
     ports: !override
       - "127.0.0.1:9090:9090"
+    environment:
+      CONFIG_PATH: /mnt/weave
+    volumes:
+      - ./monitoring/prometheus:/mnt/weave:ro
   alertmanager:
     logging: *json-logs
     ports: !override
@@ -66,16 +77,32 @@ services:
     volumes:
       - ./schemas:/schemas:ro
 
+  # FLINK_PROPERTIES replaces upstream's whole value (compose merges
+  # environment by name), so its settings are repeated before the Prometheus
+  # reporter. The reporter's plugin ships in the image; Prometheus scrapes
+  # :9249 on the compose network, so the port is not published.
   flink-jobmanager:
     logging: *json-logs
     ports: !override
       - "127.0.0.1:9081:9081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.bind-port: 9081
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
       - ./flink/sql:/sql:ro
 
   flink-taskmanager:
     logging: *json-logs
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 10
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     volumes:
       - ./flink/lib:/opt/flink/lib/weave:ro
 
@@ -267,6 +294,8 @@ services:
       SIM_BRIDGE_LARGE_M: ${SIM_BRIDGE_LARGE_M:-5000}
       SIM_RESIDUAL_MIN_SAMPLES: ${SIM_RESIDUAL_MIN_SAMPLES:-8}
       SIM_RESULT_RETENTION_HOURS: ${SIM_RESULT_RETENTION_HOURS:-24}
+      # Solve time for Prometheus (model/metrics.py), on the compose network only.
+      SIM_METRICS_PORT: ${SIM_METRICS_PORT:-9108}
     volumes:
       - siminp:/app/out
     depends_on:
@@ -307,6 +336,11 @@ services:
       KAFKA_BOOTSTRAP: broker:29092
       CONNECT_URL: http://connect:8083
       FLINK_URL: ${FLINK_URL:-http://flink-jobmanager:9081}
+      # The Alerts tab reads these; the console never writes to them.
+      PROMETHEUS_URL: http://prometheus:9090
+      ALERTMANAGER_URL: http://alertmanager:9093
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      SCHEMA_COMPATIBILITY: ${SCHEMA_COMPATIBILITY:-BACKWARD}
       KIBANA_PUBLIC_URL: ${KIBANA_PUBLIC_URL:-http://localhost:5601}
       FLINK_PUBLIC_URL: ${FLINK_PUBLIC_URL:-http://localhost:9081}
       CONTROL_CENTER_PUBLIC_URL: ${CONTROL_CENTER_PUBLIC_URL:-http://localhost:9021}
@@ -330,6 +364,7 @@ services:
       - ./scripts:/weave/scripts:ro
       - ./connectors:/weave/connectors:ro
       - ./schemas:/weave/schemas:ro
+      - ./kafka:/weave/kafka:ro
       - ./gis/regions:/weave/gis/regions:ro
       - siminp:/sim:ro
     depends_on:

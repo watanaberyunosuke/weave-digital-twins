@@ -24,6 +24,7 @@ import networkx as nx
 import psycopg
 import wntr
 
+import metrics
 from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
 from gaps import BRIDGE_LARGE_M, BRIDGE_SMALL_M, TJUNCTION_M, Link
 from modelled_network import MAX_PIPES, MAX_SNAP_M, excluded_pipes, select_modelled
@@ -52,6 +53,8 @@ from zones import HEAD_MARGIN_M, MAX_PRESSURE_M, MIN_PRESSURE_M, plan_zones
 DSN = os.environ.get("TWIN_DSN", "postgresql://weave:weave@postgres:5432/weave_twin")
 INP_PATH = os.environ.get("INP_PATH", "/app/out/network.inp")
 INTERVAL_S = int(os.environ.get("SIM_INTERVAL_S", "900"))
+# Where the loop serves solve times for Prometheus (model/metrics.py); 0 turns it off.
+METRICS_PORT = int(os.environ.get("SIM_METRICS_PORT", "9108"))
 # Only the latest run is read (residuals.py joins on run_id), so older results
 # are pruned each solve. Unpruned, a whole-network model writes about 240,000
 # rows a solve, several GB a day, and the table never shrank.
@@ -652,6 +655,7 @@ def _replay(deadline: float | None) -> int:
         runs[-1].append((as_of, scored))
     for run in runs:
         log_replayed(run[0][0], run[-1][0], sum(n for _, n in run))
+    metrics.set_value("weave_sim_replay_pending", len(times) - len(done))
     if len(times) > len(done):
         print(f"replay: {len(times) - len(done)} solves still to replay")
     return len(done)
@@ -688,15 +692,21 @@ def reset_baseline(dmas: list[str]) -> int:
 
 
 def run_loop() -> None:
+    metrics.start(METRICS_PORT)
+    metrics.set_value("weave_sim_interval_seconds", INTERVAL_S)
     while True:
         # Sleep the rest of the interval, not a whole one, so a larger
         # model keeps the 15-minute cadence the baseline counts assume.
         started = time.monotonic()
         try:
             compute_residuals(*simulate())
+            metrics.inc("weave_sim_solves_total")
+            metrics.set_value("weave_sim_last_solve_timestamp_seconds", time.time())
         except Exception as exc:
+            metrics.inc("weave_sim_solve_failures_total")
             print(f"! simulation failed: {exc}")
         elapsed = time.monotonic() - started
+        metrics.set_value("weave_sim_solve_seconds", elapsed)
         if elapsed > INTERVAL_S:
             print(
                 f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"

@@ -1,0 +1,2 @@
+# Read by the image's start script from CONFIG_PATH. Empty, as upstream's
+# is: Prometheus binds to loopback only (docker-compose.override.yml).

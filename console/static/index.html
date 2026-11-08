@@ -43,6 +43,7 @@
         <button role="tab" data-tab="map" aria-selected="true">Map</button>
         <button role="tab" data-tab="telemetry">Telemetry</button>
         <button role="tab" data-tab="anomalies">Anomalies</button>
+        <button role="tab" data-tab="alerts">Alerts <span class="badge" id="alert-badge" hidden></span></button>
         <button role="tab" data-tab="gis">GIS clients</button>
         <button role="tab" data-tab="jobs">Jobs <span class="badge" id="job-badge" hidden></span></button>
       </div>
@@ -101,6 +102,23 @@
         <div class="card">
           <h3>Residuals over threshold <span class="muted small">modelled vs observed pressure, last 24 h</span></h3>
           <table class="tbl" id="anomalies"></table>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-alerts" hidden>
+        <p class="hint">Alertmanager's active alerts from the rules in monitoring/prometheus/weave-alerts.yml, which Prometheus evaluates every minute, and warnings from checking each Kafka topic against its contract in Schema Registry. Read only: silence or route alerts in Alertmanager.</p>
+        <div class="card">
+          <h3>Active alerts <span class="muted small">from Alertmanager</span></h3>
+          <div id="alert-list"></div>
+        </div>
+        <div class="card">
+          <h3>Schema warnings <span class="muted small">latest messages on each topic against its registered contract</span></h3>
+          <div id="schema-warnings"></div>
+          <table class="tbl" id="schema-topics"></table>
+        </div>
+        <div class="card">
+          <h3>Alert rules <span class="muted small">state in Prometheus</span></h3>
+          <table class="tbl" id="alert-rules"></table>
         </div>
       </section>
 
