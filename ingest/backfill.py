@@ -257,8 +257,23 @@ def fill_pressure(conn, gaps, spec: PressureSpec) -> int:
 
 
 def run_once(since: dict[str, datetime]) -> int:
-    """One pass. `since` remembers how far each stream has been checked, so only
-    the first pass after a start reads the whole window."""
+    """One pass, unless another is running. `since` remembers how far each
+    stream has been checked, so only the first pass after a start reads the
+    whole window.
+
+    The container's loop and a manual --once (the console's Fill telemetry
+    gaps) would otherwise both find the same gap and write it twice, and the
+    readings have no key to stop it. The lock is per session, so it goes when
+    the connection closes, and a skipped pass leaves `since` where it was.
+    """
+    with psycopg.connect(DSN, autocommit=True) as lock:
+        if not lock.execute("SELECT pg_try_advisory_lock(hashtext('weave.backfill'))").fetchone()[0]:
+            log.info("another backfill pass is running; skipping this one")
+            return 0
+        return _run_once(since)
+
+
+def _run_once(since: dict[str, datetime]) -> int:
     floor = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
     total = 0
     with psycopg.connect(DSN) as conn:

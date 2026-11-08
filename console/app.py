@@ -1312,6 +1312,15 @@ ACTIONS: dict[str, dict] = {
         "container also does this on its own every SIM_INTERVAL_S.",
         "params": [],
     },
+    "backfill": {
+        "label": "Fill telemetry gaps",
+        "step": None,
+        "description": "Fills closed gaps in the synthetic meter and pressure readings "
+        "from the live feeds' own profiles and ranges, and recomputes the DMA balance "
+        "over them. A gap counts once live readings follow it. The ingest-backfill "
+        "container also does this every minute.",
+        "params": [],
+    },
     "replay_model": {
         "label": "Replay missed model solves",
         "step": None,
@@ -1379,6 +1388,8 @@ def build_command(action: str, p: dict) -> list[str]:
         return run_sim + ["--once"]
     if action == "replay_model":
         return run_sim + ["--replay"]
+    if action == "backfill":
+        return exec_ + ["ingest-backfill", "python", "backfill.py", "--once"]
     if action == "start_flink":
         # Tables are session-scoped in the SQL client, so the three files have
         # to run in one session — hence one concatenated script.
