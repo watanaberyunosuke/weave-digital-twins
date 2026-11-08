@@ -55,6 +55,19 @@ class KiwisTests(unittest.TestCase):
         series = hp.kiwis_series(self.LIST)
         self.assertEqual(series, {("G1", "level_m"): "101", ("G1", "flow_cumecs"): "102", ("G2", "level_m"): "201"})
 
+    def test_stations_carry_name_location_and_measures(self):
+        listing = [
+            ["station_no", "station_name", "station_latitude", "station_longitude", "parametertype_name", "ts_id"],
+            ["G1", "RIVER AT A", "-37.78", "145.02", "Water Course Level", "101"],
+            ["G1", "RIVER AT A", "-37.78", "145.02", "Water Course Discharge", "102"],
+            ["G1", "RIVER AT A", "-37.78", "145.02", "Rainfall", "103"],
+        ]
+        st = hp.kiwis_stations(listing)
+        self.assertEqual(list(st), ["G1"])
+        self.assertEqual(st["G1"]["name"], "RIVER AT A")
+        self.assertEqual(st["G1"]["measures"], {"level_m": "m", "flow_cumecs": "m3/s"})
+        self.assertEqual(hp.kiwis_series(listing), {("G1", "level_m"): "101", ("G1", "flow_cumecs"): "102"})
+
     def test_series_rejects_an_error_answer(self):
         with self.assertRaises(ValueError):
             hp.kiwis_series({"type": "error", "message": "x"})
