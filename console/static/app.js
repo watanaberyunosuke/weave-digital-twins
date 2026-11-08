@@ -65,7 +65,7 @@ function showTab(name) {
   if (name === 'map') map.invalidateSize();
   if (name === 'telemetry') loadTelemetry();
   if (name === 'anomalies') loadAnomalies();
-  if (name === 'alerts') loadAlerts();
+  if (name === 'alerts') void loadAlerts();
   if (name === 'jobs') loadJobs();
   if (name === 'gis') loadGisLayers();
 }
@@ -1170,7 +1170,6 @@ async function loadAlerts({ badgeOnly = false } = {}) {
         (w.examples || []).length ? el('ul', { class: 'muted small' }, ...w.examples.map((x) => el('li', {}, x))) : null)))
       : [el('p', { class: 'muted' }, 'Every topic matches its registered contract.')]));
     topics.replaceChildren(
-      el('tr', {}, el('th', {}, 'Topic'), el('th', { class: 'num' }, 'Registered version'), el('th', { class: 'num' }, 'Versions'), el('th', { class: 'num' }, 'Messages checked')),
       ...body.schemas.value.topics.map((t) => el('tr', {},
         el('td', {}, t.topic),
         el('td', { class: 'num' }, t.version ?? 'none'),
@@ -1179,10 +1178,10 @@ async function loadAlerts({ badgeOnly = false } = {}) {
   }
 
   const rules = $('#alert-rules');
-  if (!body.rules.ok) unavailable(rules, body.rules, 'Prometheus');
-  else {
+  if (!body.rules.ok) {
+    rules.replaceChildren(el('tr', {}, el('td', { class: 'err', colspan: 4 }, `Prometheus unavailable: ${body.rules.error || 'no answer'}`)));
+  } else {
     rules.replaceChildren(
-      el('tr', {}, ...['Rule', 'Severity', 'State', 'What it means'].map((t) => el('th', {}, t))),
       ...body.rules.value.map((r) => el('tr', {},
         el('td', {}, r.name, el('div', { class: 'muted small' }, r.group)),
         el('td', {}, sevTag(r.severity)),
@@ -1377,7 +1376,7 @@ async function boot() {
   // The public console has no Prometheus, Alertmanager or Kafka to read.
   $('[data-tab="alerts"]').hidden = state.config.mode === 'public';
   await refreshStatus();
-  if (state.config.mode !== 'public') loadAlerts({ badgeOnly: true });
+  if (state.config.mode !== 'public') void loadAlerts({ badgeOnly: true });
   loadMap();
   setInterval(refreshStatus, 10000);
   setInterval(() => {
@@ -1385,7 +1384,7 @@ async function boot() {
     if (state.selectedDma && state.tab === 'map') openDma(state.selectedDma);
     if (state.tab === 'telemetry') loadTelemetry();
     if (state.tab === 'anomalies') loadAnomalies();
-    if (state.config.mode !== 'public') loadAlerts({ badgeOnly: true });
+    if (state.config.mode !== 'public') void loadAlerts({ badgeOnly: true });
   }, 60000);
 }
 

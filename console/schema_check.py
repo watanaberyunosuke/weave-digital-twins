@@ -33,25 +33,30 @@ JSON_TYPES = {
 }
 
 
+def field_errors(name: str, rule: dict, value) -> list[str]:
+    """What is wrong with one field against its property rule."""
+    errors = []
+    if "const" in rule and value != rule["const"]:
+        errors.append(f"{name} must be {json.dumps(rule['const'])}, got {json.dumps(value)}")
+    types = rule.get("type")
+    allowed = [types] if isinstance(types, str) else (types or [])
+    if allowed and not any(JSON_TYPES[t](value) for t in allowed if t in JSON_TYPES):
+        errors.append(f"{name} should be {' or '.join(allowed)}, got {type(value).__name__}")
+    return errors
+
+
 def validate(schema: dict, msg) -> list[str]:
     """What is wrong with one decoded message, or [] if nothing."""
     if not isinstance(msg, dict):
         return ["not a JSON object"]
     props = schema.get("properties", {})
+    closed = schema.get("additionalProperties") is False
     errors = [f"missing {name}" for name in schema.get("required", []) if name not in msg]
     for name, value in msg.items():
-        rule = props.get(name)
-        if rule is None:
-            if schema.get("additionalProperties") is False:
-                errors.append(f"unexpected field {name}")
-            continue
-        if "const" in rule and value != rule["const"]:
-            errors.append(f"{name} must be {json.dumps(rule['const'])}, got {json.dumps(value)}")
-        types = rule.get("type")
-        if types:
-            allowed = [types] if isinstance(types, str) else types
-            if not any(JSON_TYPES[t](value) for t in allowed if t in JSON_TYPES):
-                errors.append(f"{name} should be {' or '.join(allowed)}, got {type(value).__name__}")
+        if name in props:
+            errors.extend(field_errors(name, props[name], value))
+        elif closed:
+            errors.append(f"unexpected field {name}")
     return errors
 
 
@@ -87,40 +92,58 @@ def check_topic(topic: str, contract: dict | None, versions: list[dict], samples
               with the schema already decoded; [] when the subject is absent.
     samples:  the raw values of the topic's latest messages.
     """
-    out = []
-
-    def warn(code: str, message: str, level: str = "warning", **extra):
-        out.append({"topic": topic, "code": code, "level": level, "message": message, **extra})
-
     if not versions:
-        warn(
-            "not_registered",
-            "No contract is registered, so nothing checks changes to this topic's messages. "
-            "Run Register topic schemas.",
-        )
-        return out
+        return [
+            warning(
+                topic,
+                "not_registered",
+                "No contract is registered, so nothing checks changes to this topic's messages. "
+                "Run Register topic schemas.",
+            )
+        ]
+    return contract_warnings(topic, contract, versions) + message_warnings(topic, versions[-1], samples)
+
+
+def warning(topic: str, code: str, message: str, level: str = "warning", **extra) -> dict:
+    return {"topic": topic, "code": code, "level": level, "message": message, **extra}
+
+
+def contract_warnings(topic: str, contract: dict | None, versions: list[dict]) -> list[dict]:
+    """Evolution in the registry, and a repository contract the registry doesn't hold."""
+    out = []
     latest = versions[-1]
     registered = latest["schema"]
     if len(versions) > 1:
         diff = diff_schemas(versions[-2]["schema"], registered)
-        warn(
-            "evolved",
-            f"Contract evolved to version {latest['version']}, which {describe_diff(diff)} "
-            f"relative to version {versions[-2]['version']}. Check the Flink source columns "
-            "in flink/sql/01_sources.sql read the new fields.",
-            version=latest["version"],
-            diff=diff,
+        out.append(
+            warning(
+                topic,
+                "evolved",
+                f"Contract evolved to version {latest['version']}, which {describe_diff(diff)} "
+                f"relative to version {versions[-2]['version']}. Check the Flink source columns "
+                "in flink/sql/01_sources.sql read the new fields.",
+                version=latest["version"],
+                diff=diff,
+            )
         )
     if contract is not None and contract != registered:
         diff = diff_schemas(registered, contract)
-        warn(
-            "contract_differs",
-            f"The repository contract differs from registered version {latest['version']}: "
-            f"it {describe_diff(diff)}. Either it hasn't been registered yet or the registry "
-            "refused it as incompatible; Register topic schemas says which.",
-            diff=diff,
+        out.append(
+            warning(
+                topic,
+                "contract_differs",
+                f"The repository contract differs from registered version {latest['version']}: "
+                f"it {describe_diff(diff)}. Either it hasn't been registered yet or the registry "
+                "refused it as incompatible; Register topic schemas says which.",
+                diff=diff,
+            )
         )
+    return out
 
+
+def message_warnings(topic: str, latest: dict, samples: list[bytes]) -> list[dict]:
+    """How many of the sampled messages break the latest registered contract."""
+    registered = latest["schema"]
     bad, examples = 0, []
     for raw in samples:
         try:
@@ -131,8 +154,11 @@ def check_topic(topic: str, contract: dict | None, versions: list[dict], samples
             bad += 1
             if len(examples) < 3:
                 examples.append("; ".join(errors))
-    if bad:
-        warn(
+    if not bad:
+        return []
+    return [
+        warning(
+            topic,
             "invalid_messages",
             f"{bad} of the latest {len(samples)} messages break registered version "
             f"{latest['version']}. Flink drops a message it can't parse without logging it.",
@@ -141,4 +167,4 @@ def check_topic(topic: str, contract: dict | None, versions: list[dict], samples
             sampled=len(samples),
             failed=bad,
         )
-    return out
+    ]

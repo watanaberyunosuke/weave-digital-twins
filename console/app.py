@@ -1392,7 +1392,7 @@ def metrics_text() -> str:
     return "\n".join(out) + "\n"
 
 
-@app.get("/metrics")
+@app.get("/metrics", responses={404: {"description": "Not served by the public console"}})
 async def metrics():
     # The public console has no Connect or Kafka to read and nothing scrapes it.
     if PUBLIC:
@@ -1458,7 +1458,8 @@ def schema_report() -> dict:
         try:
             samples = sample_topic(topic, SCHEMA_SAMPLE)
             sample_error = None
-        except Exception as exc:  # noqa: BLE001 — one topic's broker error is shown, the rest still checked
+        # One topic's broker error is shown; the other topics are still checked.
+        except Exception as exc:  # noqa: BLE001
             samples, sample_error = [], str(exc).splitlines()[0][:200]
         found = schema_check.check_topic(topic, contract, versions, samples)
         if sample_error:

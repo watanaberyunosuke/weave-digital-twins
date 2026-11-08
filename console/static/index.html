@@ -114,11 +114,17 @@
         <div class="card">
           <h3>Schema warnings <span class="muted small">latest messages on each topic against its registered contract</span></h3>
           <div id="schema-warnings"></div>
-          <table class="tbl" id="schema-topics"></table>
+          <table class="tbl">
+            <thead><tr><th>Topic</th><th class="num">Registered version</th><th class="num">Versions</th><th class="num">Messages checked</th></tr></thead>
+            <tbody id="schema-topics"></tbody>
+          </table>
         </div>
         <div class="card">
           <h3>Alert rules <span class="muted small">state in Prometheus</span></h3>
-          <table class="tbl" id="alert-rules"></table>
+          <table class="tbl">
+            <thead><tr><th>Rule</th><th>Severity</th><th>State</th><th>What it means</th></tr></thead>
+            <tbody id="alert-rules"></tbody>
+          </table>
         </div>
       </section>
 
