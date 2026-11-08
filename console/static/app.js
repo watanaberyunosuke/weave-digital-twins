@@ -721,10 +721,11 @@ async function openDma(dmaId) {
     chart('Pressure: modelled vs observed (m)', [
       { name: 'modelled', colour: css('--derived'), points: d.residuals.map((r) => [r.ts, r.modelled]) },
       { name: 'observed', colour: css('--syn'), points: d.residuals.map((r) => [r.ts, r.observed]) },
-    ]),
+    ], { bands: filledBands(d.backfills, 'sim_residual') }),
     el('p', { class: 'hint' }, statusMeaning(i.status, d.baseline)),
     el('p', { class: 'hint' }, 'Geometry and pipes are real; meters, readings and the DMA boundary are synthetic.'),
     ...(d.backfills.length ? [el('p', { class: 'hint' }, BACKFILL_NOTE)] : []),
+    ...(d.backfills.some((f) => f.stream === 'sim_residual') ? [el('p', { class: 'hint' }, REPLAY_NOTE)] : []),
   );
 }
 
@@ -879,6 +880,9 @@ function runs(points) {
 
 const BACKFILL_NOTE = 'Shaded periods were drawn afterwards to cover a gap in the feed, from the same profiles and ranges '
   + 'as live readings. They are not readings generated at the time.';
+
+const REPLAY_NOTE = 'Shaded model periods were solved afterwards, on the current network, from the readings recorded '
+  + 'for that time. They were not solved live.';
 
 // [start, end] in ms of the ranges ingest/backfill.py filled; every stream given
 // when none is named, because a device's list holds only its own.

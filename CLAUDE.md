@@ -58,6 +58,8 @@ DATAGEN_ITERATIONS=10000 DATAGEN_MAX_INTERVAL=10 ./scripts/register-connectors.s
 ./scripts/seed-if-needed.sh [--check]   # seeds meters (--once) and a bounded pressure batch only when a feed is empty or older than SEED_STALE_S; needs Flink running
 docker exec simulator python run_sim.py --build   # PostGIS -> /app/out/network.inp
 docker exec simulator python run_sim.py --once    # one solve + residuals; --loop is the container default
+docker exec simulator python run_sim.py --replay  # replay solves missed in closed gaps (the loop also does this)
+docker exec ingest-backfill python backfill.py --once   # fill closed meter/pressure gaps now (the service also does this every minute)
 docker exec simulator python run_sim.py --reset-baseline --dma D07   # after a recalibration; omit --dma for all
 
 ./scripts/elk-up.sh                       # existing cluster if .env's ELASTICSEARCH_URL answers, else local-elk profile
@@ -91,6 +93,7 @@ public GIS catalogue ─(gis/load_gis.py)─> asset.gis_raw + asset.pipe/facilit
 real feeds (ingest/*.py) ──────────────────────────────────────────> Kafka topics ──> Flink SQL ──> twin.* (Timescale)
 storage volumes (ingest/storage_poller.py, daily) ── batch, no Kafka ──> ref.storage_site + twin.storage_level
 gaps in synthetic telemetry (ingest/backfill.py) ── no Kafka ──> twin.meter_reading, pressure_reading, dma_balance, backfill_log
+missed solves (run_sim.py replay, idle time) ── no Kafka ──> twin.sim_residual, backfill_log
                                                                                            │
                                      model/run_sim.py: PostGIS -> EPANET .inp -> solve -> twin.sim_result
                                                                                            │
@@ -112,12 +115,14 @@ gaps in synthetic telemetry (ingest/backfill.py) ── no Kafka ──> twin.me
 
 ### Gap fills
 
-A sleeping host stops the generators but not water use, so [ingest/backfill.py](ingest/backfill.py) (`ingest-backfill`) fills the gaps in `twin.meter_reading` and `twin.pressure_reading`, drawing from the live feeds' own sources (`demand_profiles`, and `schemas/pressure_reading.avsc`, read rather than copied because the seeder rewrites it). Real feeds are never filled.
+A sleeping host stops the generators but not water use, so [ingest/backfill.py](ingest/backfill.py) (`ingest-backfill`) fills the gaps in `twin.meter_reading` and `twin.pressure_reading`, drawing from the live feeds' own sources (`demand_profiles`, and `schemas/pressure_reading.avsc`, read rather than copied because the seeder rewrites it). Real feeds are never synthesised.
 
 - **Closed gaps only.** A gap counts once a live row follows it. One still open can't be told from a broken pipeline, and filling it would make a dead feed look fresh. That row also fixes where the gap ends, so a filled gap stops being a gap, which is the only thing keeping a re-run safe on tables with no key. Meter gaps are over 1.5 × `METER_INTERVAL_S`, logger gaps over `BACKFILL_PRESSURE_GAP_S` (300 s), and only the last `BACKFILL_MAX_AGE_DAYS` (7) are looked at.
 - **Straight to Postgres, one transaction per gap**, like the storage poller. Through Kafka the bronze sinks would accept old timestamps but Flink's windows have closed, so `twin.dma_balance` is recomputed here over the same range, only for windows with meter readings, as the pipeline does.
+- **One pass at a time.** A Postgres advisory lock keeps the container's loop and a manual `backfill.py --once` (the console's Fill telemetry gaps) from filling the same gap twice; a pass that finds the lock taken skips.
 - **Every fill is logged** to `twin.backfill_log` (range, row count, method), because `is_synthetic` can't separate filled rows from live synthetic ones. The console shades those ranges on the DMA and device charts. Logstash's normal inputs only read forward, so three more inputs read each fill once, tracked on `filled_at`.
-- **Model output is not filled.** `twin.sim_residual` keeps its gaps, because the model reads `now()` and a past solve would use today's network.
+- **Model output is replayed by the simulator, not here.** [model/replay.py](model/replay.py) finds closed gaps in `twin.sim_residual` (over 1.5 × `SIM_INTERVAL_S`, last `SIM_REPLAY_MAX_AGE_DAYS`, 7) and `run_sim.py --loop` solves them oldest first in the idle part of each interval (`--replay`, or the console's Replay missed model solves, does it once; a Postgres advisory lock keeps two replays from writing the same gap twice), each as of its own time: demands from the meters' hour to that time, observed pressure from its 30 minutes, the baseline from earlier rows. A time whose telemetry ingest-backfill has not filled yet waits. A replay solves today's `network.inp`, because past topology is not kept, so nothing before that file's build time is replayed (the baseline then describes the old network, and replays against it flagged a third of the DMAs), and each range is logged to `twin.backfill_log` (stream `sim_residual`) and shaded on the DMA's model chart; replays never touch `twin.dma_latest` and their `sim_result` rows are deleted in the same transaction. `SIM_REPLAY=0` keeps the gaps instead.
+- **Real feeds are re-fetched, never drawn.** `ingest-storage` resumes from each gauge's last stored day and `ingest-hydrometry` from each gauge and variable's last stored reading (up to `HYDRO_MAX_AGE_DAYS`, 7), so an outage is recovered from the source's own history and nothing is published twice; a gap the source itself has stays a gap.
 - A meter's day factor is salted per process, so it differs between live and filled rows on one date, as it already does across a restart of `ingest-meters`.
 
 ### Flink layer
@@ -144,7 +149,7 @@ Kibana can only read Elasticsearch, so Elasticsearch holds a **derived, disposab
 
 [console/](console/) is a FastAPI app serving one static page (no build step; Leaflet is vendored into the image at build time so the page makes no third-party requests). It shows pipeline state, the network map with DMA status, telemetry freshness, real feeds and flagged residuals, and runs the bootstrap steps.
 
-- **It never writes itself.** Reads use read-only Postgres transactions plus the Connect, Flink and Kafka endpoints. Every operation is an allow-listed entry in `ACTIONS` whose `build_command()` is the exact documented command (`scripts/*.sh`, or `docker exec gis-loader|simulator|flink-sql-client ...`), so the console cannot drift from the CLI. Add an operation there, not as new logic.
+- **It never writes itself.** Reads use read-only Postgres transactions plus the Connect, Flink and Kafka endpoints. Every operation is an allow-listed entry in `ACTIONS` whose `build_command()` is the exact documented command (`scripts/*.sh`, or `docker exec gis-loader|simulator|ingest-backfill|flink-sql-client ...`), so the console cannot drift from the CLI. Add an operation there, not as new logic.
 - **Step status is derived from what each step leaves behind** (topics, row counts, `schemas/*.avsc`, connector state, `network.inp`, Flink jobs, latest residual), so steps run from the CLI show up too.
 - **One job at a time**, because seeding truncates what loading and model building read. Jobs live in memory; killing the console doesn't stop a `docker exec` already started.
 - **It holds the Docker socket**, so it binds to loopback, rejects other `Host` headers, and requires an `X-Weave-Console` header on POSTs so other sites in the browser can't trigger operations. Keep all three.

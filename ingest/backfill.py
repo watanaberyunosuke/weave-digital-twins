@@ -19,7 +19,9 @@ fill is written to twin.backfill_log with its range and method, because
 is_synthetic can't separate these rows from live synthetic ones; the console
 marks those ranges on its charts and Logstash re-reads them.
 
-Real feeds are never filled here: a gap in an observation is a fact.
+Real feeds are never drawn here: a gap in an observation is a fact. Their pollers
+re-fetch an outage from the source instead, and model/replay.py replays the
+solves the simulator missed.
 
     python backfill.py            # check every BACKFILL_INTERVAL_S
     python backfill.py --once     # one pass over the window, then exit
@@ -255,8 +257,23 @@ def fill_pressure(conn, gaps, spec: PressureSpec) -> int:
 
 
 def run_once(since: dict[str, datetime]) -> int:
-    """One pass. `since` remembers how far each stream has been checked, so only
-    the first pass after a start reads the whole window."""
+    """One pass, unless another is running. `since` remembers how far each
+    stream has been checked, so only the first pass after a start reads the
+    whole window.
+
+    The container's loop and a manual --once (the console's Fill telemetry
+    gaps) would otherwise both find the same gap and write it twice, and the
+    readings have no key to stop it. The lock is per session, so it goes when
+    the connection closes, and a skipped pass leaves `since` where it was.
+    """
+    with psycopg.connect(DSN, autocommit=True) as lock:
+        if not lock.execute("SELECT pg_try_advisory_lock(hashtext('weave.backfill'))").fetchone()[0]:
+            log.info("another backfill pass is running; skipping this one")
+            return 0
+        return _run_once(since)
+
+
+def _run_once(since: dict[str, datetime]) -> int:
     floor = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
     total = 0
     with psycopg.connect(DSN) as conn:

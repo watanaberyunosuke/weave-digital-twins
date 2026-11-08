@@ -3,7 +3,8 @@
 
     python model/run_sim.py --build        # PostGIS -> EPANET .inp
     python model/run_sim.py --once         # one hydraulic solve + residuals
-    python model/run_sim.py --loop         # every 15 minutes
+    python model/run_sim.py --loop         # every 15 minutes, replaying missed solves in between
+    python model/run_sim.py --replay       # replay solves missed while the simulator was down
 
 The model geometry is real (the loaded region's mains, reservoirs, pumps).
 Demands are synthetic, derived from the generated meter readings. That split
@@ -26,6 +27,14 @@ import wntr
 from demands import DEMAND_WINDOW, METER_FLOWS_SQL, apply_demands, junction_demands
 from gaps import BRIDGE_LARGE_M, BRIDGE_SMALL_M, TJUNCTION_M, Link
 from modelled_network import MAX_PIPES, MAX_SNAP_M, excluded_pipes, select_modelled
+from replay import ENABLED as replay_enabled
+from replay import LOG_SQL
+from replay import MAX_AGE_DAYS as REPLAY_MAX_AGE_DAYS
+from replay import METHOD as REPLAY_METHOD
+from replay import READY_SQL as REPLAY_READY_SQL
+from replay import SOLVE_TIMES_SQL
+from replay import STREAM as REPLAY_STREAM
+from replay import replay_times
 from residuals import (
     ALL_DMAS,
     BASELINE_DAYS,
@@ -428,22 +437,25 @@ def build_inp() -> str:
 
 
 # ------------------------------------------------------------------ simulate
-def simulate() -> str:
+def solve(as_of: datetime) -> tuple[str, list[tuple]]:
+    """One EPANET solve with the meters' demand in the hour to as_of.
+
+    Returns the run id and its rows for twin.sim_result, all dated as_of.
+    """
     if not os.path.exists(INP_PATH):
         build_inp()
 
     wn = wntr.network.WaterNetworkModel(INP_PATH)
     # The .inp holds topology only; demands come from the meters each solve.
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute(METER_FLOWS_SQL, {"window": DEMAND_WINDOW})
+        cur.execute(METER_FLOWS_SQL, {"window": DEMAND_WINDOW, "as_of": as_of})
         demands = junction_demands(cur.fetchall())
     unmodelled = apply_demands(wn, demands)
     print(
         f"  demands: {demands.meters} meters, {demands.silent} with no reading"
-        f" in the last {DEMAND_WINDOW}; {sum(demands.by_node.values()):.6f} m³/s,"
+        f" in the {DEMAND_WINDOW} to {as_of:%Y-%m-%d %H:%M}Z; {sum(demands.by_node.values()):.6f} m³/s,"
         f" {unmodelled:.6f} of it at nodes outside the model"
     )
-    started = time.monotonic()
     sim = wntr.sim.EpanetSimulator(wn)
     # EPANET's scratch files default to temp.* in the working directory, so
     # the --loop container and a --once run from the console would overwrite
@@ -451,26 +463,36 @@ def simulate() -> str:
     results = sim.run_sim(file_prefix=f"/tmp/weave-sim-{os.getpid()}")
 
     run_id = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc)
     rows = []
-
     pressure = results.node["pressure"]
     for node_name in pressure.columns:
-        rows.append((run_id, now, "node", node_name, "pressure", float(pressure[node_name].iloc[-1])))
-
+        rows.append((run_id, as_of, "node", node_name, "pressure", float(pressure[node_name].iloc[-1])))
     flow = results.link["flowrate"]
     for link_name in flow.columns:
-        rows.append((run_id, now, "link", link_name, "flow", float(flow[link_name].iloc[-1])))
+        rows.append((run_id, as_of, "link", link_name, "flow", float(flow[link_name].iloc[-1])))
+    return run_id, rows
 
+
+def insert_results(cur, rows: list[tuple]) -> None:
+    cur.executemany(
+        """INSERT INTO twin.sim_result
+             (run_id, ts, element_type, element_id, variable, value)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT DO NOTHING""",
+        rows,
+    )
+
+
+def simulate() -> tuple[str, datetime]:
+    started = time.monotonic()
+    # One timestamp for the solve, its results and its residuals, taken from
+    # the database so it is on the same clock as the readings it averages.
+    with psycopg.connect(DSN) as conn:
+        as_of = conn.execute("SELECT now()").fetchone()[0]
+    run_id, rows = solve(as_of)
     solve_s = time.monotonic() - started
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.executemany(
-            """INSERT INTO twin.sim_result
-                 (run_id, ts, element_type, element_id, variable, value)
-               VALUES (%s, %s, %s, %s, %s, %s)
-               ON CONFLICT DO NOTHING""",
-            rows,
-        )
+        insert_results(cur, rows)
         cur.execute(RESULT_TS_INDEX_SQL)
         cur.execute(
             "DELETE FROM twin.sim_result WHERE ts < now() - make_interval(secs => %s)", (RESULT_RETENTION_HOURS * 3600,)
@@ -483,45 +505,49 @@ def simulate() -> str:
         f"run {run_id}: solved in {solve_s:.0f} s, wrote {len(rows)} simulated values,"
         f" pruned {pruned} older than {RESULT_RETENTION_HOURS:g} h"
     )
-    return run_id
+    return run_id, as_of
 
 
 # ------------------------------------------------------------- residual check
-def compute_residuals(run_id: str) -> int:
+def score_residuals(cur, run_id: str, as_of: datetime) -> list[tuple]:
+    cur.execute(RESET_TABLE_SQL)
+    cur.execute(
+        RESIDUALS_SQL,
+        {
+            "run_id": run_id,
+            "as_of": as_of,
+            "baseline_s": BASELINE_DAYS * 86400,
+            "relearn_s": RELEARN_HOURS * 3600,
+            "all_dmas": ALL_DMAS,
+        },
+    )
+    rows = []
+    for dma_id, modelled, observed, n, mean, sd in cur.fetchall():
+        rows.append((dma_id, modelled, observed, classify(modelled - observed, n, mean, sd)))
+    # Every row of a solve shares its as_of, so a concurrent run's rows can't
+    # be mistaken for it.
+    cur.executemany(
+        """INSERT INTO twin.sim_residual
+             (ts, dma_id, element_id, variable, modelled, observed,
+              residual, z_score, flagged)
+           VALUES (%s, %s, %s, 'pressure', %s, %s, %s, %s, %s)""",
+        [(as_of, dma, dma, m, o, s.residual, s.z_score, s.flagged) for dma, m, o, s in rows],
+    )
+    return rows
+
+
+def compute_residuals(run_id: str, as_of: datetime) -> int:
     """Score each DMA's pressure residual against its own baseline."""
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute(RESET_TABLE_SQL)
-        cur.execute(
-            RESIDUALS_SQL,
-            {
-                "run_id": run_id,
-                "baseline_s": BASELINE_DAYS * 86400,
-                "relearn_s": RELEARN_HOURS * 3600,
-                "all_dmas": ALL_DMAS,
-            },
-        )
-        rows = []
-        for dma_id, modelled, observed, n, mean, sd in cur.fetchall():
-            score = classify(modelled - observed, n, mean, sd)
-            rows.append((dma_id, modelled, observed, score))
-
-        # now() is fixed for the transaction, so every row of this run shares
-        # one timestamp and a concurrent run's rows can't be mistaken for it.
-        cur.executemany(
-            """INSERT INTO twin.sim_residual
-                 (ts, dma_id, element_id, variable, modelled, observed,
-                  residual, z_score, flagged)
-               VALUES (now(), %s, %s, 'pressure', %s, %s, %s, %s, %s)""",
-            [(dma, dma, m, o, s.residual, s.z_score, s.flagged) for dma, m, o, s in rows],
-        )
+        rows = score_residuals(cur, run_id, as_of)
         cur.executemany(
             """INSERT INTO twin.dma_latest (dma_id, ts, min_pressure_m, status)
-               VALUES (%s, now(), %s, %s)
+               VALUES (%s, %s, %s, %s)
                ON CONFLICT (dma_id) DO UPDATE SET
                  ts = EXCLUDED.ts,
                  min_pressure_m = EXCLUDED.min_pressure_m,
                  status = EXCLUDED.status""",
-            [(dma, o, s.status) for dma, _m, o, s in rows],
+            [(dma, as_of, o, s.status) for dma, _m, o, s in rows],
         )
         conn.commit()
 
@@ -536,6 +562,99 @@ def compute_residuals(run_id: str) -> int:
         f" flagged rows rejoin after {RELEARN_HOURS:g} h)"
     )
     return len(rows)
+
+
+# --------------------------------------------------------------------- replay
+def pending_replays() -> list[datetime]:
+    """Times in closed gaps since the current network.inp was built."""
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        # ingest-backfill creates the log; until it has, nothing is filled anyway.
+        cur.execute("SELECT to_regclass('twin.backfill_log') IS NOT NULL")
+        if not cur.fetchone()[0]:
+            return []
+        cur.execute(SOLVE_TIMES_SQL, {"max_age_s": REPLAY_MAX_AGE_DAYS * 86400})
+        solves = [r[0] for r in cur.fetchall()]
+    # Before the current network.inp was built, the live solves used another
+    # network and their baseline describes it; a replay on today's network
+    # scored against that baseline flags DMAs for the rebuild, not for water.
+    built = datetime.fromtimestamp(os.path.getmtime(INP_PATH), timezone.utc) if os.path.exists(INP_PATH) else None
+    return [t for t in replay_times(solves, INTERVAL_S) if built is None or t > built]
+
+
+def replay_one(as_of: datetime) -> int | None:
+    """Solve and score one past time; None when its telemetry isn't filled yet."""
+    with psycopg.connect(DSN) as conn:
+        ready = conn.execute(REPLAY_READY_SQL, {"as_of": as_of, "window": DEMAND_WINDOW}).fetchone()[0]
+    if not ready:
+        print(f"replay: waiting for backfilled telemetry at {as_of:%Y-%m-%d %H:%M}Z")
+        return None
+    run_id, rows = solve(as_of)
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        # Residuals read junction pressures only, so flows aren't written.
+        insert_results(cur, [r for r in rows if r[4] == "pressure"])
+        scored = score_residuals(cur, run_id, as_of)
+        cur.execute("DELETE FROM twin.sim_result WHERE run_id = %s", (run_id,))
+        conn.commit()
+    return len(scored)
+
+
+def log_replayed(start: datetime, end: datetime, rows: int) -> None:
+    with psycopg.connect(DSN) as conn:
+        conn.execute(LOG_SQL, (REPLAY_STREAM, start, end, rows, REPLAY_METHOD))
+    print(f"replay: filled {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}Z with {rows} residuals")
+
+
+def replay(deadline: float | None = None) -> int:
+    """Replay the solves missed while the simulator was down, oldest first.
+
+    Stops at the first time whose telemetry ingest-backfill has not filled yet,
+    or when time.monotonic() passes deadline, and carries on next call. A
+    replay writes residuals only: twin.dma_latest is the present, and its
+    sim_result rows are deleted in the same transaction, since only the latest
+    live run is ever read.
+    """
+    if not replay_enabled:
+        return 0
+    # The loop and a console or CLI --replay would otherwise both find the same
+    # gap and write every residual twice, and the table has no key to stop it.
+    # The lock is per session, so it goes when this connection closes.
+    with psycopg.connect(DSN, autocommit=True) as lock:
+        if not lock.execute("SELECT pg_try_advisory_lock(hashtext('weave.sim_replay'))").fetchone()[0]:
+            print("replay: another replay is running; leaving it to finish")
+            return 0
+        return _replay(deadline)
+
+
+def _replay(deadline: float | None) -> int:
+    times = pending_replays()
+    step = timedelta(seconds=INTERVAL_S)
+    done, last_solve_s = [], 0.0  # done: (as_of, residual rows)
+    for as_of in times:
+        if deadline is not None and time.monotonic() + last_solve_s * 1.5 > deadline:
+            break
+        started = time.monotonic()
+        try:
+            scored = replay_one(as_of)
+        except Exception as exc:
+            print(f"! replay at {as_of:%Y-%m-%d %H:%M}Z failed: {exc}")
+            break
+        if scored is None:
+            break
+        last_solve_s = time.monotonic() - started
+        done.append((as_of, scored))
+
+    # One log row per contiguous run: a new run starts where the previous
+    # replay was not one step back.
+    runs: list[list[tuple[datetime, int]]] = []
+    for as_of, scored in done:
+        if not runs or as_of - runs[-1][-1][0] > step * 1.5:
+            runs.append([])
+        runs[-1].append((as_of, scored))
+    for run in runs:
+        log_replayed(run[0][0], run[-1][0], sum(n for _, n in run))
+    if len(times) > len(done):
+        print(f"replay: {len(times) - len(done)} solves still to replay")
+    return len(done)
 
 
 def reset_baseline(dmas: list[str]) -> int:
@@ -568,11 +687,37 @@ def reset_baseline(dmas: list[str]) -> int:
     return len(targets)
 
 
+def run_loop() -> None:
+    while True:
+        # Sleep the rest of the interval, not a whole one, so a larger
+        # model keeps the 15-minute cadence the baseline counts assume.
+        started = time.monotonic()
+        try:
+            compute_residuals(*simulate())
+        except Exception as exc:
+            print(f"! simulation failed: {exc}")
+        elapsed = time.monotonic() - started
+        if elapsed > INTERVAL_S:
+            print(
+                f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"
+                " lower SIM_MAX_PIPES or raise the interval"
+            )
+        # Missed solves are replayed in the idle part of the interval, so
+        # the live cadence holds while a long outage catches up.
+        try:
+            replay(deadline=started + INTERVAL_S)
+        except Exception as exc:
+            print(f"! replay failed: {exc}")
+        elapsed = time.monotonic() - started
+        time.sleep(max(0.0, INTERVAL_S - elapsed))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--loop", action="store_true")
+    ap.add_argument("--replay", action="store_true", help="replay solves missed in closed gaps, then exit")
     ap.add_argument(
         "--reset-baseline", action="store_true", help="start residual baselines afresh (all DMAs unless --dma is given)"
     )
@@ -590,27 +735,17 @@ def main() -> int:
         return 0
 
     if args.once:
-        compute_residuals(simulate())
+        compute_residuals(*simulate())
+        return 0
+
+    if args.replay:
+        replay()
         return 0
 
     if args.loop:
-        while True:
-            # Sleep the rest of the interval, not a whole one, so a larger
-            # model keeps the 15-minute cadence the baseline counts assume.
-            started = time.monotonic()
-            try:
-                compute_residuals(simulate())
-            except Exception as exc:
-                print(f"! simulation failed: {exc}")
-            elapsed = time.monotonic() - started
-            if elapsed > INTERVAL_S:
-                print(
-                    f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"
-                    " lower SIM_MAX_PIPES or raise the interval"
-                )
-            time.sleep(max(0.0, INTERVAL_S - elapsed))
+        run_loop()
 
-    ap.error("pass --build, --once, --loop or --reset-baseline")
+    ap.error("pass --build, --once, --loop, --replay or --reset-baseline")
     return 1
 
 

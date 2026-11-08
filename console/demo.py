@@ -57,6 +57,14 @@ _SAMPLES: dict[str, list[str]] = {
         "Searching the region catalogue ...",
         "No live search in a simulation.",
     ],
+    "backfill": [
+        "backfill pressure_reading: filled 2026-11-05T11:30:00+00:00 to 2026-11-08T04:49:00+00:00 with 156368 rows",
+        "backfill meter_reading: filled 2026-11-05T11:16:00+00:00 to 2026-11-08T04:51:00+00:00 with 261000 rows",
+    ],
+    "replay_model": [
+        "replay: filled 2026-11-05 11:31 to 2026-11-05 20:46Z with 1520 residuals",
+        "replay: waiting for backfilled telemetry at 2026-11-05 21:01Z",
+    ],
     "run_sim_once": [
         "Applied meter demands at junctions, then solved.",
         "Residuals written; DMA status updated.",

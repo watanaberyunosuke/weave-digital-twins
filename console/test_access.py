@@ -110,6 +110,8 @@ class SimulationTests(unittest.TestCase):
             "load_elevation",
             "discover",
             "run_sim_once",
+            "replay_model",
+            "backfill",
         ):
             self.assertNotIn("(no sample", " ".join(demo.simulated_lines(action, {}, ["c"])), action)
 

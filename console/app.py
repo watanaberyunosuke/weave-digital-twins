@@ -1058,8 +1058,8 @@ DEVICES = {
 
 
 def backfills(streams: list[str], hours: int) -> list[dict]:
-    """Ranges ingest/backfill.py drew after a gap, so a chart can mark them: their
-    rows look like any other synthetic reading. Older volumes lack the table until
+    """Ranges ingest/backfill.py drew, or run_sim.py replayed, after a gap, so a
+    chart can mark them: their rows look like any other synthetic reading. Older volumes lack the table until
     that service first runs."""
     if not scalar("SELECT to_regclass('twin.backfill_log') IS NOT NULL"):
         return []
@@ -1173,7 +1173,7 @@ def dma_detail(dma_id: str, hours: int = Query(24, ge=1, le=168)):
             """,
                 (dma_id, window),
             ),
-            "backfills": backfills(["meter_reading", "pressure_reading"], hours),
+            "backfills": backfills(["meter_reading", "pressure_reading", "sim_residual"], hours),
         }
 
     return db_or_503(run)
@@ -1312,6 +1312,24 @@ ACTIONS: dict[str, dict] = {
         "container also does this on its own every SIM_INTERVAL_S.",
         "params": [],
     },
+    "backfill": {
+        "label": "Fill telemetry gaps",
+        "step": None,
+        "description": "Fills closed gaps in the synthetic meter and pressure readings "
+        "from the live feeds' own profiles and ranges, and recomputes the DMA balance "
+        "over them. A gap counts once live readings follow it. The ingest-backfill "
+        "container also does this every minute.",
+        "params": [],
+    },
+    "replay_model": {
+        "label": "Replay missed model solves",
+        "step": None,
+        "description": "Solves the 15-minute slots the simulator missed while it was down, "
+        "oldest first, back to the current model build, each from the meter and pressure "
+        "readings recorded for that time. Waits where those readings are not yet "
+        "backfilled. The simulator also does this between its live solves.",
+        "params": [],
+    },
     "reset_baseline": {
         "label": "Reset residual baselines",
         "step": None,
@@ -1368,6 +1386,10 @@ def build_command(action: str, p: dict) -> list[str]:
         return run_sim + ["--build"]
     if action == "run_sim_once":
         return run_sim + ["--once"]
+    if action == "replay_model":
+        return run_sim + ["--replay"]
+    if action == "backfill":
+        return exec_ + ["ingest-backfill", "python", "backfill.py", "--once"]
     if action == "start_flink":
         # Tables are session-scoped in the SQL client, so the three files have
         # to run in one session — hence one concatenated script.
