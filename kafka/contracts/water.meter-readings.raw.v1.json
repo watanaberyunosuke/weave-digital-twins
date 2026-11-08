@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MeterReading",
+  "description": "A synthetic water meter reading from ingest/synthetic_meters.py, as flink/sql/01_sources.sql reads it. event_ts is epoch milliseconds.",
+  "type": "object",
+  "properties": {
+    "meter_id": {"type": "string"},
+    "dma_id": {"type": "string"},
+    "litres": {"type": "number"},
+    "flow_lpm": {"type": "number"},
+    "battery_pct": {"type": "integer"},
+    "event_ts": {"type": "integer"},
+    "is_synthetic": {"const": true}
+  },
+  "required": ["meter_id", "dma_id", "litres", "flow_lpm", "event_ts"],
+  "additionalProperties": false
+}

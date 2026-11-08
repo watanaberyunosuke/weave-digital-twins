@@ -1,0 +1,48 @@
+# Weave's Prometheus config. The image's start script reads
+# $CONFIG_PATH/prometheus-generated.yml, hence the name; the override points
+# CONFIG_PATH at this directory (docker-compose.override.yml).
+#
+# Everything up to scrape_configs is Confluent's file from cp-all-in-one
+# (vol/config/prometheus-generated.yml): Control Center reads broker metrics
+# the broker pushes over OTLP, and writes its own alert triggers to
+# trigger_rules-generated.yml. Keep those parts in step with upstream when
+# fetch-confluent-stack.sh moves to a new branch; this file replaces upstream's,
+# so a refresh no longer reaches it.
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+rule_files:
+  - /mnt/config/recording_rules-generated.yml
+  - /mnt/config/trigger_rules-generated.yml
+  # Weave's pipeline rules; the console's Alerts tab shows their state.
+  - weave-alerts.yml
+
+# Weave's own targets. Upstream scrapes nothing (the broker pushes).
+scrape_configs:
+  - job_name: flink
+    static_configs:
+      - targets: ["flink-jobmanager:9249", "flink-taskmanager:9249"]
+  # Freshness, DMA status, gap fills and connector state, all read by the
+  # console from Postgres and Connect and labelled with their origin. The
+  # console accepts Host "console" for /metrics whatever CONSOLE_ALLOWED_HOSTS says.
+  - job_name: weave-console
+    static_configs:
+      - targets: ["console:8090"]
+  # Solve time and replay backlog from run_sim.py --loop (model/metrics.py).
+  - job_name: weave-simulator
+    static_configs:
+      - targets: ["simulator:9108"]
+
+otlp:
+  promote_resource_attributes: ["host.hostname", "java.version", "kafka.broker.id", "kafka.cluster.id", "kafka.version", "type"]
+
+storage:
+  tsdb:
+    out_of_order_time_window: 10m

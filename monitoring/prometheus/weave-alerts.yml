@@ -1,0 +1,132 @@
+# Weave pipeline alerts. Prometheus evaluates these every minute and sends
+# what fires to Alertmanager; the console's Alerts tab lists both the rules
+# and the active alerts.
+#
+# Every telemetry alert keeps the series' origin label (real, synthetic,
+# derived, model), so an alert about generated data never reads as one
+# about observed data. Thresholds are assumptions, noted on each rule;
+# change them here, not in the console.
+groups:
+  - name: weave-pipeline
+    rules:
+      - alert: WeaveTargetDown
+        expr: up{job=~"flink|weave-.*"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} at {{ $labels.instance }} is not answering Prometheus"
+          description: "Its metrics, and every alert built on them, are missing until it answers."
+
+      - alert: FlinkNoRunningJob
+        expr: flink_jobmanager_numRunningJobs == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No Flink job is running"
+          description: "Nothing moves Kafka messages into twin.*. Start the Flink pipelines from the console."
+
+      - alert: FlinkJobRestarting
+        expr: increase(flink_jobmanager_job_numRestarts[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Flink job {{ $labels.job_name }} restarted in the last 15 minutes"
+          description: "Check the Flink UI's exceptions tab; a restart loop drops no data but writes nothing."
+
+      # 45 minutes is three of METER_INTERVAL_S's default 900 s (assumed
+      # tolerance). Pressure loggers report more often, so the same bound is loose.
+      - alert: SyntheticTelemetryStale
+        expr: time() - weave_telemetry_latest_timestamp_seconds{origin="synthetic"} > 2700
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No synthetic rows in {{ $labels.table }} for {{ $value | humanizeDuration }}"
+          description: "Synthetic generator or the Flink job feeding it has stopped. Generated data, not observed."
+
+      # KiWIS hourly means arrive about a day late, so two days is the
+      # assumed bound for a working feed.
+      - alert: RealHydrometryStale
+        expr: time() - weave_telemetry_latest_timestamp_seconds{table="twin.hydrometry"} > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Newest real hydrometry reading is {{ $value | humanizeDuration }} old"
+          description: "Observed gauge data. Check ingest-hydrometry's log and the source service."
+
+      # Daily means, published a day or two after the day (assumed bound).
+      - alert: RealStorageStale
+        expr: time() - weave_telemetry_latest_timestamp_seconds{table="twin.storage_level"} > 345600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Newest real storage level is {{ $value | humanizeDuration }} old"
+          description: "Observed storage data. Check ingest-storage's log and the source service."
+
+      # Three of SIM_INTERVAL_S's default 900 s (assumed tolerance).
+      - alert: ModelResidualsStale
+        expr: time() - weave_telemetry_latest_timestamp_seconds{table="twin.sim_residual"} > 2700
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No model residuals for {{ $value | humanizeDuration }}"
+          description: "DMA status is frozen at its last value. Check the simulator log."
+
+      - alert: SimSolveOverrun
+        expr: weave_sim_solve_seconds > weave_sim_interval_seconds
+        labels:
+          severity: warning
+        annotations:
+          summary: "Last solve took {{ $value | humanizeDuration }}, longer than SIM_INTERVAL_S"
+          description: "The 15-minute cadence the baselines assume is stretching. Lower SIM_MAX_PIPES or raise the interval."
+
+      - alert: SimSolveFailing
+        expr: increase(weave_sim_solve_failures_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanize }} live solve(s) failed in the last hour"
+          description: "See the simulator log for the exception."
+
+      # Two hours of backlog means replays are not keeping up (assumed bound).
+      - alert: SimReplayBacklog
+        expr: weave_sim_replay_pending > 0
+        for: 2h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $value | humanize }} missed solves still waiting to be replayed"
+          description: "Usually waiting on backfilled telemetry. Fill telemetry gaps, then Replay missed model solves."
+
+      - alert: ConnectorNotRunning
+        expr: weave_connector_running == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka Connect connector {{ $labels.connector }} is not running"
+          description: "Its synthetic feed has stopped. Re-register the Datagen connectors."
+
+      - alert: ConsoleProbeFailing
+        expr: weave_probe_up == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The console cannot read {{ $labels.probe }}"
+          description: "Metrics from that source are missing, so the alerts built on them cannot fire."
+
+      # Scored from synthetic meter and logger data against the model.
+      - alert: DmaSuspectedLeak
+        expr: weave_dma_status{status="SUSPECTED_LEAK"} > 0
+        labels:
+          severity: warning
+          origin: model
+        annotations:
+          summary: "{{ $value | humanize }} DMA(s) flagged SUSPECTED_LEAK"
+          description: "Model residual |z| >= 3 against each DMA's own baseline, from synthetic telemetry. See the Anomalies tab."

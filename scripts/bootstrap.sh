@@ -10,6 +10,8 @@ fi
 
 echo "== 1. topics =="
 ./scripts/create-topics.sh
+# Contracts for the topics; a refusal is reported, not fatal, like a failed layer.
+./scripts/register-schemas.sh || echo "! some topic contracts were not registered; see above"
 
 echo "== 2. load real GIS network =="
 docker exec gis-loader python gis/load_gis.py --all --build-topology
@@ -38,4 +40,5 @@ Done. Next:
 
   Kibana:   http://localhost:5601
   Flink:    http://localhost:9081
+  Alerts:   the console's Alerts tab (Prometheus :9090, Alertmanager :9093)
 MSG

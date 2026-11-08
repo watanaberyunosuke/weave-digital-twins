@@ -65,6 +65,7 @@ function showTab(name) {
   if (name === 'map') map.invalidateSize();
   if (name === 'telemetry') loadTelemetry();
   if (name === 'anomalies') loadAnomalies();
+  if (name === 'alerts') void loadAlerts();
   if (name === 'jobs') loadJobs();
   if (name === 'gis') loadGisLayers();
 }
@@ -1102,6 +1103,94 @@ async function loadAnomalies() {
   );
 }
 
+// ----------------------------------------------------------------- alerts
+// Read only: Alertmanager holds what Prometheus's rules fired, and the
+// console checks each topic's latest messages against Schema Registry. The
+// badge counts both, so it is refreshed on every minute's tick, not only
+// while this tab is open.
+const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2, none: 3 };
+const sevTag = (sev) => el('span', { class: `sev ${sev || 'none'}` }, sev || 'none');
+
+function alertCounts(body) {
+  const firing = (body.alerts?.value || []).filter((a) => a.state === 'active' && a.severity !== 'info').length;
+  const schema = (body.schemas?.value?.warnings || []).filter((w) => w.level !== 'info').length;
+  return { firing, schema, total: firing + schema };
+}
+
+function renderAlertBadge(body) {
+  const { total } = alertCounts(body);
+  const badge = $('#alert-badge');
+  badge.hidden = !total;
+  badge.textContent = total;
+  badge.title = `${total} active alert(s) and schema warning(s)`;
+}
+
+function unavailable(target, part, what) {
+  target.replaceChildren(el('p', { class: 'err' }, `${what} unavailable: ${part.error || 'no answer'}`));
+}
+
+async function loadAlerts({ badgeOnly = false } = {}) {
+  let body;
+  try {
+    body = await api('/api/alerts');
+  } catch (err) {
+    if (!badgeOnly) $('#alert-list').replaceChildren(el('p', { class: 'err' }, err.message));
+    return;
+  }
+  renderAlertBadge(body);
+  if (badgeOnly && state.tab !== 'alerts') return;
+
+  const list = $('#alert-list');
+  if (!body.alerts.ok) unavailable(list, body.alerts, 'Alertmanager');
+  else if (!body.alerts.value.length) list.replaceChildren(el('p', { class: 'muted' }, 'No active alerts.'));
+  else {
+    list.replaceChildren(el('table', { class: 'tbl' },
+      el('tr', {}, ...['Severity', 'Alert', 'Summary', 'Origin', 'Since', 'State'].map((t) => el('th', {}, t))),
+      ...body.alerts.value.map((a) => el('tr', { title: a.description },
+        el('td', {}, sevTag(a.severity)),
+        el('td', {}, a.name),
+        el('td', {}, a.summary, a.description ? el('div', { class: 'muted small' }, a.description) : null),
+        el('td', {}, a.labels.origin ? el('span', { class: `tag ${a.labels.origin}` }, a.labels.origin) : '—'),
+        el('td', { title: fmt.ts(a.since) }, fmt.age(a.since)),
+        el('td', {}, a.state)))));
+  }
+
+  const warnBox = $('#schema-warnings');
+  const topics = $('#schema-topics');
+  if (!body.schemas.ok) {
+    unavailable(warnBox, body.schemas, 'Schema check');
+    topics.replaceChildren();
+  } else {
+    const warns = [...body.schemas.value.warnings]
+      .sort((a, b) => (SEVERITY_ORDER[a.level] ?? 3) - (SEVERITY_ORDER[b.level] ?? 3));
+    warnBox.replaceChildren(...(warns.length ? warns.map((w) => el('div', { class: `alert-row ${w.level}` },
+      sevTag(w.level),
+      el('div', {},
+        el('div', {}, el('code', {}, w.topic), ' ', w.message),
+        (w.examples || []).length ? el('ul', { class: 'muted small' }, ...w.examples.map((x) => el('li', {}, x))) : null)))
+      : [el('p', { class: 'muted' }, 'Every topic matches its registered contract.')]));
+    topics.replaceChildren(
+      ...body.schemas.value.topics.map((t) => el('tr', {},
+        el('td', {}, t.topic),
+        el('td', { class: 'num' }, t.version ?? 'none'),
+        el('td', { class: 'num' }, fmt.n(t.versions)),
+        el('td', { class: 'num' }, fmt.n(t.sampled)))));
+  }
+
+  const rules = $('#alert-rules');
+  if (!body.rules.ok) {
+    rules.replaceChildren(el('tr', {}, el('td', { class: 'err', colspan: 4 }, `Prometheus unavailable: ${body.rules.error || 'no answer'}`)));
+  } else {
+    rules.replaceChildren(
+      ...body.rules.value.map((r) => el('tr', {},
+        el('td', {}, r.name, el('div', { class: 'muted small' }, r.group)),
+        el('td', {}, sevTag(r.severity)),
+        el('td', { class: r.health === 'err' ? 'err' : `rule-${r.state}`, title: r.error || '' },
+          r.health === 'err' ? `error: ${r.error}` : r.state),
+        el('td', { class: 'small' }, r.description))));
+  }
+}
+
 // ---------------------------------------------------------------- basemaps
 // The list comes from the server (Google only appears when .env has a key).
 // The choice is per browser. In dark mode a light basemap switches to its
@@ -1284,7 +1373,10 @@ async function boot() {
   renderBasemapPicker();
   applyBasemap();
   renderGis();
+  // The public console has no Prometheus, Alertmanager or Kafka to read.
+  $('[data-tab="alerts"]').hidden = state.config.mode === 'public';
   await refreshStatus();
+  if (state.config.mode !== 'public') void loadAlerts({ badgeOnly: true });
   loadMap();
   setInterval(refreshStatus, 10000);
   setInterval(() => {
@@ -1292,6 +1384,7 @@ async function boot() {
     if (state.selectedDma && state.tab === 'map') openDma(state.selectedDma);
     if (state.tab === 'telemetry') loadTelemetry();
     if (state.tab === 'anomalies') loadAnomalies();
+    if (state.config.mode !== 'public') void loadAlerts({ badgeOnly: true });
   }, 60000);
 }
 
