@@ -10,10 +10,14 @@ CREATE TABLE twin.hydrometry (
     value        DOUBLE PRECISION,
     quality_code TEXT,
     provider     TEXT,
-    is_synthetic BOOLEAN     DEFAULT false
+    is_synthetic BOOLEAN     DEFAULT false,
+    -- When the row arrived. Logstash reads forward on it, because a portal's
+    -- readings arrive a day or more after their own ts.
+    ingested_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 SELECT create_hypertable('twin.hydrometry', 'ts', chunk_time_interval => INTERVAL '7 days');
 CREATE INDEX ON twin.hydrometry (site_id, variable, ts DESC);
+CREATE INDEX hydrometry_ingested_at_idx ON twin.hydrometry (ingested_at);
 
 -- Real: daily storage volumes (batch loaded by ingest/storage_poller.py;
 -- station_no joins ref.storage_site)

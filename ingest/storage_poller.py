@@ -198,15 +198,16 @@ def parse_ts(text: str) -> datetime:
 
 
 # ------------------------------------------------------------------ service
-def kiwis(params: dict, url: str | None = None):
+def kiwis(params: dict, url: str | None = None, timeout: float = 60):
     """One KiWIS query, retried with backoff on the service's transient errors.
 
-    url defaults to STORAGE_URL; hydrometry_poller.py passes its own.
+    url defaults to STORAGE_URL; hydrometry_poller.py passes its own, and a
+    longer timeout for its national series list.
     """
     url = url or require_env("STORAGE_URL", "the KiWIS endpoint that serves storage volumes")
     base = {"service": "kisters", "type": "queryServices", "datasource": "0", "format": "json"}
     for attempt in range(1, ATTEMPTS + 1):
-        resp = requests.get(url, params={**base, **params}, timeout=60)
+        resp = requests.get(url, params={**base, **params}, timeout=timeout)
         # The service reports its transient backend failure as HTTP 500 with a
         # JSON error body, so the body is read before the status.
         try:

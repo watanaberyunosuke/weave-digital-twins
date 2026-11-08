@@ -314,10 +314,15 @@ button.tag:hover { background: color-mix(in srgb, currentColor 22%, transparent)
 .chart .lbl { fill: var(--muted); font-size: 10px; }
 .chart .title { fill: var(--text); font-size: 11px; font-weight: 600; }
 .chart .nodata { fill: var(--muted); font-size: 12px; }
-.gauges { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-.gauge { border: 1px solid var(--line); border-radius: var(--radius-6); padding: 10px; }
-.gauge .h { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
-.gauge .val { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.site-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.site-tools input { flex: 1; max-width: 320px; }
+.site-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-6); }
+.site-list thead th { position: sticky; top: 0; background: var(--panel); }
+.tbl td.num, .tbl th.num { text-align: right; }
+.tbl tr.sel td { background: var(--panel-2); font-weight: 600; }
+.site-detail { margin-top: 12px; }
+.site-detail .h { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; margin-bottom: 6px; }
+.site-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 
 /* ----------------------------------------------------------------- jobs */
 .jobs { display: grid; grid-template-columns: 280px 1fr; gap: 14px; flex: 1; min-height: 0; }
@@ -343,7 +348,7 @@ dialog::backdrop { background: rgba(10, 14, 20, .45); }
 #run-params { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
 #run-params label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 #run-params label.cb { flex-direction: row; align-items: center; gap: 8px; }
-input[type="number"], input[type="text"], select {
+input[type="number"], input[type="text"], input[type="search"], select {
   font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-4);
   background: var(--panel-2); color: var(--text);
 }

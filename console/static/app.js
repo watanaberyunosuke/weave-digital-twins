@@ -891,6 +891,13 @@ function filledBands(fills, stream) {
     .map((f) => [new Date(f.gap_start).getTime(), new Date(f.gap_end).getTime()]);
 }
 
+// Enough decimals that the three ticks (min, middle, max) read differently:
+// one decimal on a 0.1 m range printed 0.4, 0.5, 0.5.
+function tickDigits(range) {
+  const step = Math.abs(range) / 2;
+  return step >= 1 || step === 0 ? 0 : Math.min(4, Math.ceil(-Math.log10(step)));
+}
+
 function chart(title, series, { height = 130, bands = [] } = {}) {
   const W = 360;
   const H = height;
@@ -923,7 +930,7 @@ function chart(title, series, { height = 130, bands = [] } = {}) {
   add('line', { x1: pad.l, x2: W - pad.r, y1: H - pad.b, y2: H - pad.b, class: 'axis' });
   [y0, (y0 + y1) / 2, y1].forEach((v) => {
     add('line', { x1: pad.l, x2: W - pad.r, y1: sy(v), y2: sy(v), class: 'axis', 'stroke-dasharray': '2 3' });
-    add('text', { x: pad.l - 4, y: sy(v) + 3, 'text-anchor': 'end', class: 'lbl' }, fmt.n(v, Math.abs(y1 - y0) < 10 ? 1 : 0));
+    add('text', { x: pad.l - 4, y: sy(v) + 3, 'text-anchor': 'end', class: 'lbl' }, fmt.n(v, tickDigits(y1 - y0)));
   });
   // Times suit a day's chart; a longer span needs dates to be read at all.
   const xlabel = x1 - x0 > 36 * 3600e3 ? fmt.date : fmt.time;
@@ -979,20 +986,83 @@ async function loadTelemetry() {
 
   if (feeds.error) {
     $('#gauges').replaceChildren();
+    sitesView.ui = null;
     return;
   }
-  const gauges = feeds.hydrometry_latest;
-  $('#gauges').replaceChildren(...(gauges.length ? gauges.map((g) => el('div', { class: 'gauge' },
-    el('div', { class: 'h' }, el('strong', {}, g.site_name || g.site_id), el('span', { class: 'muted small' }, g.site_id)),
-    el('div', { class: 'h' },
-      el('span', { class: 'val' }, fmt.n(g.value, 3)),
-      el('span', { class: 'muted small' }, `${g.variable} · ${fmt.age(g.ts)}${g.quality_code ? ` · q${g.quality_code}` : ''}`)),
-    // The chart is the 24 h up to the gauge's own latest reading, which can be a day old.
-    chart('', [{
-      name: g.variable, colour: css('--real'),
-      points: feeds.hydrometry_series.filter((s) => s.site_id === g.site_id && s.variable === g.variable).map((s) => [s.ts, s.value]),
-    }], { height: 80 }),
-  )) : [el('div', { class: 'muted' }, 'No gauge readings in the last 7 days. Check the ingest-hydrometry container, its HYDRO_SITES and the Flink job.')]));
+  renderSites(feeds);
+}
+
+// One row per monitoring site, its level and flow side by side, and charts for
+// the selected one. A region has hundreds of sites, so cards per series no
+// longer fit. The filter box and table are built once and only their contents
+// change on a refresh, so a refresh never takes focus from someone typing.
+const sitesView = { filter: '', selected: null, ui: null, all: [], bySite: new Map(), feeds: null };
+
+function sitesUi() {
+  if (sitesView.ui) return sitesView.ui;
+  const search = el('input', { type: 'search', placeholder: 'Filter by name or id', 'aria-label': 'Filter monitoring sites' });
+  const count = el('span', { class: 'muted small' });
+  const body = el('tbody');
+  const detail = el('div', { class: 'site-detail' });
+  const table = el('div', { class: 'site-list' }, el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {}, el('th', {}, 'Site'), el('th', {}, 'Id'), el('th', { class: 'num' }, 'Level (m)'),
+      el('th', { class: 'num' }, 'Flow (m³/s)'), el('th', {}, 'Latest'))),
+    body));
+  const empty = el('div', { class: 'muted' },
+    'No readings from any monitoring site in the last 7 days. Check the ingest-hydrometry container, its HYDRO_BBOX or HYDRO_SITES, and the Flink job.');
+  search.addEventListener('input', () => { sitesView.filter = search.value; fillSites(); });
+  sitesView.ui = { root: el('div', {}, el('div', { class: 'site-tools' }, search, count), table, detail), search, count, body, detail, empty };
+  return sitesView.ui;
+}
+
+function renderSites(feeds) {
+  const ui = sitesUi();
+  const bySite = new Map();
+  feeds.hydrometry_latest.forEach((g) => {
+    const s = bySite.get(g.site_id) || { site_id: g.site_id, name: g.site_name || g.site_id, ts: g.ts };
+    s[g.variable] = g;
+    if (g.ts > s.ts) s.ts = g.ts;
+    bySite.set(g.site_id, s);
+  });
+  Object.assign(sitesView, { bySite, feeds, all: [...bySite.values()].sort((a, b) => a.name.localeCompare(b.name)) });
+  const host = $('#gauges');
+  if (!sitesView.all.length) {
+    host.replaceChildren(ui.empty);
+    return;
+  }
+  if (!host.contains(ui.root)) host.replaceChildren(ui.root);
+  if (!bySite.has(sitesView.selected)) sitesView.selected = sitesView.all[0].site_id;
+  fillSites();
+  showSite();
+}
+
+function fillSites() {
+  const { body, count } = sitesView.ui;
+  const q = sitesView.filter.trim().toLowerCase();
+  const shown = sitesView.all.filter((s) => !q || s.name.toLowerCase().includes(q) || s.site_id.toLowerCase().includes(q));
+  body.replaceChildren(...shown.map((s) => {
+    const tr = el('tr', { class: `click${s.site_id === sitesView.selected ? ' sel' : ''}` },
+      el('td', {}, s.name), el('td', { class: 'muted' }, s.site_id),
+      el('td', { class: 'num' }, s.level_m ? fmt.n(s.level_m.value, 3) : '—'),
+      el('td', { class: 'num' }, s.flow_cumecs ? fmt.n(s.flow_cumecs.value, 3) : '—'),
+      el('td', { class: 'muted' }, fmt.age(s.ts)));
+    tr.addEventListener('click', () => { sitesView.selected = s.site_id; fillSites(); showSite(); });
+    return tr;
+  }));
+  count.textContent = `${shown.length} of ${sitesView.all.length} sites`;
+}
+
+function showSite() {
+  const s = sitesView.bySite.get(sitesView.selected);
+  const series = (v) => sitesView.feeds.hydrometry_series
+    .filter((r) => r.site_id === s.site_id && r.variable === v).map((r) => [r.ts, r.value]);
+  // Each chart is the 24 h up to the site's own latest reading, which can be a day old.
+  sitesView.ui.detail.replaceChildren(
+    el('div', { class: 'h' }, el('strong', {}, s.name), el('span', { class: 'muted small' }, `${s.site_id} · as of ${fmt.age(s.ts)}`)),
+    el('div', { class: 'site-charts' },
+      chart('Level (m)', [{ name: 'level', colour: css('--real'), points: series('level_m') }], { height: 110 }),
+      chart('Flow (m³/s)', [{ name: 'flow', colour: css('--real'), points: series('flow_cumecs') }], { height: 110 })),
+  );
 }
 
 // -------------------------------------------------------------- anomalies

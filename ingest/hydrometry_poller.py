@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -54,6 +55,15 @@ API = os.environ.get("HYDRO_API", "hydstra").strip().lower()
 # parameter (received, harmonised, merged, daily, monthly); naming one keeps a
 # gauge to one value an hour, as the Hydstra adapter's hourly traces do.
 KIWIS_TS_NAME = os.environ.get("HYDRO_TS_NAME", "DMQaQc.Merged.HourlyMean.HR")
+# An area to monitor instead of a list: every site inside it with a series
+# still reporting. KiWIS ignores a bounding box, so the area is filtered here,
+# as storage_poller.py does. HYDRO_SITES, when also set, narrows it.
+BBOX = os.environ.get("HYDRO_BBOX", "").strip()
+STALE_DAYS = float(os.environ.get("HYDRO_STALE_DAYS", "7"))
+# The series list is re-read this often, so a new or retired site is picked up.
+RELIST_S = int(os.environ.get("HYDRO_RELIST_S", "86400"))
+BATCH = 20  # series per values request, as storage_poller.py
+LIST_TIMEOUT_S = float(os.environ.get("HYDRO_LIST_TIMEOUT_S", "300"))
 KIWIS_PARAMETERS = {
     "Water Course Level": ("level_m", "m"),
     "Water Course Discharge": ("flow_cumecs", "m3/s"),
@@ -61,10 +71,15 @@ KIWIS_PARAMETERS = {
 
 
 def sites() -> list[str]:
-    """Gauge numbers for the catchments you care about — see .env.example."""
-    return [
-        s.strip() for s in require_env("HYDRO_SITES", "a comma-separated list of gauge ids").split(",") if s.strip()
-    ]
+    """Site numbers for the catchments you care about — see .env.example.
+
+    With HYDRO_BBOX set (KiWIS only) the list is optional and narrows the area.
+    """
+    if BBOX and API == "kiwis":
+        raw = os.environ.get("HYDRO_SITES", "")
+    else:
+        raw = require_env("HYDRO_SITES", "a comma-separated list of site ids, or HYDRO_BBOX with HYDRO_API=kiwis")
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 VARIABLES = {
@@ -106,6 +121,24 @@ def fetch_timeseries(site: str, variable: str, start: datetime, end: datetime | 
     if payload.get("error_num") not in (None, 0, 126):
         raise RuntimeError(f"error {payload.get('error_num')}: {payload.get('error_msg')}")
     return payload
+
+
+# postgres/init/03_telemetry.sql adds ingested_at on a new volume; this does
+# it on an existing one. Logstash reads hydrometry forward on it, because a
+# reading's own ts can be a day or a week behind rows already read.
+SCHEMA_SQL = (
+    "ALTER TABLE twin.hydrometry ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+    "CREATE INDEX IF NOT EXISTS hydrometry_ingested_at_idx ON twin.hydrometry (ingested_at)",
+)
+
+
+def ensure_schema() -> None:
+    try:
+        with psycopg.connect(DSN) as conn:
+            for sql in SCHEMA_SQL:
+                conn.execute(sql)
+    except Exception as exc:
+        print(f"  ! could not add twin.hydrometry.ingested_at: {exc}")
 
 
 def stored_latest() -> dict[tuple[str, str], datetime]:
@@ -253,35 +286,91 @@ def register_sites(stations: dict[str, dict]) -> None:
     ]
     with psycopg.connect(DSN) as conn:
         conn.cursor().executemany(UPSERT_SITE, rows)
-    print(f"  registered {len(rows)} gauges in ref.hydrometry_site")
+    print(f"  registered {len(rows)} sites in ref.hydrometry_site")
+
+
+def filter_listing(payload, bbox: tuple[float, float, float, float] | None, now: datetime):
+    """The series list cut to the area and to series still reporting.
+
+    Keeps the header row, so kiwis_series() and kiwis_stations() read it as
+    they read the service's answer. Rows whose coordinates don't parse are
+    dropped when there is an area to place them in.
+    """
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(f"unexpected series list: {str(payload)[:200]}")
+    header = payload[0]
+    cutoff = now - timedelta(days=STALE_DAYS)
+    rows = [(row, dict(zip(header, row))) for row in payload[1:]]
+    return [header] + [row for row, r in rows if reporting(r, cutoff) and inside(r, bbox)]
+
+
+def reporting(r: dict, cutoff: datetime) -> bool:
+    last = r.get("to") or ""
+    return bool(last) and datetime.fromisoformat(last.replace("Z", "+00:00")) >= cutoff
+
+
+def inside(r: dict, bbox: tuple[float, float, float, float] | None) -> bool:
+    if not bbox:
+        return True
+    try:
+        lat, lon = float(r["station_latitude"]), float(r["station_longitude"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bbox[0] <= lon <= bbox[2] and bbox[1] <= lat <= bbox[3]
+
+
+def batches(starts: dict[str, datetime], size: int = BATCH) -> list[tuple[datetime, list[str]]]:
+    """ts_ids grouped by when they need reading from, size to a request.
+
+    Sorting by start keeps series that are equally behind together, so a
+    batch's from-date (its oldest need) asks for little that is then thrown
+    away by newer_than().
+    """
+    ordered = sorted(starts, key=lambda ts_id: (starts[ts_id], ts_id))
+    return [(starts[ordered[i]], ordered[i : i + size]) for i in range(0, len(ordered), size)]
 
 
 _series: dict[tuple[str, str], str] = {}
+_listed_at = 0.0
+
+
+def kiwis_listing(url: str) -> None:
+    """Refresh the series map and site registry when the list is due."""
+    global _listed_at
+    from storage_poller import kiwis, parse_bbox
+
+    if _series and time.monotonic() - _listed_at < RELIST_S:
+        return
+    params = {
+        "request": "getTimeseriesList",
+        "parametertype_name": ",".join(KIWIS_PARAMETERS),
+        "ts_name": KIWIS_TS_NAME,
+        "returnfields": "station_no,station_name,station_latitude,station_longitude,parametertype_name,ts_id,coverage",
+    }
+    if sites():
+        params["station_no"] = ",".join(sites())
+    # Without station numbers the list is every level and flow series the
+    # service holds (about 13,000 nationally), which takes over a minute.
+    listing = filter_listing(
+        kiwis(params, url, timeout=LIST_TIMEOUT_S), parse_bbox(BBOX) if BBOX else None, datetime.now(timezone.utc)
+    )
+    _series.clear()
+    _series.update(kiwis_series(listing))
+    _listed_at = time.monotonic()
+    print(f"  {len(_series)} series at {len(kiwis_stations(listing))} sites still reporting")
+    try:
+        register_sites(kiwis_stations(listing))
+    except Exception as exc:
+        # Names are a convenience; readings still flow without them.
+        print(f"  ! could not register sites: {exc}")
 
 
 def kiwis_fetch(site: str, var_name: str, start: datetime) -> list[dict]:
+    """One series, for --probe."""
     from storage_poller import kiwis, parse_values
 
     url = require_env("HYDRO_URL", "the KiWIS endpoint that serves hydrometry")
-    if not _series:
-        # One list for every gauge, kept for the life of the process; it also
-        # names and places each gauge for the console's panel and map.
-        listing = kiwis(
-            {
-                "request": "getTimeseriesList",
-                "station_no": ",".join(sites()),
-                "parametertype_name": ",".join(KIWIS_PARAMETERS),
-                "ts_name": KIWIS_TS_NAME,
-                "returnfields": "station_no,station_name,station_latitude,station_longitude,parametertype_name,ts_id",
-            },
-            url,
-        )
-        _series.update(kiwis_series(listing))
-        try:
-            register_sites(kiwis_stations(listing))
-        except Exception as exc:
-            # Names are a convenience; readings still flow without them.
-            print(f"  ! could not register gauges: {exc}")
+    kiwis_listing(url)
     ts_id = _series.get((site, var_name))
     if ts_id is None:
         return []
@@ -290,7 +379,6 @@ def kiwis_fetch(site: str, var_name: str, start: datetime) -> list[dict]:
             {
                 "request": "getTimeseriesValues",
                 "ts_id": ts_id,
-                # A plain date: the service is fussy about offsets and fractions.
                 "from": start.date().isoformat(),
                 "returnfields": "Timestamp,Value",
             },
@@ -300,9 +388,41 @@ def kiwis_fetch(site: str, var_name: str, start: datetime) -> list[dict]:
     return kiwis_records(values.get(ts_id, []), site, var_name)
 
 
-def fetch_records(site: str, variable: str, var_name: str, start: datetime, end: datetime) -> list[dict]:
-    if API == "kiwis":
-        return kiwis_fetch(site, var_name, start)
+def publish_kiwis(stored: dict, floor: datetime) -> int:
+    """Every series in the listing, BATCH to a values request."""
+    from storage_poller import kiwis, parse_values
+
+    url = require_env("HYDRO_URL", "the KiWIS endpoint that serves hydrometry")
+    kiwis_listing(url)
+    by_ts = {ts_id: key for key, ts_id in _series.items()}
+    lasts = {key: max(filter(None, (stored.get(key), published.get(key))), default=None) for key in _series}
+    starts = {ts_id: max(lasts[key], floor) if lasts[key] else floor for key, ts_id in _series.items()}
+    total = 0
+    for start, ts_ids in batches(starts):
+        try:
+            values = parse_values(
+                kiwis(
+                    {
+                        "request": "getTimeseriesValues",
+                        "ts_id": ",".join(ts_ids),
+                        # A plain date: the service is fussy about offsets and fractions.
+                        "from": start.date().isoformat(),
+                        "returnfields": "Timestamp,Value",
+                    },
+                    url,
+                )
+            )
+        except Exception as exc:
+            print(f"  ! values for {len(ts_ids)} series from {start:%Y-%m-%d}: {exc}")
+            continue
+        for ts_id in ts_ids:
+            site, var_name = by_ts[ts_id]
+            records = newer_than(kiwis_records(values.get(ts_id, []), site, var_name), lasts[(site, var_name)])
+            total += send_records(site, var_name, records, lasts[(site, var_name)], floor)
+    return total
+
+
+def fetch_records(site: str, variable: str, start: datetime, end: datetime) -> list[dict]:
     return parse_timeseries(fetch_timeseries(site, variable, start, end), site, variable)
 
 
@@ -325,7 +445,6 @@ def send_records(site: str, var_name: str, records: list[dict], last: datetime |
 
 
 def publish() -> int:
-    total = 0
     now = datetime.now(timezone.utc)
     floor = now - timedelta(days=MAX_AGE_DAYS)
     try:
@@ -334,23 +453,24 @@ def publish() -> int:
         # Postgres down: keep polling from what this process knows.
         print(f"  ! could not read stored readings: {exc}")
         stored = {}
-    # KiWIS has no rainfall at a stream gauge, so it maps level and flow only.
-    variables = (
-        [(None, name) for name, _u in KIWIS_PARAMETERS.values()]
-        if API == "kiwis"
-        else [(v, name) for v, (name, _u) in VARIABLES.items()]
-    )
+    total = publish_kiwis(stored, floor) if API == "kiwis" else publish_hydstra(stored, floor, now)
+    producer.flush()
+    return total
+
+
+def publish_hydstra(stored: dict, floor: datetime, now: datetime) -> int:
+    """Each listed site and variable, one get_ts_traces request apiece."""
+    total = 0
     for site in sites():
-        for variable, var_name in variables:
+        for variable, (var_name, _u) in VARIABLES.items():
             key = (site, var_name)
             last = max(filter(None, (stored.get(key), published.get(key))), default=None)
             start = max(last, floor) if last else floor
             try:
-                records = newer_than(fetch_records(site, variable, var_name, start, now), last)
+                records = newer_than(fetch_records(site, variable, start, now), last)
                 total += send_records(site, var_name, records, last, floor)
             except Exception as exc:
-                print(f"  ! {site}/{variable or var_name}: {exc}")
-    producer.flush()
+                print(f"  ! {site}/{variable}: {exc}")
     return total
 
 
@@ -363,6 +483,8 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.probe and API == "kiwis":
+        if not (args.site or sites()):
+            ap.error("--probe with HYDRO_BBOX needs --site")
         site = args.site or sites()[0]
         start = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
         for _name, (var_name, _unit) in KIWIS_PARAMETERS.items():
@@ -378,6 +500,7 @@ def main() -> int:
         print(json.dumps(parse_timeseries(payload, site, args.variable)[:5], indent=2))
         return 0
 
+    ensure_schema()
     producer = make_producer()
     poll_forever(publish, INTERVAL_S, "hydrometry")
     return 0

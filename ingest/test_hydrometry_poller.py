@@ -87,5 +87,50 @@ class KiwisTests(unittest.TestCase):
         self.assertEqual([r["value"] for r in hp.newer_than(records, last)], [2.0])
 
 
+class AreaTests(unittest.TestCase):
+    HEADER = [
+        "station_no",
+        "station_name",
+        "station_latitude",
+        "station_longitude",
+        "parametertype_name",
+        "ts_id",
+        "from",
+        "to",
+    ]
+    NOW = datetime(2026, 11, 8, tzinfo=timezone.utc)
+
+    def row(self, no, lat, lon, to="2026-11-07T00:00:00.000+10:00"):
+        return [no, f"SITE {no}", lat, lon, "Water Course Level", f"{no}1", "2017-01-01T00:00:00.000+10:00", to]
+
+    def test_area_keeps_reporting_sites_inside_the_box(self):
+        listing = [
+            self.HEADER,
+            self.row("IN", "-37.8", "145.0"),
+            self.row("OUT", "-30.0", "145.0"),
+            self.row("STALE", "-37.8", "145.0", to="2017-11-29T00:00:01.000+10:00"),
+            self.row("NOCOORD", "", "145.0"),
+            self.row("NEVER", "-37.8", "145.0", to=""),
+        ]
+        kept = hp.filter_listing(listing, (143.5, -38.9, 146.7, -37.0), self.NOW)
+        self.assertEqual([r[0] for r in kept[1:]], ["IN"])
+        self.assertEqual(kept[0], self.HEADER)
+
+    def test_no_area_keeps_every_reporting_site(self):
+        listing = [self.HEADER, self.row("A", "", ""), self.row("B", "-30", "120", to="2017-01-01T00:00:00+10:00")]
+        self.assertEqual([r[0] for r in hp.filter_listing(listing, None, self.NOW)[1:]], ["A"])
+
+    def test_batches_group_by_start_and_cap_the_size(self):
+        early, late = datetime(2026, 11, 1, tzinfo=timezone.utc), datetime(2026, 11, 6, tzinfo=timezone.utc)
+        starts = {f"t{i:02}": (early if i % 2 else late) for i in range(45)}
+        got = hp.batches(starts, size=20)
+        self.assertEqual([len(ids) for _, ids in got], [20, 20, 5])
+        self.assertEqual(sorted(i for _, ids in got for i in ids), sorted(starts))
+        # Each batch reads from its oldest need, and the early series come first.
+        self.assertEqual(got[0][0], early)
+        for start, ids in got:
+            self.assertEqual(start, min(starts[i] for i in ids))
+
+
 if __name__ == "__main__":
     unittest.main()
