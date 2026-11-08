@@ -197,6 +197,65 @@ def kiwis_records(points: list[tuple[datetime, float]], site: str, var_name: str
     ]
 
 
+def kiwis_stations(payload) -> dict[str, dict]:
+    """station_no -> name, location and what it measures, for ref.hydrometry_site."""
+    header = payload[0]
+    out: dict[str, dict] = {}
+    for row in payload[1:]:
+        r = dict(zip(header, row))
+        mapped = KIWIS_PARAMETERS.get(r.get("parametertype_name"))
+        if not mapped:
+            continue
+        site = out.setdefault(
+            str(r["station_no"]),
+            {
+                "name": r.get("station_name"),
+                "lat": r.get("station_latitude"),
+                "lon": r.get("station_longitude"),
+                "measures": {},
+            },
+        )
+        site["measures"][mapped[0]] = mapped[1]
+    return out
+
+
+# A registry row, not telemetry, so it goes straight to Postgres as the storage
+# poller's ref.storage_site does. variable and unit list what the gauge reports.
+UPSERT_SITE = """
+    INSERT INTO ref.hydrometry_site (site_id, site_name, provider, variable, unit, geom, props)
+    VALUES (%(site_id)s, %(name)s, %(provider)s, %(variable)s, %(unit)s,
+            CASE WHEN %(lon)s::float8 IS NULL OR %(lat)s::float8 IS NULL THEN NULL
+                 ELSE ST_SetSRID(ST_MakePoint(%(lon)s::float8, %(lat)s::float8), 4326) END,
+            %(props)s::jsonb)
+    ON CONFLICT (site_id) DO UPDATE SET
+      site_name = EXCLUDED.site_name, provider = EXCLUDED.provider,
+      variable = EXCLUDED.variable, unit = EXCLUDED.unit,
+      geom = EXCLUDED.geom, props = EXCLUDED.props
+"""
+
+
+def register_sites(stations: dict[str, dict]) -> None:
+    def coord(v):
+        return float(v) if v not in (None, "") else None
+
+    rows = [
+        {
+            "site_id": site_id,
+            "name": st["name"],
+            "provider": PROVIDER,
+            "variable": ",".join(st["measures"]),
+            "unit": ",".join(st["measures"].values()),
+            "lat": coord(st["lat"]),
+            "lon": coord(st["lon"]),
+            "props": json.dumps({"ts_name": KIWIS_TS_NAME, "measures": st["measures"]}),
+        }
+        for site_id, st in stations.items()
+    ]
+    with psycopg.connect(DSN) as conn:
+        conn.cursor().executemany(UPSERT_SITE, rows)
+    print(f"  registered {len(rows)} gauges in ref.hydrometry_site")
+
+
 _series: dict[tuple[str, str], str] = {}
 
 
@@ -205,21 +264,24 @@ def kiwis_fetch(site: str, var_name: str, start: datetime) -> list[dict]:
 
     url = require_env("HYDRO_URL", "the KiWIS endpoint that serves hydrometry")
     if not _series:
-        # One list for every gauge, kept for the life of the process.
-        _series.update(
-            kiwis_series(
-                kiwis(
-                    {
-                        "request": "getTimeseriesList",
-                        "station_no": ",".join(sites()),
-                        "parametertype_name": ",".join(KIWIS_PARAMETERS),
-                        "ts_name": KIWIS_TS_NAME,
-                        "returnfields": "station_no,parametertype_name,ts_id",
-                    },
-                    url,
-                )
-            )
+        # One list for every gauge, kept for the life of the process; it also
+        # names and places each gauge for the console's panel and map.
+        listing = kiwis(
+            {
+                "request": "getTimeseriesList",
+                "station_no": ",".join(sites()),
+                "parametertype_name": ",".join(KIWIS_PARAMETERS),
+                "ts_name": KIWIS_TS_NAME,
+                "returnfields": "station_no,station_name,station_latitude,station_longitude,parametertype_name,ts_id",
+            },
+            url,
         )
+        _series.update(kiwis_series(listing))
+        try:
+            register_sites(kiwis_stations(listing))
+        except Exception as exc:
+            # Names are a convenience; readings still flow without them.
+            print(f"  ! could not register gauges: {exc}")
     ts_id = _series.get((site, var_name))
     if ts_id is None:
         return []
