@@ -565,6 +565,45 @@ def compute_residuals(run_id: str, as_of: datetime) -> int:
 
 
 # --------------------------------------------------------------------- replay
+def pending_replays() -> list[datetime]:
+    """Times in closed gaps since the current network.inp was built."""
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        # ingest-backfill creates the log; until it has, nothing is filled anyway.
+        cur.execute("SELECT to_regclass('twin.backfill_log') IS NOT NULL")
+        if not cur.fetchone()[0]:
+            return []
+        cur.execute(SOLVE_TIMES_SQL, {"max_age_s": REPLAY_MAX_AGE_DAYS * 86400})
+        solves = [r[0] for r in cur.fetchall()]
+    # Before the current network.inp was built, the live solves used another
+    # network and their baseline describes it; a replay on today's network
+    # scored against that baseline flags DMAs for the rebuild, not for water.
+    built = datetime.fromtimestamp(os.path.getmtime(INP_PATH), timezone.utc) if os.path.exists(INP_PATH) else None
+    return [t for t in replay_times(solves, INTERVAL_S) if built is None or t > built]
+
+
+def replay_one(as_of: datetime) -> int | None:
+    """Solve and score one past time; None when its telemetry isn't filled yet."""
+    with psycopg.connect(DSN) as conn:
+        ready = conn.execute(REPLAY_READY_SQL, {"as_of": as_of, "window": DEMAND_WINDOW}).fetchone()[0]
+    if not ready:
+        print(f"replay: waiting for backfilled telemetry at {as_of:%Y-%m-%d %H:%M}Z")
+        return None
+    run_id, rows = solve(as_of)
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        # Residuals read junction pressures only, so flows aren't written.
+        insert_results(cur, [r for r in rows if r[4] == "pressure"])
+        scored = score_residuals(cur, run_id, as_of)
+        cur.execute("DELETE FROM twin.sim_result WHERE run_id = %s", (run_id,))
+        conn.commit()
+    return len(scored)
+
+
+def log_replayed(start: datetime, end: datetime, rows: int) -> None:
+    with psycopg.connect(DSN) as conn:
+        conn.execute(LOG_SQL, (REPLAY_STREAM, start, end, rows, REPLAY_METHOD))
+    print(f"replay: filled {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}Z with {rows} residuals")
+
+
 def replay(deadline: float | None = None) -> int:
     """Replay the solves missed while the simulator was down, oldest first.
 
@@ -574,67 +613,35 @@ def replay(deadline: float | None = None) -> int:
     sim_result rows are deleted in the same transaction, since only the latest
     live run is ever read.
     """
-    if not replay_enabled:
-        return 0
-    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        # ingest-backfill creates the log; until it has, nothing is filled anyway.
-        cur.execute("SELECT to_regclass('twin.backfill_log') IS NOT NULL")
-        if not cur.fetchone()[0]:
-            return 0
-        cur.execute(SOLVE_TIMES_SQL, {"max_age_s": REPLAY_MAX_AGE_DAYS * 86400})
-        solves = [r[0] for r in cur.fetchall()]
-    # Before the current network.inp was built, the live solves used another
-    # network and their baseline describes it; a replay on today's network
-    # scored against that baseline flags DMAs for the rebuild, not for water.
-    built = datetime.fromtimestamp(os.path.getmtime(INP_PATH), timezone.utc) if os.path.exists(INP_PATH) else None
-    times = [t for t in replay_times(solves, INTERVAL_S) if built is None or t > built]
-    if not times:
-        return 0
-
+    times = pending_replays() if replay_enabled else []
     step = timedelta(seconds=INTERVAL_S)
-    done, run_start, run_end, run_rows = 0, None, None, 0
-    last_solve_s = 0.0
-
-    def log_run() -> None:
-        if run_start is None:
-            return
-        with psycopg.connect(DSN) as conn:
-            conn.execute(LOG_SQL, (REPLAY_STREAM, run_start, run_end, run_rows, REPLAY_METHOD))
-        print(f"replay: filled {run_start:%Y-%m-%d %H:%M} to {run_end:%Y-%m-%d %H:%M}Z with {run_rows} residuals")
-
+    done, last_solve_s = [], 0.0  # done: (as_of, residual rows)
     for as_of in times:
         if deadline is not None and time.monotonic() + last_solve_s * 1.5 > deadline:
             break
-        with psycopg.connect(DSN) as conn:
-            ready = conn.execute(REPLAY_READY_SQL, {"as_of": as_of, "window": DEMAND_WINDOW}).fetchone()[0]
-        if not ready:
-            print(f"replay: waiting for backfilled telemetry at {as_of:%Y-%m-%d %H:%M}Z")
-            break
         started = time.monotonic()
         try:
-            run_id, rows = solve(as_of)
-            with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-                # Residuals read junction pressures only, so flows aren't written.
-                insert_results(cur, [r for r in rows if r[4] == "pressure"])
-                scored = score_residuals(cur, run_id, as_of)
-                cur.execute("DELETE FROM twin.sim_result WHERE run_id = %s", (run_id,))
-                conn.commit()
+            scored = replay_one(as_of)
         except Exception as exc:
             print(f"! replay at {as_of:%Y-%m-%d %H:%M}Z failed: {exc}")
             break
+        if scored is None:
+            break
         last_solve_s = time.monotonic() - started
-        # A new contiguous run starts when the previous replay was not one step back.
-        if run_end is None or as_of - run_end > step * 1.5:
-            log_run()
-            run_start, run_rows = as_of, 0
-        run_end = as_of
-        run_rows += len(scored)
-        done += 1
-    log_run()
-    remaining = len(times) - done
-    if remaining:
-        print(f"replay: {remaining} solves still to replay")
-    return done
+        done.append((as_of, scored))
+
+    # One log row per contiguous run: a new run starts where the previous
+    # replay was not one step back.
+    runs: list[list[tuple[datetime, int]]] = []
+    for as_of, scored in done:
+        if not runs or as_of - runs[-1][-1][0] > step * 1.5:
+            runs.append([])
+        runs[-1].append((as_of, scored))
+    for run in runs:
+        log_replayed(run[0][0], run[-1][0], sum(n for _, n in run))
+    if len(times) > len(done):
+        print(f"replay: {len(times) - len(done)} solves still to replay")
+    return len(done)
 
 
 def reset_baseline(dmas: list[str]) -> int:
@@ -665,6 +672,31 @@ def reset_baseline(dmas: list[str]) -> int:
         f"status is UNKNOWN until {MIN_SAMPLES} new residuals exist"
     )
     return len(targets)
+
+
+def run_loop() -> None:
+    while True:
+        # Sleep the rest of the interval, not a whole one, so a larger
+        # model keeps the 15-minute cadence the baseline counts assume.
+        started = time.monotonic()
+        try:
+            compute_residuals(*simulate())
+        except Exception as exc:
+            print(f"! simulation failed: {exc}")
+        elapsed = time.monotonic() - started
+        if elapsed > INTERVAL_S:
+            print(
+                f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"
+                " lower SIM_MAX_PIPES or raise the interval"
+            )
+        # Missed solves are replayed in the idle part of the interval, so
+        # the live cadence holds while a long outage catches up.
+        try:
+            replay(deadline=started + INTERVAL_S)
+        except Exception as exc:
+            print(f"! replay failed: {exc}")
+        elapsed = time.monotonic() - started
+        time.sleep(max(0.0, INTERVAL_S - elapsed))
 
 
 def main() -> int:
@@ -698,28 +730,7 @@ def main() -> int:
         return 0
 
     if args.loop:
-        while True:
-            # Sleep the rest of the interval, not a whole one, so a larger
-            # model keeps the 15-minute cadence the baseline counts assume.
-            started = time.monotonic()
-            try:
-                compute_residuals(*simulate())
-            except Exception as exc:
-                print(f"! simulation failed: {exc}")
-            elapsed = time.monotonic() - started
-            if elapsed > INTERVAL_S:
-                print(
-                    f"! solve took {elapsed:.0f} s, longer than SIM_INTERVAL_S={INTERVAL_S};"
-                    " lower SIM_MAX_PIPES or raise the interval"
-                )
-            # Missed solves are replayed in the idle part of the interval, so
-            # the live cadence holds while a long outage catches up.
-            try:
-                replay(deadline=started + INTERVAL_S)
-            except Exception as exc:
-                print(f"! replay failed: {exc}")
-            elapsed = time.monotonic() - started
-            time.sleep(max(0.0, INTERVAL_S - elapsed))
+        run_loop()
 
     ap.error("pass --build, --once, --loop, --replay or --reset-baseline")
     return 1
