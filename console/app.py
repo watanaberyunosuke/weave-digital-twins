@@ -1058,8 +1058,8 @@ DEVICES = {
 
 
 def backfills(streams: list[str], hours: int) -> list[dict]:
-    """Ranges ingest/backfill.py drew after a gap, so a chart can mark them: their
-    rows look like any other synthetic reading. Older volumes lack the table until
+    """Ranges ingest/backfill.py drew, or run_sim.py replayed, after a gap, so a
+    chart can mark them: their rows look like any other synthetic reading. Older volumes lack the table until
     that service first runs."""
     if not scalar("SELECT to_regclass('twin.backfill_log') IS NOT NULL"):
         return []
@@ -1173,7 +1173,7 @@ def dma_detail(dma_id: str, hours: int = Query(24, ge=1, le=168)):
             """,
                 (dma_id, window),
             ),
-            "backfills": backfills(["meter_reading", "pressure_reading"], hours),
+            "backfills": backfills(["meter_reading", "pressure_reading", "sim_residual"], hours),
         }
 
     return db_or_503(run)

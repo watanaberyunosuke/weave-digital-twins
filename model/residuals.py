@@ -44,11 +44,17 @@ ALL_DMAS = "*"
 # Flagged rows younger than the grace period are left out, so a leak is not
 # learned as normal the moment it starts. The current run is not yet written
 # when this runs, so it is never part of its own baseline.
+#
+# Every window ends at as_of, the solve's own time, so a replayed solve
+# (run_sim.py --replay) is scored on the observations and baseline it would
+# have had live. A reset later than as_of is ignored: only the latest reset
+# per DMA is kept, so a replay before it falls back to the whole window.
 RESIDUALS_SQL = """
     WITH observed AS (
         SELECT pr.dma_id, avg(pr.pressure_m) AS observed
         FROM twin.pressure_reading pr
-        WHERE pr.ts > now() - interval '30 minutes'
+        WHERE pr.ts > %(as_of)s - interval '30 minutes'
+          AND pr.ts <= %(as_of)s
         GROUP BY pr.dma_id
     ),
     modelled AS (
@@ -67,14 +73,16 @@ RESIDUALS_SQL = """
                stddev_samp(residual) AS sd
         FROM twin.sim_residual s
         WHERE variable = 'pressure'
-          AND ts > now() - make_interval(secs => %(baseline_s)s)
+          AND ts > %(as_of)s - make_interval(secs => %(baseline_s)s)
+          AND ts < %(as_of)s
           AND ts > coalesce((SELECT max(r.reset_at)
                                FROM twin.residual_baseline_reset r
-                              WHERE r.dma_id IN (s.dma_id, %(all_dmas)s)),
+                              WHERE r.dma_id IN (s.dma_id, %(all_dmas)s)
+                                AND r.reset_at <= %(as_of)s),
                             '-infinity')
           AND residual IS NOT NULL
           AND NOT (coalesce(flagged, false)
-                   AND ts > now() - make_interval(secs => %(relearn_s)s))
+                   AND ts > %(as_of)s - make_interval(secs => %(relearn_s)s))
         GROUP BY dma_id
     )
     SELECT o.dma_id, m.modelled, o.observed,

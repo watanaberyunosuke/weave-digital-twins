@@ -19,7 +19,9 @@ fill is written to twin.backfill_log with its range and method, because
 is_synthetic can't separate these rows from live synthetic ones; the console
 marks those ranges on its charts and Logstash re-reads them.
 
-Real feeds are never filled here: a gap in an observation is a fact.
+Real feeds are never drawn here: a gap in an observation is a fact. Their pollers
+re-fetch an outage from the source instead, and model/replay.py replays the
+solves the simulator missed.
 
     python backfill.py            # check every BACKFILL_INTERVAL_S
     python backfill.py --once     # one pass over the window, then exit
