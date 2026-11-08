@@ -1217,26 +1217,35 @@ def freshness():
 
 @app.get("/api/feeds")
 def feeds(hours: int = Query(24, ge=1, le=168)):
+    """Each gauge's latest reading in the last 7 days and the `hours` before it.
+
+    The window ends at the gauge's own latest reading, not now, because a
+    portal's quality-coded hourly means arrive about a day late: a window
+    ending now would show nothing from a feed that is working.
+    """
     window = f"{hours} hours"
     return db_or_503(
         lambda: {
-            "hydrometry_latest": query(
-                """
+            "hydrometry_latest": query("""
             SELECT DISTINCT ON (h.site_id, h.variable)
                    h.site_id, s.site_name, h.variable, h.value, h.quality_code,
                    h.provider, h.ts, h.is_synthetic
             FROM twin.hydrometry h LEFT JOIN ref.hydrometry_site s USING (site_id)
-            WHERE h.ts > now() - %s::interval
+            WHERE h.ts > now() - interval '7 days'
             ORDER BY h.site_id, h.variable, h.ts DESC
-        """,
-                (window,),
-            ),
+        """),
             "hydrometry_series": query(
                 """
-            SELECT site_id, variable, ts, value
-            FROM twin.hydrometry
-            WHERE ts > now() - %s::interval
-            ORDER BY site_id, variable, ts
+            WITH latest AS (
+                SELECT site_id, variable, max(ts) AS ts
+                FROM twin.hydrometry
+                WHERE ts > now() - interval '7 days'
+                GROUP BY site_id, variable
+            )
+            SELECT h.site_id, h.variable, h.ts, h.value
+            FROM twin.hydrometry h JOIN latest l USING (site_id, variable)
+            WHERE h.ts > l.ts - %s::interval
+            ORDER BY h.site_id, h.variable, h.ts
         """,
                 (window,),
             ),

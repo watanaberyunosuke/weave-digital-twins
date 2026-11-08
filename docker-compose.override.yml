@@ -126,6 +126,8 @@ services:
       HYDRO_PROVIDER: ${HYDRO_PROVIDER:-hydrometry}
       HYDRO_SITES: ${HYDRO_SITES}
       HYDRO_INTERVAL_S: ${HYDRO_INTERVAL_S:-900}
+      HYDRO_API: ${HYDRO_API:-hydstra}
+      HYDRO_TS_NAME: ${HYDRO_TS_NAME:-DMQaQc.Merged.HourlyMean.HR}
       # Read only, for the last stored reading each poll resumes from.
       TWIN_DSN: postgresql://weave:weave@postgres:5432/weave_twin
     restart: unless-stopped

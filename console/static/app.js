@@ -987,11 +987,12 @@ async function loadTelemetry() {
     el('div', { class: 'h' },
       el('span', { class: 'val' }, fmt.n(g.value, 3)),
       el('span', { class: 'muted small' }, `${g.variable} · ${fmt.age(g.ts)}${g.quality_code ? ` · q${g.quality_code}` : ''}`)),
+    // The chart is the 24 h up to the gauge's own latest reading, which can be a day old.
     chart('', [{
       name: g.variable, colour: css('--real'),
       points: feeds.hydrometry_series.filter((s) => s.site_id === g.site_id && s.variable === g.variable).map((s) => [s.ts, s.value]),
     }], { height: 80 }),
-  )) : [el('div', { class: 'muted' }, 'No gauge readings in the last 24 h. Check the ingest-hydrometry container and the Flink job.')]));
+  )) : [el('div', { class: 'muted' }, 'No gauge readings in the last 7 days. Check the ingest-hydrometry container, its HYDRO_SITES and the Flink job.')]));
 }
 
 // -------------------------------------------------------------- anomalies
