@@ -298,23 +298,25 @@ def filter_listing(payload, bbox: tuple[float, float, float, float] | None, now:
     """
     if not isinstance(payload, list) or not payload:
         raise ValueError(f"unexpected series list: {str(payload)[:200]}")
-    header, rows = payload[0], payload[1:]
+    header = payload[0]
     cutoff = now - timedelta(days=STALE_DAYS)
-    kept = [header]
-    for row in rows:
-        r = dict(zip(header, row))
-        last = r.get("to") or ""
-        if not last or datetime.fromisoformat(last.replace("Z", "+00:00")) < cutoff:
-            continue
-        if bbox:
-            try:
-                lat, lon = float(r["station_latitude"]), float(r["station_longitude"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if not (bbox[0] <= lon <= bbox[2] and bbox[1] <= lat <= bbox[3]):
-                continue
-        kept.append(row)
-    return kept
+    rows = [(row, dict(zip(header, row))) for row in payload[1:]]
+    return [header] + [row for row, r in rows if reporting(r, cutoff) and inside(r, bbox)]
+
+
+def reporting(r: dict, cutoff: datetime) -> bool:
+    last = r.get("to") or ""
+    return bool(last) and datetime.fromisoformat(last.replace("Z", "+00:00")) >= cutoff
+
+
+def inside(r: dict, bbox: tuple[float, float, float, float] | None) -> bool:
+    if not bbox:
+        return True
+    try:
+        lat, lon = float(r["station_latitude"]), float(r["station_longitude"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bbox[0] <= lon <= bbox[2] and bbox[1] <= lat <= bbox[3]
 
 
 def batches(starts: dict[str, datetime], size: int = BATCH) -> list[tuple[datetime, list[str]]]:
@@ -443,7 +445,6 @@ def send_records(site: str, var_name: str, records: list[dict], last: datetime |
 
 
 def publish() -> int:
-    total = 0
     now = datetime.now(timezone.utc)
     floor = now - timedelta(days=MAX_AGE_DAYS)
     try:
@@ -452,20 +453,24 @@ def publish() -> int:
         # Postgres down: keep polling from what this process knows.
         print(f"  ! could not read stored readings: {exc}")
         stored = {}
-    if API == "kiwis":
-        total = publish_kiwis(stored, floor)
-    else:
-        for site in sites():
-            for variable, (var_name, _u) in VARIABLES.items():
-                key = (site, var_name)
-                last = max(filter(None, (stored.get(key), published.get(key))), default=None)
-                start = max(last, floor) if last else floor
-                try:
-                    records = newer_than(fetch_records(site, variable, start, now), last)
-                    total += send_records(site, var_name, records, last, floor)
-                except Exception as exc:
-                    print(f"  ! {site}/{variable}: {exc}")
+    total = publish_kiwis(stored, floor) if API == "kiwis" else publish_hydstra(stored, floor, now)
     producer.flush()
+    return total
+
+
+def publish_hydstra(stored: dict, floor: datetime, now: datetime) -> int:
+    """Each listed site and variable, one get_ts_traces request apiece."""
+    total = 0
+    for site in sites():
+        for variable, (var_name, _u) in VARIABLES.items():
+            key = (site, var_name)
+            last = max(filter(None, (stored.get(key), published.get(key))), default=None)
+            start = max(last, floor) if last else floor
+            try:
+                records = newer_than(fetch_records(site, variable, start, now), last)
+                total += send_records(site, var_name, records, last, floor)
+            except Exception as exc:
+                print(f"  ! {site}/{variable}: {exc}")
     return total
 
 
