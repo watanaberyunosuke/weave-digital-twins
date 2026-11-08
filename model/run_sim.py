@@ -613,7 +613,20 @@ def replay(deadline: float | None = None) -> int:
     sim_result rows are deleted in the same transaction, since only the latest
     live run is ever read.
     """
-    times = pending_replays() if replay_enabled else []
+    if not replay_enabled:
+        return 0
+    # The loop and a console or CLI --replay would otherwise both find the same
+    # gap and write every residual twice, and the table has no key to stop it.
+    # The lock is per session, so it goes when this connection closes.
+    with psycopg.connect(DSN, autocommit=True) as lock:
+        if not lock.execute("SELECT pg_try_advisory_lock(hashtext('weave.sim_replay'))").fetchone()[0]:
+            print("replay: another replay is running; leaving it to finish")
+            return 0
+        return _replay(deadline)
+
+
+def _replay(deadline: float | None) -> int:
+    times = pending_replays()
     step = timedelta(seconds=INTERVAL_S)
     done, last_solve_s = [], 0.0  # done: (as_of, residual rows)
     for as_of in times:

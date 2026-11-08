@@ -1312,6 +1312,15 @@ ACTIONS: dict[str, dict] = {
         "container also does this on its own every SIM_INTERVAL_S.",
         "params": [],
     },
+    "replay_model": {
+        "label": "Replay missed model solves",
+        "step": None,
+        "description": "Solves the 15-minute slots the simulator missed while it was down, "
+        "oldest first, back to the current model build, each from the meter and pressure "
+        "readings recorded for that time. Waits where those readings are not yet "
+        "backfilled. The simulator also does this between its live solves.",
+        "params": [],
+    },
     "reset_baseline": {
         "label": "Reset residual baselines",
         "step": None,
@@ -1368,6 +1377,8 @@ def build_command(action: str, p: dict) -> list[str]:
         return run_sim + ["--build"]
     if action == "run_sim_once":
         return run_sim + ["--once"]
+    if action == "replay_model":
+        return run_sim + ["--replay"]
     if action == "start_flink":
         # Tables are session-scoped in the SQL client, so the three files have
         # to run in one session — hence one concatenated script.
