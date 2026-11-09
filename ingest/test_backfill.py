@@ -87,10 +87,10 @@ SCHEMA = """
     CREATE EXTENSION IF NOT EXISTS timescaledb;
     CREATE SCHEMA ref; CREATE SCHEMA twin;
     CREATE TABLE ref.water_meter (meter_id TEXT PRIMARY KEY, dma_id TEXT, meter_type TEXT);
-    CREATE TABLE twin.meter_reading (ts TIMESTAMPTZ NOT NULL, meter_id TEXT NOT NULL, dma_id TEXT,
+    CREATE TABLE twin.meter_reading (event_ts TIMESTAMPTZ NOT NULL, meter_id TEXT NOT NULL, dma_id TEXT,
         litres DOUBLE PRECISION, flow_lpm DOUBLE PRECISION, battery_pct INTEGER,
         is_synthetic BOOLEAN DEFAULT true);
-    CREATE TABLE twin.pressure_reading (ts TIMESTAMPTZ NOT NULL, logger_id TEXT NOT NULL, dma_id TEXT,
+    CREATE TABLE twin.pressure_reading (event_ts TIMESTAMPTZ NOT NULL, logger_id TEXT NOT NULL, dma_id TEXT,
         pressure_m DOUBLE PRECISION, flow_ls DOUBLE PRECISION, is_synthetic BOOLEAN DEFAULT true);
     CREATE TABLE twin.dma_balance (window_start TIMESTAMPTZ NOT NULL, dma_id TEXT NOT NULL,
         inflow_l DOUBLE PRECISION, consumption_l DOUBLE PRECISION, loss_l DOUBLE PRECISION,
@@ -131,12 +131,12 @@ class WholePassTest(unittest.TestCase):
             conn.execute("INSERT INTO ref.water_meter VALUES ('M1', 'D1', 'residential'), " "('M2', 'D1', 'bulk')")
             for ts in (self.t0, self.t1):
                 conn.execute(
-                    "INSERT INTO twin.meter_reading (ts, meter_id, dma_id, litres) "
+                    "INSERT INTO twin.meter_reading (event_ts, meter_id, dma_id, litres) "
                     "VALUES (%s, 'M1', 'D1', 5), (%s, 'M2', 'D1', 5)",
                     (ts, ts),
                 )
                 conn.execute(
-                    "INSERT INTO twin.pressure_reading (ts, logger_id, dma_id, pressure_m) "
+                    "INSERT INTO twin.pressure_reading (event_ts, logger_id, dma_id, pressure_m) "
                     "VALUES (%s, 'L1', 'D1', 40)",
                     (ts,),
                 )
@@ -188,20 +188,20 @@ class WholePassTest(unittest.TestCase):
 
     def test_a_feed_silent_since_its_last_row_is_left_alone(self):
         with self.psycopg.connect(self.dsn) as conn:
-            conn.execute("DELETE FROM twin.meter_reading WHERE ts = %s", (self.t1,))
-            conn.execute("DELETE FROM twin.pressure_reading WHERE ts = %s", (self.t1,))
+            conn.execute("DELETE FROM twin.meter_reading WHERE event_ts = %s", (self.t1,))
+            conn.execute("DELETE FROM twin.pressure_reading WHERE event_ts = %s", (self.t1,))
         self.assertEqual(self.one_pass(), 0)
         self.assertEqual(self.rows("SELECT count(*) FROM twin.backfill_log")[0][0], 0)
 
     def test_finds_a_gap_that_closes_after_the_last_check(self):
         since = {}
         with self.psycopg.connect(self.dsn) as conn:
-            conn.execute("DELETE FROM twin.meter_reading WHERE ts = %s", (self.t1,))
-            conn.execute("DELETE FROM twin.pressure_reading WHERE ts = %s", (self.t1,))
+            conn.execute("DELETE FROM twin.meter_reading WHERE event_ts = %s", (self.t1,))
+            conn.execute("DELETE FROM twin.pressure_reading WHERE event_ts = %s", (self.t1,))
         self.assertEqual(self.one_pass(since), 0)
         with self.psycopg.connect(self.dsn) as conn:
             conn.execute(
-                "INSERT INTO twin.meter_reading (ts, meter_id, dma_id, litres) " "VALUES (%s, 'M1', 'D1', 5)",
+                "INSERT INTO twin.meter_reading (event_ts, meter_id, dma_id, litres) " "VALUES (%s, 'M1', 'D1', 5)",
                 (self.t1,),
             )
         self.assertGreater(self.one_pass(since), 0)

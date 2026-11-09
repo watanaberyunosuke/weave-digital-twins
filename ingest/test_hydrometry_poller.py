@@ -2,7 +2,7 @@
 
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("HYDRO_SITES", "G1")
 import hydrometry_poller as hp  # noqa: E402
@@ -27,7 +27,7 @@ class ResumeTests(unittest.TestCase):
     def test_parses_points_as_utc(self):
         records = hp.parse_timeseries(PAYLOAD, "G1", "100.00")
         self.assertEqual([r["variable"] for r in records], ["level_m"] * 3)
-        self.assertEqual(records[0]["event_ts"], "2026-11-08T01:00:00+00:00")
+        self.assertEqual(records[0]["event_ts"], "2026-11-08T01:00:00Z")
 
     def test_only_points_after_the_last_stored_are_published(self):
         records = hp.parse_timeseries(PAYLOAD, "G1", "100.00")
@@ -35,7 +35,18 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual([r["value"] for r in hp.newer_than(records, last)], ["1.30"])
 
     def test_message_timestamp_is_the_measurement_time(self):
+        self.assertEqual(hp.event_ms("2026-11-08T01:00:00Z"), 1794099600000)
         self.assertEqual(hp.event_ms("2026-11-08T01:00:00+00:00"), 1794099600000)
+
+    def test_published_times_are_utc_with_a_z(self):
+        # Flink's ISO-8601 reader rejects a +00:00 offset (it reads as NULL), so
+        # every producer writes Z, whatever zone the source reported in.
+        from common import iso_z
+
+        aest = timezone(timedelta(hours=10))
+        self.assertEqual(iso_z(datetime(2026, 11, 8, 11, 0, tzinfo=aest)), "2026-11-08T01:00:00Z")
+        half = datetime(2026, 11, 8, 1, 0, 0, 500000, tzinfo=timezone.utc)
+        self.assertEqual(iso_z(half), "2026-11-08T01:00:00.500000Z")
 
     def test_nothing_stored_publishes_everything(self):
         records = hp.parse_timeseries(PAYLOAD, "G1", "100.00")
@@ -75,7 +86,7 @@ class KiwisTests(unittest.TestCase):
     def test_records_are_utc_with_units(self):
         t = datetime.fromisoformat("2026-11-07T10:00:00+10:00")
         (record,) = hp.kiwis_records([(t, 1.5)], "G1", "flow_cumecs")
-        self.assertEqual(record["event_ts"], "2026-11-07T00:00:00+00:00")
+        self.assertEqual(record["event_ts"], "2026-11-07T00:00:00Z")
         self.assertEqual(record["unit"], "m3/s")
         self.assertEqual(record["value"], 1.5)
         self.assertEqual(record["site_id"], "G1")

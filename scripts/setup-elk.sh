@@ -50,6 +50,8 @@ es_put /_component_template/twin-mappings <<'JSON'
     "properties": {
       "@timestamp":   {"type": "date"},
       "ts":           {"type": "date"},
+      "event_ts":     {"type": "date"},
+      "ingest_ts":    {"type": "date"},
       "window_start": {"type": "date"},
       "is_synthetic": {"type": "boolean"},
       "flagged":      {"type": "boolean"},

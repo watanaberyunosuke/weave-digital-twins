@@ -44,9 +44,9 @@ SOLVE_TIMES_SQL = """
 # residual's 30 minutes waits for a later pass instead of solving on nothing.
 READY_SQL = """
     SELECT EXISTS (SELECT 1 FROM twin.meter_reading
-                   WHERE ts > %(as_of)s - %(window)s::interval AND ts <= %(as_of)s)
+                   WHERE event_ts > %(as_of)s - %(window)s::interval AND event_ts <= %(as_of)s)
        AND EXISTS (SELECT 1 FROM twin.pressure_reading
-                   WHERE ts > %(as_of)s - interval '30 minutes' AND ts <= %(as_of)s)
+                   WHERE event_ts > %(as_of)s - interval '30 minutes' AND event_ts <= %(as_of)s)
 """
 
 LOG_SQL = """

@@ -24,8 +24,9 @@ turns out to be — that is the point of keeping the adapters small and isolated
 Each poll asks for the series from the last reading already stored for that
 gauge and variable, up to HYDRO_MAX_AGE_DAYS back, and publishes only newer
 points. So an outage is recovered from the source's own history when the
-poller comes back, which is the only fill a real feed gets, and overlapping
-polls write nothing twice into twin.hydrometry, which has no key.
+poller comes back, which is the only fill a real feed gets. Overlapping polls
+write nothing twice, and a message replayed anyway updates its row, because
+twin.hydrometry is keyed on (site_id, variable, event_ts).
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 import requests
 
-from common import envelope, make_producer, poll_forever, require_env
+from common import envelope, iso_z, make_producer, poll_forever, require_env
 
 PROVIDER = os.environ.get("HYDRO_PROVIDER", "hydrometry")
 TOPIC = os.environ.get("HYDRO_TOPIC", "water.hydrometry.raw.v1")
@@ -123,30 +124,12 @@ def fetch_timeseries(site: str, variable: str, start: datetime, end: datetime | 
     return payload
 
 
-# postgres/init/03_telemetry.sql adds ingested_at on a new volume; this does
-# it on an existing one. Logstash reads hydrometry forward on it, because a
-# reading's own ts can be a day or a week behind rows already read.
-SCHEMA_SQL = (
-    "ALTER TABLE twin.hydrometry ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()",
-    "CREATE INDEX IF NOT EXISTS hydrometry_ingested_at_idx ON twin.hydrometry (ingested_at)",
-)
-
-
-def ensure_schema() -> None:
-    try:
-        with psycopg.connect(DSN) as conn:
-            for sql in SCHEMA_SQL:
-                conn.execute(sql)
-    except Exception as exc:
-        print(f"  ! could not add twin.hydrometry.ingested_at: {exc}")
-
-
 def stored_latest() -> dict[tuple[str, str], datetime]:
     """Latest stored reading per (site, variable name), to resume from."""
     with psycopg.connect(DSN) as conn:
         rows = conn.execute(
-            """SELECT site_id, variable, max(ts) FROM twin.hydrometry
-               WHERE ts > now() - make_interval(secs => %s) AND NOT is_synthetic
+            """SELECT site_id, variable, max(event_ts) FROM twin.hydrometry
+               WHERE event_ts > now() - make_interval(secs => %s) AND NOT is_synthetic
                GROUP BY site_id, variable""",
             (MAX_AGE_DAYS * 86400,),
         ).fetchall()
@@ -172,7 +155,7 @@ def parse_timeseries(payload: dict, site: str, variable: str) -> list[dict]:
         for point in trace.get("trace") or []:
             raw_t = str(point.get("t"))
             try:
-                ts = datetime.strptime(raw_t, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+                ts = iso_z(datetime.strptime(raw_t, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc))
             except ValueError:
                 continue
             out.append(
@@ -224,7 +207,7 @@ def kiwis_records(points: list[tuple[datetime, float]], site: str, var_name: str
             "value": value,
             "quality_code": "",
             "provider": PROVIDER,
-            "event_ts": ts.astimezone(timezone.utc).isoformat(),
+            "event_ts": iso_z(ts),
         }
         for ts, value in points
     ]
@@ -500,7 +483,6 @@ def main() -> int:
         print(json.dumps(parse_timeseries(payload, site, args.variable)[:5], indent=2))
         return 0
 
-    ensure_schema()
     producer = make_producer()
     poll_forever(publish, INTERVAL_S, "hydrometry")
     return 0

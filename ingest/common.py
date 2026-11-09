@@ -36,9 +36,18 @@ def make_producer() -> KafkaProducer:
     )
 
 
+def iso_z(when: datetime) -> str:
+    """UTC with a trailing Z, the one form Flink's ISO-8601 reader accepts
+    (a +00:00 offset reads as NULL). Used for every timestamp a feed publishes."""
+    return when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def envelope(source: str, payload: dict, event_ts: str | None = None) -> dict:
-    """Every real feed carries the same wrapper as the synthetic ones."""
-    now = datetime.now(timezone.utc).isoformat()
+    """Every real feed carries the same wrapper as the synthetic ones.
+
+    ingest_ts is when this process received the reading and event_ts when the
+    source measured it; Flink dates the stored row by event_ts."""
+    now = iso_z(datetime.now(timezone.utc))
     return {
         "source": source,
         "ingest_ts": now,
