@@ -20,9 +20,6 @@ CREATE TABLE twin.hydrometry (
     -- or more after their own event_ts.
     ingest_ts    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-SELECT create_hypertable('twin.hydrometry', 'event_ts', chunk_time_interval => INTERVAL '7 days');
-CREATE UNIQUE INDEX hydrometry_key ON twin.hydrometry (site_id, variable, event_ts);
-CREATE INDEX hydrometry_ingest_ts_idx ON twin.hydrometry (ingest_ts);
 
 -- Real: daily storage volumes (batch loaded by ingest/storage_poller.py;
 -- station_no joins ref.storage_site)
@@ -49,9 +46,6 @@ CREATE TABLE twin.meter_reading (
     is_synthetic BOOLEAN     DEFAULT true,
     ingest_ts    TIMESTAMPTZ DEFAULT now()
 );
-SELECT create_hypertable('twin.meter_reading', 'event_ts', chunk_time_interval => INTERVAL '1 day');
-CREATE UNIQUE INDEX meter_reading_key ON twin.meter_reading (meter_id, event_ts);
-CREATE INDEX ON twin.meter_reading (dma_id, event_ts DESC);
 
 -- Datagen's own event_ts is a counter, not a time, so until the truth-network
 -- generator (HDH-124) emits real ones, event_ts here is the Kafka arrival time
@@ -65,7 +59,21 @@ CREATE TABLE twin.pressure_reading (
     is_synthetic BOOLEAN     DEFAULT true,
     ingest_ts    TIMESTAMPTZ DEFAULT now()
 );
-SELECT create_hypertable('twin.pressure_reading', 'event_ts', chunk_time_interval => INTERVAL '1 day');
+
+-- The three streaming tables share one time column, so one statement makes them
+-- hypertables. The unique indexes carry event_ts because a hypertable's unique
+-- index must include its partition column.
+SELECT create_hypertable(v.tbl, 'event_ts', chunk_time_interval => v.chunk)
+FROM (
+    VALUES
+    ('twin.hydrometry', INTERVAL '7 days'),
+    ('twin.meter_reading', INTERVAL '1 day'),
+    ('twin.pressure_reading', INTERVAL '1 day')
+) AS v (tbl, chunk);
+CREATE UNIQUE INDEX hydrometry_key ON twin.hydrometry (site_id, variable, event_ts);
+CREATE INDEX hydrometry_ingest_ts_idx ON twin.hydrometry (ingest_ts);
+CREATE UNIQUE INDEX meter_reading_key ON twin.meter_reading (meter_id, event_ts);
+CREATE INDEX ON twin.meter_reading (dma_id, event_ts DESC);
 CREATE UNIQUE INDEX pressure_reading_key ON twin.pressure_reading (logger_id, event_ts);
 CREATE INDEX ON twin.pressure_reading (dma_id, event_ts DESC);
 
