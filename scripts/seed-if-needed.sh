@@ -32,7 +32,7 @@ done
 age_of() {
   local table=$1
   docker exec weave-postgres psql -U weave -d weave_twin -Atc \
-    "SELECT COALESCE(EXTRACT(EPOCH FROM now() - max(ts))::bigint::text, 'none') FROM twin.${table}"
+    "SELECT COALESCE(EXTRACT(EPOCH FROM now() - max(event_ts))::bigint::text, 'none') FROM twin.${table}"
 }
 
 needs_seed() { # $1 = table; prints the reason and returns 0 when seeding is due

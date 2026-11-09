@@ -3,21 +3,23 @@
 -- carries is_synthetic, so no analysis can silently mix them.
 
 -- ================================================== WATER: real hydrometry
+-- Every telemetry table below carries two times. event_ts is when the thing was
+-- measured, taken from the source; ingest_ts is when the row reached this
+-- database (the column default, so a sink never writes it and a replayed row
+-- keeps its first arrival). ingest_ts - event_ts is the delay of the feed.
+-- The key is the source's identity plus event_ts, so a replay is an upsert.
 CREATE TABLE twin.hydrometry (
-    ts           TIMESTAMPTZ NOT NULL,
+    event_ts     TIMESTAMPTZ NOT NULL,
     site_id      TEXT        NOT NULL,
     variable     TEXT        NOT NULL,   -- flow_cumecs | level_m | rainfall_mm
     value        DOUBLE PRECISION,
     quality_code TEXT,
     provider     TEXT,
     is_synthetic BOOLEAN     DEFAULT false,
-    -- When the row arrived. Logstash reads forward on it, because a portal's
-    -- readings arrive a day or more after their own ts.
-    ingested_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- Logstash reads forward on it, because a portal's readings arrive a day
+    -- or more after their own event_ts.
+    ingest_ts    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-SELECT create_hypertable('twin.hydrometry', 'ts', chunk_time_interval => INTERVAL '7 days');
-CREATE INDEX ON twin.hydrometry (site_id, variable, ts DESC);
-CREATE INDEX hydrometry_ingested_at_idx ON twin.hydrometry (ingested_at);
 
 -- Real: daily storage volumes (batch loaded by ingest/storage_poller.py;
 -- station_no joins ref.storage_site)
@@ -35,28 +37,45 @@ CREATE INDEX storage_level_station_idx ON twin.storage_level (station_no, ts DES
 
 -- ============================================= WATER: synthetic meter data
 CREATE TABLE twin.meter_reading (
-    ts           TIMESTAMPTZ NOT NULL,
+    event_ts     TIMESTAMPTZ NOT NULL,
     meter_id     TEXT        NOT NULL,
     dma_id       TEXT,
     litres       DOUBLE PRECISION,
     flow_lpm     DOUBLE PRECISION,
     battery_pct  INTEGER,
-    is_synthetic BOOLEAN     DEFAULT true
+    is_synthetic BOOLEAN     DEFAULT true,
+    ingest_ts    TIMESTAMPTZ DEFAULT now()
 );
-SELECT create_hypertable('twin.meter_reading', 'ts', chunk_time_interval => INTERVAL '1 day');
-CREATE INDEX ON twin.meter_reading (dma_id, ts DESC);
-CREATE INDEX ON twin.meter_reading (meter_id, ts DESC);
 
+-- Datagen's own event_ts is a counter, not a time, so until the truth-network
+-- generator (HDH-124) emits real ones, event_ts here is the Kafka arrival time
+-- and ingest_ts - event_ts only measures the sink's latency.
 CREATE TABLE twin.pressure_reading (
-    ts           TIMESTAMPTZ NOT NULL,
+    event_ts     TIMESTAMPTZ NOT NULL,
     logger_id    TEXT        NOT NULL,
     dma_id       TEXT,
     pressure_m   DOUBLE PRECISION,
     flow_ls      DOUBLE PRECISION,
-    is_synthetic BOOLEAN     DEFAULT true
+    is_synthetic BOOLEAN     DEFAULT true,
+    ingest_ts    TIMESTAMPTZ DEFAULT now()
 );
-SELECT create_hypertable('twin.pressure_reading', 'ts', chunk_time_interval => INTERVAL '1 day');
-CREATE INDEX ON twin.pressure_reading (dma_id, ts DESC);
+
+-- The three streaming tables share one time column, so one statement makes them
+-- hypertables. The unique indexes carry event_ts because a hypertable's unique
+-- index must include its partition column.
+SELECT create_hypertable(v.tbl, 'event_ts', chunk_time_interval => v.chunk)
+FROM (
+    VALUES
+    ('twin.hydrometry', INTERVAL '7 days'),
+    ('twin.meter_reading', INTERVAL '1 day'),
+    ('twin.pressure_reading', INTERVAL '1 day')
+) AS v (tbl, chunk);
+CREATE UNIQUE INDEX hydrometry_key ON twin.hydrometry (site_id, variable, event_ts);
+CREATE INDEX hydrometry_ingest_ts_idx ON twin.hydrometry (ingest_ts);
+CREATE UNIQUE INDEX meter_reading_key ON twin.meter_reading (meter_id, event_ts);
+CREATE INDEX ON twin.meter_reading (dma_id, event_ts DESC);
+CREATE UNIQUE INDEX pressure_reading_key ON twin.pressure_reading (logger_id, event_ts);
+CREATE INDEX ON twin.pressure_reading (dma_id, event_ts DESC);
 
 -- Ranges of the two tables above that ingest/backfill.py drew after a gap, which
 -- is_synthetic alone can't show. The console marks them; Logstash re-reads them.

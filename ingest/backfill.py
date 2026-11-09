@@ -10,7 +10,7 @@ Only closed gaps are filled, meaning one with a live row after it. A gap still
 open at the present can't be told apart from a broken pipeline, and filling it
 would make a dead feed look fresh. The closing row also proves where the gap
 ends, so nothing overlaps live data and a filled gap is no longer a gap, which
-is what makes a re-run safe on tables with no key to deduplicate on.
+is what keeps a re-run from refilling it; the readings' keys would refuse a repeat only by failing the gap.
 
 Rows go straight to Postgres, as ingest/storage_poller.py's do. Through Kafka
 they would pass the bronze sinks, but the DMA balance's windows have already
@@ -82,17 +82,17 @@ RECOMPUTE_BALANCE = """
     INSERT INTO twin.dma_balance (window_start, dma_id, consumption_l, min_pressure_m, meter_count)
     SELECT m.window_start, m.dma_id, m.consumption_l, p.min_pressure_m, m.meter_count
     FROM (
-        SELECT time_bucket('15 minutes', ts) AS window_start, dma_id,
+        SELECT time_bucket('15 minutes', event_ts) AS window_start, dma_id,
                sum(litres) AS consumption_l, count(DISTINCT meter_id) AS meter_count
         FROM twin.meter_reading
-        WHERE ts >= %(lo)s AND ts < %(hi)s
+        WHERE event_ts >= %(lo)s AND event_ts < %(hi)s
         GROUP BY 1, 2
     ) m
     LEFT JOIN (
-        SELECT time_bucket('15 minutes', ts) AS window_start, dma_id,
+        SELECT time_bucket('15 minutes', event_ts) AS window_start, dma_id,
                min(pressure_m) AS min_pressure_m
         FROM twin.pressure_reading
-        WHERE ts >= %(lo)s AND ts < %(hi)s
+        WHERE event_ts >= %(lo)s AND event_ts < %(hi)s
         GROUP BY 1, 2
     ) p USING (window_start, dma_id)
     ON CONFLICT (window_start, dma_id) DO UPDATE
@@ -184,7 +184,8 @@ def recent_buckets(cur, table: str, since: datetime) -> list[datetime]:
     # One-minute buckets because the rows of one meter run land over a moment,
     # and they must count as one point in time.
     cur.execute(
-        f"SELECT DISTINCT time_bucket('1 minute', ts) AS t FROM twin.{table} " "WHERE ts >= %s ORDER BY t", (since,)
+        f"SELECT DISTINCT time_bucket('1 minute', event_ts) AS t FROM twin.{table} " "WHERE event_ts >= %s ORDER BY t",
+        (since,),
     )
     return [row[0] for row in cur.fetchall()]
 
@@ -232,7 +233,7 @@ def fill_meters(conn, gaps) -> int:
         total += write_fill(
             conn,
             "meter_reading",
-            "ts, meter_id, dma_id, litres, flow_lpm, battery_pct, is_synthetic",
+            "event_ts, meter_id, dma_id, litres, flow_lpm, battery_pct, is_synthetic",
             meter_rows(meters, ends),
             gap,
             METER_METHOD,
@@ -248,7 +249,7 @@ def fill_pressure(conn, gaps, spec: PressureSpec) -> int:
         total += write_fill(
             conn,
             "pressure_reading",
-            "ts, logger_id, dma_id, pressure_m, flow_ls, is_synthetic",
+            "event_ts, logger_id, dma_id, pressure_m, flow_ls, is_synthetic",
             pressure_rows(spec, start, gap[1]),
             gap,
             PRESSURE_METHOD,
@@ -262,8 +263,9 @@ def run_once(since: dict[str, datetime]) -> int:
     whole window.
 
     The container's loop and a manual --once (the console's Fill telemetry
-    gaps) would otherwise both find the same gap and write it twice, and the
-    readings have no key to stop it. The lock is per session, so it goes when
+    gaps) would otherwise both find the same gap and fill it twice. The
+    readings' keys would refuse the second copy, but only by failing the
+    whole gap's transaction, so the lock avoids that. It is per session, so it goes when
     the connection closes, and a skipped pass leaves `since` where it was.
     """
     with psycopg.connect(DSN, autocommit=True) as lock:

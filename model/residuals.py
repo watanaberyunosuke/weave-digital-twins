@@ -53,8 +53,8 @@ RESIDUALS_SQL = """
     WITH observed AS (
         SELECT pr.dma_id, avg(pr.pressure_m) AS observed
         FROM twin.pressure_reading pr
-        WHERE pr.ts > %(as_of)s - interval '30 minutes'
-          AND pr.ts <= %(as_of)s
+        WHERE pr.event_ts > %(as_of)s - interval '30 minutes'
+          AND pr.event_ts <= %(as_of)s
         GROUP BY pr.dma_id
     ),
     modelled AS (

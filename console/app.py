@@ -117,12 +117,13 @@ TOPICS = [
 # Telemetry tables and the column that dates a row. The origin label is shown
 # beside each so the page never presents synthetic data as observed.
 # twin.sim_result is left out for the same reason Logstash skips it: volume,
-# and no index on ts.
+# and no index on ts. The three streaming tables are dated by event_ts, when the
+# source measured the reading (their ingest_ts is when it reached the database).
 TELEMETRY = [
-    ("hydrometry", "ts", "real"),
+    ("hydrometry", "event_ts", "real"),
     ("storage_level", "ts", "real"),
-    ("meter_reading", "ts", "synthetic"),
-    ("pressure_reading", "ts", "synthetic"),
+    ("meter_reading", "event_ts", "synthetic"),
+    ("pressure_reading", "event_ts", "synthetic"),
     ("dma_balance", "window_start", "derived"),
     ("sim_residual", "ts", "model"),
 ]
@@ -1100,9 +1101,9 @@ def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168
         info = {k: v for k, v in info[0].items() if k != "geom"}
         latest = query(
             f"""
-            SELECT ts, {", ".join(cols)} FROM {readings}
-            WHERE {id_col} = %(id)s AND ts > now() - make_interval(hours => %(h)s)
-            ORDER BY ts DESC LIMIT 1
+            SELECT event_ts AS ts, {", ".join(cols)} FROM {readings}
+            WHERE {id_col} = %(id)s AND event_ts > now() - make_interval(hours => %(h)s)
+            ORDER BY event_ts DESC LIMIT 1
         """,
             {"id": device_id, "h": hours},
         )
@@ -1115,10 +1116,10 @@ def device_detail(kind: str, device_id: str, hours: int = Query(24, ge=1, le=168
         )
         series = query(
             f"""
-            SELECT date_bin('15 minutes', ts, TIMESTAMPTZ '2000-01-01') AS ts,
+            SELECT date_bin('15 minutes', event_ts, TIMESTAMPTZ '2000-01-01') AS ts,
                    {bucket}, count(*) AS readings
             FROM {readings}
-            WHERE {id_col} = %(id)s AND ts > now() - make_interval(hours => %(h)s)
+            WHERE {id_col} = %(id)s AND event_ts > now() - make_interval(hours => %(h)s)
             GROUP BY 1 ORDER BY 1
         """,
             {"id": device_id, "h": hours},
@@ -1237,23 +1238,23 @@ def feeds(hours: int = Query(24, ge=1, le=168)):
             "hydrometry_latest": query("""
             SELECT DISTINCT ON (h.site_id, h.variable)
                    h.site_id, s.site_name, h.variable, h.value, h.quality_code,
-                   h.provider, h.ts, h.is_synthetic
+                   h.provider, h.event_ts AS ts, h.is_synthetic
             FROM twin.hydrometry h LEFT JOIN ref.hydrometry_site s USING (site_id)
-            WHERE h.ts > now() - interval '7 days'
-            ORDER BY h.site_id, h.variable, h.ts DESC
+            WHERE h.event_ts > now() - interval '7 days'
+            ORDER BY h.site_id, h.variable, h.event_ts DESC
         """),
             "hydrometry_series": query(
                 """
             WITH latest AS (
-                SELECT site_id, variable, max(ts) AS ts
+                SELECT site_id, variable, max(event_ts) AS latest_ts
                 FROM twin.hydrometry
-                WHERE ts > now() - interval '7 days'
+                WHERE event_ts > now() - interval '7 days'
                 GROUP BY site_id, variable
             )
-            SELECT h.site_id, h.variable, h.ts, h.value
+            SELECT h.site_id, h.variable, h.event_ts AS ts, h.value
             FROM twin.hydrometry h JOIN latest l USING (site_id, variable)
-            WHERE h.ts > l.ts - %s::interval
-            ORDER BY h.site_id, h.variable, h.ts
+            WHERE h.event_ts > l.latest_ts - %s::interval
+            ORDER BY h.site_id, h.variable, h.event_ts
         """,
                 (window,),
             ),

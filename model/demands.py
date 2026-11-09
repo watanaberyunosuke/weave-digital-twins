@@ -25,8 +25,8 @@ METER_FLOWS_SQL = """
                   ORDER BY geom <-> wm.geom, node_id LIMIT 1) n ON true
     LEFT JOIN twin.meter_reading m
            ON m.meter_id = wm.meter_id
-          AND m.ts > %(as_of)s - %(window)s::interval
-          AND m.ts <= %(as_of)s
+          AND m.event_ts > %(as_of)s - %(window)s::interval
+          AND m.event_ts <= %(as_of)s
           AND m.flow_lpm >= 0
     GROUP BY wm.meter_id, n.node_id
 """
