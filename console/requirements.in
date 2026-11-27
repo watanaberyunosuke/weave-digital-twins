@@ -2,5 +2,5 @@ fastapi==0.163.2
 uvicorn==0.54.0
 httpx==0.28.1
 psycopg[binary]==3.3.9
-PyYAML==6.0.3
+PyYAML==6.0.4
 kafka-python-ng==2.2.3
